@@ -3,7 +3,9 @@ import io
 import os
 from PIL import Image, UnidentifiedImageError
 
+from auth import require_auth, is_auth_enabled, AUTH_TYPE, ADMIN_PASSWORD, OIDC_ISSUER, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_CALLBACK_URL
 app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY', os.urandom(32))
 DATA_FOLDER = os.environ.get('DATA_FOLDER', '/data')
 THUMBNAIL_CACHE_DIR = os.path.join(DATA_FOLDER, '.thumb_cache')
 THUMBNAIL_SIZE = (400, 400)
@@ -491,6 +493,16 @@ PROTECTED_ROUTES = ['/', '/view', '/thumb']
 
 @app.before_request
 def check_auth():
+    """Require auth for browsing routes"""
+    if not is_auth_enabled():
+        return
+    if request.path.startswith("/view/") or request.path.startswith("/thumb/"):
+        return
+    if request.path in ["/login", "/auth", "/auth/oidc/callback", "/logout"]:
+        return
+    if session.get("authenticated"):
+        return
+    return redirect("/login")
     """Require auth for browsing, but allow image access"""
     # Skip auth for API routes and direct image paths
     if request.path.startswith('/view/') or request.path.startswith('/thumb/'):
@@ -509,3 +521,47 @@ def check_auth():
         # Redirect to login for protected routes
         if request.path == '/':
             return redirect('/login')
+
+# Login page
+LOGIN_HTML = '''
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login - Miso Gallery</title>
+    <style>
+        body { background: #0d0d0d; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; }
+        .login { background: #1a1a1a; padding: 40px; border-radius: 10px; text-align: center; }
+        input { padding: 10px; margin: 10px 0; width: 200px; border-radius: 5px; border: 1px solid #333; background: #0d0d0d; color: #e0e0e0; }
+        button { padding: 10px 20px; margin: 5px; background: linear-gradient(135deg, #f5a623, #f76c1c); border: none; border-radius: 5px; color: white; cursor: pointer; }
+        .oidc-btn { background: #3b82f6; }
+    </style>
+</head>
+<body>
+    <div class="login">
+        <h1>🍲 Miso Gallery</h1>
+        <form action="/auth" method="POST">
+            <input type="password" name="password" placeholder="Password"><br>
+            <button type="submit">Login</button>
+        </form>
+    </div>
+</body>
+</html>
+'''
+
+@app.route('/login')
+def login():
+    return LOGIN_HTML
+
+@app.route('/auth', methods=['POST'])
+def auth():
+    password = request.form.get('password', '')
+    if password == ADMIN_PASSWORD:
+        session['authenticated'] = True
+        return redirect('/')
+    flash('Invalid password')
+    return redirect('/login')
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect('/login')
