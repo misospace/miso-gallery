@@ -482,3 +482,30 @@ def format_size(size):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
+
+# Auth config
+ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
+
+# Routes that require auth
+PROTECTED_ROUTES = ['/', '/view', '/thumb']
+
+@app.before_request
+def check_auth():
+    """Require auth for browsing, but allow image access"""
+    # Skip auth for API routes and direct image paths
+    if request.path.startswith('/view/') or request.path.startswith('/thumb/'):
+        return
+    
+    # Skip auth if no password configured
+    if not ADMIN_PASSWORD:
+        return
+    
+    # Check session for auth
+    if request.path in ['/login', '/auth']:
+        return
+    
+    # Check if authenticated
+    if not session.get('authenticated'):
+        # Redirect to login for protected routes
+        if request.path == '/':
+            return redirect('/login')
