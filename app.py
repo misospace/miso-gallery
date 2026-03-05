@@ -337,7 +337,7 @@ def check_auth():
     if request.path.startswith("/view/") or request.path.startswith("/thumb/") or request.path == "/favicon.ico":
         return None
 
-    if request.path in ["/login", "/auth", "/logout"]:
+    if request.path in ["/login", "/auth", "/logout", "/auth/oidc", "/auth/oidc/callback"]:
         return None
 
     if session.get("authenticated"):
