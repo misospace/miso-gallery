@@ -1,55 +1,73 @@
-"""
-Authentication module for Miso Gallery
+"""Authentication helpers for Miso Gallery."""
 
-Supports multiple auth methods:
-1. No auth (default)
-2. Local password auth
-3. OIDC via Authentik or other providers
-
-Environment Variables:
----------------------
-# Auth method selection
-AUTH_TYPE=local|oidc|none  (default: local)
-
-# Local auth
-ADMIN_PASSWORD=your-password
-
-# OIDC auth (if AUTH_TYPE=oidc)
-OIDC_ISSUER=https://authentik.yourdomain.com
-OIDC_CLIENT_ID=miso-gallery
-OIDC_CLIENT_SECRET=your-client-secret
-OIDC_CALLBACK_URL=https://miso-gallery.yourdomain.com/auth/callback
-
-# Flask secret key (required for sessions)
-SECRET_KEY=random-string
-"""
+from __future__ import annotations
 
 import os
 from functools import wraps
-from flask import session, redirect, url_for, request, flash
+from typing import Literal
 
-# Config
-AUTH_TYPE = os.environ.get('AUTH_TYPE', 'local').lower()
-ADMIN_PASSWORD = os.environ.get('ADMIN_PASSWORD', '')
-SECRET_KEY = os.environ.get('SECRET_KEY', os.urandom(32))
+from flask import redirect, request, session, url_for
+from werkzeug.security import check_password_hash
 
-# OIDC Config
-OIDC_ISSUER = os.environ.get('OIDC_ISSUER', '')
-OIDC_CLIENT_ID = os.environ.get('OIDC_CLIENT_ID', '')
-OIDC_CLIENT_SECRET = os.environ.get('OIDC_CLIENT_SECRET', '')
-OIDC_CALLBACK_URL = os.environ.get('OIDC_CALLBACK_URL', '')
+AuthMode = Literal["none", "local", "oidc"]
 
-def is_auth_enabled():
-    """Check if any auth is enabled"""
-    return AUTH_TYPE in ('local', 'oidc') or bool(ADMIN_PASSWORD)
+AUTH_TYPE = os.environ.get("AUTH_TYPE", "local").strip().lower()
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
 
-def require_auth(f):
-    """Decorator to require authentication"""
-    @wraps(f)
-    def decorated(*args, **kwargs):
+OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "").strip()
+OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "").strip()
+OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "").strip()
+OIDC_CALLBACK_URL = os.environ.get("OIDC_CALLBACK_URL", "").strip()
+
+
+def resolved_auth_mode() -> AuthMode:
+    """Resolve effective auth mode based on configured env vars."""
+    if AUTH_TYPE == "none":
+        return "none"
+
+    if AUTH_TYPE == "oidc":
+        if OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET and OIDC_CALLBACK_URL:
+            return "oidc"
+        # Invalid OIDC config falls back to none to avoid lockouts
+        return "none"
+
+    # default/local
+    if ADMIN_PASSWORD:
+        return "local"
+    return "none"
+
+
+def is_auth_enabled() -> bool:
+    return resolved_auth_mode() != "none"
+
+
+def is_authenticated() -> bool:
+    return bool(session.get("authenticated"))
+
+
+def verify_local_password(password: str) -> bool:
+    """Verify local password.
+
+    Supports plaintext and hashed formats for migration:
+    - plaintext: ADMIN_PASSWORD=mysecret
+    - hashed: ADMIN_PASSWORD=pbkdf2:sha256:... or scrypt:...
+    """
+    if not ADMIN_PASSWORD:
+        return False
+
+    stored = ADMIN_PASSWORD
+    if stored.startswith(("pbkdf2:", "scrypt:")):
+        return check_password_hash(stored, password)
+    return password == stored
+
+
+def require_auth(view_fn):
+    @wraps(view_fn)
+    def wrapper(*args, **kwargs):
         if not is_auth_enabled():
-            return f(*args, **kwargs)
-        if session.get('authenticated'):
-            return f(*args, **kwargs)
-        return redirect(url_for('login'))
-    return decorated
+            return view_fn(*args, **kwargs)
+        if is_authenticated():
+            return view_fn(*args, **kwargs)
+        return redirect(url_for("login", next=request.path))
+
+    return wrapper

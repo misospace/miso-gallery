@@ -83,7 +83,7 @@ docker run -d \
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `AUTH_TYPE` | No | `local` | Auth method: `local`, `oidc`, or `none` |
-| `ADMIN_PASSWORD` | If local | - | Password for local auth |
+| `ADMIN_PASSWORD` | If local | - | Password for local auth (plaintext or Werkzeug hash: `pbkdf2:` / `scrypt:`) |
 | `SECRET_KEY` | If OIDC | random | Flask secret for sessions |
 | `OIDC_ISSUER` | If OIDC | - | OIDC provider URL (e.g., https://authentik.example.com) |
 | `OIDC_CLIENT_ID` | If OIDC | - | OIDC client ID |

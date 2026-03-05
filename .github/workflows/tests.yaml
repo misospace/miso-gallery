@@ -41,14 +41,26 @@ jobs:
           img.save('/tmp/test_images/test.png')
           "
 
+      - name: Build test image
+        run: docker build -t miso-gallery:test .
+
       - name: Run container
         run: |
-          docker run -d --name gallery -p 5000:5000 -v /tmp/test_images:/data ghcr.io/${{ github.repository }}:latest || true
+          docker run -d --name gallery -p 5000:5000 -v /tmp/test_images:/data miso-gallery:test
           sleep 5
 
-      - name: Run tests
+      - name: Wait for app and run smoke test
         run: |
-          sleep 2
+          for i in $(seq 1 20); do
+            if curl -fsS http://localhost:5000/ >/dev/null; then
+              echo "App is up"
+              break
+            fi
+            echo "Waiting for app... ($i/20)"
+            sleep 1
+          done
+          docker ps -a
+          docker logs gallery || true
           curl -f http://localhost:5000/ || exit 1
 
       - name: Cleanup
