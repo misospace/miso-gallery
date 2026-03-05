@@ -26,6 +26,7 @@ from auth import (
     verify_local_password,
 )
 from security import add_security_headers, csrf_token, rate_limit, sanitize_path, validate_csrf
+from trash import empty_trash, list_trash, move_to_trash, purge_old_trash, restore_from_trash
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
@@ -84,6 +85,7 @@ HTML_TEMPLATE = """
       <a class="refresh-btn" href="{{ parent_url }}" title="Go up one level">← Back</a>
       {% endif %}
       <div class="breadcrumb">{{ breadcrumb|safe }}</div>
+      <a class="refresh-btn" href="/trash" title="Open trash bin">🗑️ Trash</a>
       <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
     </div>
   </header>
@@ -162,6 +164,47 @@ LOGIN_TEMPLATE = """
     <button type="submit">Login</button>
   </form>
   {% endif %}
+</div></body></html>
+"""
+
+TRASH_TEMPLATE = """
+<!DOCTYPE html>
+<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>Trash - Miso Gallery</title>
+<style>
+ body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
+ .wrap{max-width:1000px;margin:0 auto;padding:24px}
+ a{color:#f5a623;text-decoration:none}
+ table{width:100%;border-collapse:collapse;margin-top:16px}
+ th,td{padding:10px;border-bottom:1px solid #333;text-align:left}
+ button{padding:8px 12px;border-radius:6px;border:1px solid #444;background:#222;color:#eee;cursor:pointer}
+ .danger{background:#8b1e2b;border-color:#b91c1c}
+</style></head>
+<body><div class=\"wrap\">
+  <h2>🗑️ Trash</h2>
+  <p><a href=\"/\">← Back to Gallery</a></p>
+  <form method=\"POST\" action=\"/trash/empty\" onsubmit=\"return confirm('Permanently delete all trashed items?')\">
+    <input type=\"hidden\" name=\"csrf_token\" value=\"{{ csrf }}\">
+    <button class=\"danger\" type=\"submit\">Empty Trash</button>
+  </form>
+  <table>
+    <thead><tr><th>File</th><th>Original Path</th><th>Deleted At</th><th>Size</th><th>Action</th></tr></thead>
+    <tbody>
+    {% for item in items %}
+      <tr>
+        <td>{{ item.name }}</td>
+        <td>{{ item.original }}</td>
+        <td>{{ item.deleted_at }}</td>
+        <td>{{ item.size }}</td>
+        <td>
+          <form method=\"POST\" action=\"/trash/restore/{{ item.name }}\" style=\"display:inline\">
+            <input type=\"hidden\" name=\"csrf_token\" value=\"{{ csrf }}\">
+            <button type=\"submit\">Restore</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
 </div></body></html>
 """
 
@@ -252,7 +295,7 @@ def index(subpath: str = ""):
     stats = {"folders": 0, "images": 0}
 
     for item in sorted(folder_path.iterdir(), key=lambda p: p.name.lower()):
-        if item.name == ".thumb_cache":
+        if item.name in {".thumb_cache", ".trash"}:
             continue
 
         rel_path = f"{safe_subpath}/{item.name}".lstrip("/") if safe_subpath else item.name
@@ -340,8 +383,8 @@ def delete(filename: str):
     rel_path = sanitize_rel_path(filename)
     file_path = source_file_path(rel_path)
     if file_path.exists() and file_path.is_file():
-        file_path.unlink()
-        remove_thumbnail_cache_for(rel_path)
+        if move_to_trash(file_path, DATA_FOLDER):
+            remove_thumbnail_cache_for(rel_path)
 
     folder = os.path.dirname(rel_path)
     return redirect(url_for("index", subpath=folder if folder else ""))
@@ -363,10 +406,53 @@ def bulk_delete():
         safe_rel_path = sanitize_rel_path(rel_path)
         file_path = source_file_path(safe_rel_path)
         if file_path.exists() and file_path.is_file():
-            file_path.unlink()
-            remove_thumbnail_cache_for(safe_rel_path)
+            if move_to_trash(file_path, DATA_FOLDER):
+                remove_thumbnail_cache_for(safe_rel_path)
 
     return redirect(url_for("index", subpath=current_subpath))
+
+
+@app.route("/trash")
+@require_auth
+@rate_limit(max_requests=30, window=60)
+def trash_view():
+    items = list_trash(DATA_FOLDER)
+    return render_template_string(TRASH_TEMPLATE, items=items, csrf=csrf_token())
+
+
+@app.route("/trash/restore/<path:item_name>", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=20, window=60)
+def trash_restore(item_name: str):
+    if not validate_csrf(request.form.get("csrf_token")):
+        return {"error": "Invalid CSRF token"}, 403
+    restore_from_trash(item_name, DATA_FOLDER)
+    return redirect(url_for("trash_view"))
+
+
+@app.route("/trash/empty", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=5, window=60)
+def trash_empty():
+    if not validate_csrf(request.form.get("csrf_token")):
+        return {"error": "Invalid CSRF token"}, 403
+    empty_trash(DATA_FOLDER)
+    return redirect(url_for("trash_view"))
+
+
+@app.route("/trash/purge", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=5, window=60)
+def trash_purge():
+    if not validate_csrf(request.form.get("csrf_token")):
+        return {"error": "Invalid CSRF token"}, 403
+    days = request.form.get("days", "30")
+    try:
+        retention_days = max(1, min(3650, int(days)))
+    except ValueError:
+        retention_days = 30
+    purge_old_trash(DATA_FOLDER, retention_days)
+    return redirect(url_for("trash_view"))
 
 
 @app.route("/login")
