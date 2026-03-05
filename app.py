@@ -86,6 +86,7 @@ HTML_TEMPLATE = """
       {% endif %}
       <div class="breadcrumb">{{ breadcrumb|safe }}</div>
       <a class="refresh-btn" href="/trash" title="Open trash bin">🗑️ Trash</a>
+      <a class="refresh-btn" href="/recent" title="Recent uploads">📅 Recent</a>
       <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
     </div>
   </header>
@@ -206,6 +207,60 @@ TRASH_TEMPLATE = """
     </tbody>
   </table>
 </div></body></html>
+"""
+
+RECENT_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Recent - Miso Gallery</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background:#0d0d0d; color:#e0e0e0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; min-height:100vh; }
+    header { background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%); padding:20px 30px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; gap:12px; flex-wrap:wrap; }
+    h1 { font-size:1.5rem; background:linear-gradient(90deg,#f5a623,#f76c1c); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+    .header-actions { display:flex; align-items:center; gap:10px; margin-left:auto; }
+    .refresh-btn { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:8px; padding:8px 12px; font-size:0.9rem; cursor:pointer; text-decoration:none; }
+    .container { padding:20px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
+    .image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; }
+    .image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
+    .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
+    .image-info { padding:10px; font-size:.8rem; color:#888; }
+    .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .image-date { color:#666; font-size:.75rem; margin-top:4px; }
+    .empty { text-align:center; padding:50px; color:#666; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>🍲 Recent</h1>
+  <div class="header-actions">
+    <a href="/" class="refresh-btn">← Gallery</a>
+  </div>
+</header>
+<div class="container">
+  <h2 style="margin-bottom:20px;font-size:1.2rem;color:#888;">Recently Added ({{ items|length }})</h2>
+  {% if items %}
+    <div class="grid">
+    {% for item in items %}
+      <a href="{{ item.url }}" class="image-card" target="_blank">
+        <img src="{{ item.thumb }}" alt="{{ item.name }}">
+        <div class="image-info">
+          <div class="image-name">{{ item.name }}</div>
+          <div class="image-date">{{ item.added }}</div>
+        </div>
+      </a>
+    {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty">No recent images found</div>
+  {% endif %}
+</div>
+</body>
+</html>
 """
 
 
@@ -410,6 +465,60 @@ def bulk_delete():
                 remove_thumbnail_cache_for(safe_rel_path)
 
     return redirect(url_for("index", subpath=current_subpath))
+
+
+@app.route("/recent")
+@require_auth
+@rate_limit(max_requests=30, window=60)
+def recent_view():
+    """Show recently added images sorted by modification time (newest first)."""
+    import time
+
+    max_items = 50
+    images = []
+
+    def is_image(path: Path) -> bool:
+        return path.suffix.lower() in IMAGE_EXTENSIONS
+
+    try:
+        for item in DATA_FOLDER.rglob("*"):
+            if not item.is_file() or not is_image(item):
+                continue
+            if item.name.startswith("."):
+                continue
+            try:
+                mtime = item.stat().st_mtime
+            except OSError:
+                continue
+
+            rel_path = item.relative_to(DATA_FOLDER).as_posix()
+            thumb_name = f".thumb_cache/{rel_path}.webp"
+            thumb_path = DATA_FOLDER / thumb_name
+
+            if thumb_path.exists():
+                thumb_url = f"/thumb/{rel_path}.webp"
+            else:
+                thumb_url = f"/image/{rel_path}"
+
+            date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+
+            images.append({
+                "name": item.name,
+                "url": f"/image/{rel_path}",
+                "thumb": thumb_url,
+                "added": date_str,
+                "mtime": mtime,
+            })
+    except Exception:
+        pass
+
+    images.sort(key=lambda x: x["mtime"], reverse=True)
+    images = images[:max_items]
+
+    for img in images:
+        del img["mtime"]
+
+    return render_template_string(RECENT_TEMPLATE, items=images)
 
 
 @app.route("/trash")
