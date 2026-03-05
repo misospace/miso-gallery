@@ -80,6 +80,9 @@ HTML_TEMPLATE = """
   <header>
     <h1>🍲 Miso Gallery</h1>
     <div class="header-actions">
+      {% if parent_url %}
+      <a class="refresh-btn" href="{{ parent_url }}" title="Go up one level">← Back</a>
+      {% endif %}
       <div class="breadcrumb">{{ breadcrumb|safe }}</div>
       <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
     </div>
@@ -272,6 +275,7 @@ def index(subpath: str = ""):
                 }
             )
 
+    parent_url = None
     if safe_subpath:
         parts = safe_subpath.split("/")
         crumbs = ['<a href="/">Home</a>']
@@ -280,6 +284,9 @@ def index(subpath: str = ""):
             crumbs.append(f'<a href="/{path}">{part}</a>')
         crumbs.append(parts[-1])
         breadcrumb = " / ".join(crumbs)
+
+        parent_subpath = "/".join(parts[:-1])
+        parent_url = url_for("index", subpath=parent_subpath) if parent_subpath else url_for("index")
     else:
         breadcrumb = "All Images"
 
@@ -287,6 +294,7 @@ def index(subpath: str = ""):
         HTML_TEMPLATE,
         items=items,
         breadcrumb=breadcrumb,
+        parent_url=parent_url,
         stats=stats,
         current_subpath=safe_subpath,
         csrf=csrf_token(),
@@ -294,6 +302,7 @@ def index(subpath: str = ""):
 
 
 @app.route("/thumb/<path:filename>")
+@rate_limit(max_requests=120, window=60)
 def thumb(filename: str):
     rel_path = sanitize_rel_path(filename)
     source_path = source_file_path(rel_path)
