@@ -16,11 +16,11 @@ from flask import (
 from PIL import Image, UnidentifiedImageError
 
 from auth import (
-    OIDC_CALLBACK_URL,
-    OIDC_CLIENT_ID,
-    OIDC_CLIENT_SECRET,
-    OIDC_ISSUER,
+    configure_oauth,
+    get_oidc_label,
     is_auth_enabled,
+    is_oidc_configured,
+    oauth,
     require_auth,
     resolved_auth_mode,
     verify_local_password,
@@ -31,6 +31,9 @@ from trash import empty_trash, list_trash, move_to_trash, purge_old_trash, resto
 app = Flask(__name__)
 app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
 app.after_request(add_security_headers)
+
+# Configure OAuth for OIDC if enabled
+configure_oauth(app)
 
 DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
 THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
@@ -148,22 +151,35 @@ LOGIN_TEMPLATE = """
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Login - Miso Gallery</title>
 <style>
  body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
- .card{background:#1a1a1a;padding:32px;border-radius:10px;min-width:320px}
+ .card{background:#1a1a1a;padding:32px;border-radius:10px;min-width:320px;max-width:400px}
  input,button{width:100%;padding:10px;margin-top:10px;border-radius:6px;border:1px solid #333;background:#111;color:#eee}
  button{cursor:pointer;background:linear-gradient(135deg,#f5a623,#f76c1c);border:none}
- .muted{color:#999;font-size:.9rem;margin-top:8px}
+ button.oidc-btn{background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%);border:1px solid #4b4b75;color:#f5a623}
+ button.oidc-btn:hover{background:linear-gradient(135deg,#3f3f5f 0%,#344367 100%)}
+ .muted{color:#999;font-size:.9rem;margin-top:8px;text-align:center}
+ .divider{display:flex;align-items:center;text-align:center;color:#666;margin:20px 0}
+ .divider::before,.divider::after{content:'';flex:1;border-bottom:1px solid #333}
+ .divider::before{margin-right:10px}
+ .divider::after{margin-left:10px}
+ h2{margin-bottom:10px;text-align:center}
 </style></head>
 <body><div class="card">
   <h2>🍲 Miso Gallery</h2>
-  {% if mode == 'oidc' %}
-    <p class="muted">OIDC mode is configured but callback flow is not yet implemented.</p>
-    <p class="muted">Please switch to local auth temporarily.</p>
-  {% else %}
+  {% if oidc_enabled %}
+  <form method="GET" action="/auth/oidc">
+    <button type="submit" class="oidc-btn">Login with {{ oidc_label }}</button>
+  </form>
+  {% endif %}
+  {% if local_enabled %}
+  {% if oidc_enabled %}<div class="divider">or</div>{% endif %}
   <form method="POST" action="/auth">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
     <input type="password" name="password" placeholder="Password" required>
-    <button type="submit">Login</button>
+    <button type="submit">Login with Password</button>
   </form>
+  {% endif %}
+  {% if not oidc_enabled and not local_enabled %}
+  <p class="muted">No authentication method is configured.</p>
   {% endif %}
 </div></body></html>
 """
@@ -566,7 +582,17 @@ def trash_purge():
 
 @app.route("/login")
 def login():
-    return render_template_string(LOGIN_TEMPLATE, csrf=csrf_token(), mode=resolved_auth_mode())
+    mode = resolved_auth_mode()
+    # If OIDC-only mode, redirect directly to OIDC provider
+    if mode == "oidc" and not os.environ.get("ADMIN_PASSWORD"):
+        return redirect(url_for("oidc_login"))
+    return render_template_string(
+        LOGIN_TEMPLATE,
+        csrf=csrf_token(),
+        oidc_enabled=is_oidc_configured(),
+        local_enabled=bool(os.environ.get("ADMIN_PASSWORD")),
+        oidc_label=get_oidc_label(),
+    )
 
 
 @app.route("/auth", methods=["POST"])
@@ -590,6 +616,62 @@ def auth():
 def logout():
     session.clear()
     return redirect(url_for("login"))
+
+
+@app.route("/auth/oidc")
+def oidc_login():
+    """Initiate OIDC authentication flow."""
+    if not is_oidc_configured():
+        return redirect(url_for("login"))
+
+    # Store the return URL in session
+    next_url = request.args.get("next") or request.referrer or url_for("index")
+    session["oidc_next_url"] = next_url
+
+    # Get the callback URL
+    callback_url = os.environ.get("OIDC_CALLBACK_URL") or url_for("oidc_callback", _external=True)
+
+    # Redirect to OIDC provider
+    return oauth.oidc.authorize_redirect(callback_url)
+
+
+@app.route("/auth/oidc/callback")
+def oidc_callback():
+    """Handle OIDC callback."""
+    if not is_oidc_configured():
+        return redirect(url_for("login"))
+
+    try:
+        # Get the access token
+        token = oauth.oidc.authorize_access_token()
+
+        # Get user info from the token or userinfo endpoint
+        user_info = token.get("userinfo")
+        if not user_info:
+            # Fetch user info from userinfo endpoint
+            resp = oauth.oidc.get("userinfo")
+            user_info = resp.json()
+
+        # Extract user identifier (prefer email, fallback to sub)
+        user_id = user_info.get("email") or user_info.get("sub")
+        user_name = user_info.get("name") or user_info.get("preferred_username") or user_id
+
+        if not user_id:
+            return "Could not identify user from OIDC response", 400
+
+        # Set session as authenticated
+        session["authenticated"] = True
+        session["user_id"] = user_id
+        session["user_name"] = user_name
+        session["auth_method"] = "oidc"
+
+        # Redirect to the stored next URL or index
+        next_url = session.pop("oidc_next_url", None) or url_for("index")
+        return redirect(next_url)
+
+    except Exception as e:
+        app.logger.error(f"OIDC callback error: {e}")
+        return redirect(url_for("login"))
 
 
 if __name__ == "__main__":

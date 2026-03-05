@@ -8,16 +8,48 @@ from typing import Literal
 
 from flask import redirect, request, session, url_for
 from werkzeug.security import check_password_hash
+from authlib.integrations.flask_client import OAuth
 
 AuthMode = Literal["none", "local", "oidc"]
 
 AUTH_TYPE = os.environ.get("AUTH_TYPE", "local").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
 
+# OIDC Configuration
+OIDC_ENABLED = os.environ.get("OIDC_ENABLED", "").strip().lower() == "true"
 OIDC_ISSUER = os.environ.get("OIDC_ISSUER", "").strip()
 OIDC_CLIENT_ID = os.environ.get("OIDC_CLIENT_ID", "").strip()
 OIDC_CLIENT_SECRET = os.environ.get("OIDC_CLIENT_SECRET", "").strip()
 OIDC_CALLBACK_URL = os.environ.get("OIDC_CALLBACK_URL", "").strip()
+
+oauth = OAuth()
+
+
+def configure_oauth(app):
+    """Configure OAuth with OIDC provider if enabled."""
+    if not is_oidc_configured():
+        return
+
+    # Authentik-compatible defaults
+    issuer_url = OIDC_ISSUER.rstrip("/")
+    if "/.well-known/openid-configuration" in issuer_url:
+        issuer_url = issuer_url.replace("/.well-known/openid-configuration", "")
+
+    oauth.init_app(app)
+    oauth.register(
+        name="oidc",
+        client_id=OIDC_CLIENT_ID,
+        client_secret=OIDC_CLIENT_SECRET,
+        server_metadata_url=f"{issuer_url}/.well-known/openid-configuration",
+        client_kwargs={
+            "scope": "openid profile email",
+        },
+    )
+
+
+def is_oidc_configured() -> bool:
+    """Check if OIDC is properly configured."""
+    return bool(OIDC_ENABLED and OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET)
 
 
 def resolved_auth_mode() -> AuthMode:
@@ -25,11 +57,8 @@ def resolved_auth_mode() -> AuthMode:
     if AUTH_TYPE == "none":
         return "none"
 
-    if AUTH_TYPE == "oidc":
-        if OIDC_ISSUER and OIDC_CLIENT_ID and OIDC_CLIENT_SECRET and OIDC_CALLBACK_URL:
-            return "oidc"
-        # Invalid OIDC config falls back to none to avoid lockouts
-        return "none"
+    if AUTH_TYPE == "oidc" or is_oidc_configured():
+        return "oidc"
 
     # default/local
     if ADMIN_PASSWORD:
@@ -71,3 +100,17 @@ def require_auth(view_fn):
         return redirect(url_for("login", next=request.path))
 
     return wrapper
+
+
+def get_oidc_label() -> str:
+    """Get a display name for the OIDC provider."""
+    label = os.environ.get("OIDC_ISSUER_LABEL", "").strip()
+    if label:
+        return label
+    provider_name = os.environ.get("OIDC_PROVIDER_NAME", "").strip()
+    if provider_name:
+        return provider_name
+    if OIDC_ISSUER:
+        # Extract domain from issuer URL
+        return OIDC_ISSUER.replace("https://", "").replace("http://", "").split("/")[0]
+    return "OIDC"
