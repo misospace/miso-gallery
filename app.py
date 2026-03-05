@@ -151,7 +151,7 @@ LOGIN_TEMPLATE = """
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Login - Miso Gallery</title>
 <style>
  body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
- .card{background:#1a1a1a;padding:32px;border-radius:10px;min-width:320px;max-width:400px}
+ .card{background:#1a1a1a;padding:32px;border-radius:10px;min-width:320px;max-width:420px;border:1px solid #2f2f2f}
  input,button{width:100%;padding:10px;margin-top:10px;border-radius:6px;border:1px solid #333;background:#111;color:#eee}
  button{cursor:pointer;background:linear-gradient(135deg,#f5a623,#f76c1c);border:none}
  button.oidc-btn{background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%);border:1px solid #4b4b75;color:#f5a623}
@@ -161,26 +161,41 @@ LOGIN_TEMPLATE = """
  .divider::before,.divider::after{content:'';flex:1;border-bottom:1px solid #333}
  .divider::before{margin-right:10px}
  .divider::after{margin-left:10px}
- h2{margin-bottom:10px;text-align:center}
+ h2{margin-bottom:4px;text-align:center}
+ .subtitle{color:#9aa1a8;font-size:.92rem;text-align:center;margin-bottom:8px}
+ .alert{margin-top:10px;padding:10px;border-radius:6px;font-size:.9rem;border:1px solid #4a2a2a;background:#2a1515;color:#ffb4b4}
+ .note{margin-top:10px;color:#777;font-size:.82rem;text-align:center}
 </style></head>
 <body><div class="card">
   <h2>🍲 Miso Gallery</h2>
+  <p class="subtitle">Sign in to view and manage your gallery.</p>
+
+  {% if error %}
+  <div class="alert">{{ error }}</div>
+  {% endif %}
+
   {% if oidc_enabled %}
   <form method="GET" action="/auth/oidc">
-    <button type="submit" class="oidc-btn">Login with {{ oidc_label }}</button>
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <button type="submit" class="oidc-btn">Continue with {{ oidc_label }}</button>
   </form>
   {% endif %}
+
   {% if local_enabled %}
   {% if oidc_enabled %}<div class="divider">or</div>{% endif %}
   <form method="POST" action="/auth">
     <input type="hidden" name="csrf_token" value="{{ csrf }}">
-    <input type="password" name="password" placeholder="Password" required>
+    <input type="hidden" name="next" value="{{ next_url }}">
+    <input type="password" name="password" placeholder="Password" autocomplete="current-password" required>
     <button type="submit">Login with Password</button>
   </form>
   {% endif %}
+
   {% if not oidc_enabled and not local_enabled %}
   <p class="muted">No authentication method is configured.</p>
   {% endif %}
+
+  <p class="note">Need access? Ask your administrator.</p>
 </div></body></html>
 """
 
@@ -588,15 +603,29 @@ def trash_purge():
 @app.route("/login")
 def login():
     mode = resolved_auth_mode()
+    next_url = request.args.get("next") or "/"
+
+    error_code = (request.args.get("error") or "").strip().lower()
+    error_map = {
+        "invalid": "Invalid password. Please try again.",
+        "oidc_failed": "OIDC login failed. Please try again.",
+        "oidc_disabled": "OIDC is not configured.",
+        "local_disabled": "Password login is disabled.",
+    }
+    error = error_map.get(error_code)
+
     # If OIDC-only mode, redirect directly to OIDC provider
     if mode == "oidc" and not os.environ.get("ADMIN_PASSWORD"):
-        return redirect(url_for("oidc_login"))
+        return redirect(url_for("oidc_login", next=next_url))
+
     return render_template_string(
         LOGIN_TEMPLATE,
         csrf=csrf_token(),
         oidc_enabled=is_oidc_configured(),
         local_enabled=bool(os.environ.get("ADMIN_PASSWORD")),
         oidc_label=get_oidc_label(),
+        next_url=next_url,
+        error=error,
     )
 
 
@@ -606,21 +635,23 @@ def auth():
     if not validate_csrf(request.form.get("csrf_token")):
         return {"error": "Invalid CSRF token"}, 403
 
+    next_url = request.form.get("next") or request.args.get("next") or url_for("index")
+
     if resolved_auth_mode() != "local":
-        return redirect(url_for("login"))
+        return redirect(url_for("login", error="local_disabled", next=next_url))
 
     password = request.form.get("password", "")
     if verify_local_password(password):
         session["authenticated"] = True
-        return redirect(request.args.get("next") or url_for("index"))
+        return redirect(next_url)
 
-    return redirect(url_for("login"))
+    return redirect(url_for("login", error="invalid", next=next_url))
 
 
 @app.route("/logout")
 def logout():
     session.clear()
-    return redirect(url_for("login"))
+    return redirect(url_for("login", next="/"))
 
 
 @app.route("/auth/oidc")
@@ -676,7 +707,8 @@ def oidc_callback():
 
     except Exception as e:
         app.logger.error(f"OIDC callback error: {e}")
-        return redirect(url_for("login"))
+        next_url = session.pop("oidc_next_url", None) or "/"
+        return redirect(url_for("login", error="oidc_failed", next=next_url))
 
 
 if __name__ == "__main__":
