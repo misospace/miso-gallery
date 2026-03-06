@@ -528,20 +528,12 @@ def recent_view():
                 continue
 
             rel_path = item.relative_to(DATA_FOLDER).as_posix()
-            thumb_name = f".thumb_cache/{rel_path}.webp"
-            thumb_path = DATA_FOLDER / thumb_name
-
-            if thumb_path.exists():
-                thumb_url = f"/thumb/{rel_path}.webp"
-            else:
-                thumb_url = f"/image/{rel_path}"
-
             date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
 
             images.append({
                 "name": item.name,
-                "url": f"/image/{rel_path}",
-                "thumb": thumb_url,
+                "url": url_for("view", filename=rel_path),
+                "thumb": url_for("thumb", filename=rel_path),
                 "added": date_str,
                 "mtime": mtime,
             })
@@ -602,7 +594,6 @@ def trash_purge():
 
 @app.route("/login")
 def login():
-    mode = resolved_auth_mode()
     next_url = request.args.get("next") or "/"
 
     error_code = (request.args.get("error") or "").strip().lower()
@@ -613,10 +604,6 @@ def login():
         "local_disabled": "Password login is disabled.",
     }
     error = error_map.get(error_code)
-
-    # If OIDC-only mode, redirect directly to OIDC provider
-    if mode == "oidc" and not os.environ.get("ADMIN_PASSWORD"):
-        return redirect(url_for("oidc_login", next=next_url))
 
     return render_template_string(
         LOGIN_TEMPLATE,
