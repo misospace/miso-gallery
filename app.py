@@ -63,9 +63,11 @@ HTML_TEMPLATE = """
     .toolbar .danger { background:#a52834; border-color:#dc3545; }
     .toolbar .danger:disabled { opacity:0.5; cursor:not-allowed; }
     .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
-    .folder,.image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; }
-    .folder:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
-    .folder { padding:30px; text-align:center; border:1px dashed #444; text-decoration:none; }
+    .folder-card,.image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; position:relative; }
+    .folder-card:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
+    .folder-card { border:1px dashed #444; }
+    .folder-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
+    .folder { display:block; padding:30px; text-align:center; text-decoration:none; }
     .folder-icon { font-size:3rem; margin-bottom:10px; }
     .folder-name { color:#f5a623; font-weight:500; }
     .image-card { position:relative; border:1px solid transparent; }
@@ -106,10 +108,13 @@ HTML_TEMPLATE = """
       <div class="grid">
         {% for item in items %}
           {% if item.is_dir %}
-            <a href="{{ item.url }}" class="folder">
-              <div class="folder-icon">📁</div>
-              <div class="folder-name">{{ item.name }}</div>
-            </a>
+            <div class="folder-card" data-folder-card>
+              <input class="selector" type="checkbox" name="folders" value="{{ item.rel_path }}" onchange="syncSelectionState()">
+              <a href="{{ item.url }}" class="folder">
+                <div class="folder-icon">📁</div>
+                <div class="folder-name">{{ item.name }}</div>
+              </a>
+            </div>
           {% else %}
             <div class="image-card" data-image-card>
               <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
@@ -128,12 +133,15 @@ HTML_TEMPLATE = """
   </div>
   <script>
     document.getElementById('refreshBtn')?.addEventListener('click', () => window.location.reload());
-    function getSelectors() { return Array.from(document.querySelectorAll('input.selector[name="filenames"]')); }
+    function getSelectors() { return Array.from(document.querySelectorAll('input.selector[name="filenames"], input.selector[name="folders"]')); }
     function syncSelectionState() {
       const selectors = getSelectors();
       const selectedCount = selectors.filter(s => s.checked).length;
       const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
-      selectors.forEach((selector) => selector.closest('[data-image-card]')?.classList.toggle('selected', selector.checked));
+      selectors.forEach((selector) => {
+        const card = selector.closest('[data-image-card]') || selector.closest('[data-folder-card]');
+        card?.classList.toggle('selected', selector.checked);
+      });
       if (bulkDeleteBtn) { bulkDeleteBtn.disabled = selectedCount === 0; bulkDeleteBtn.textContent = `Delete selected (${selectedCount})`; }
     }
     function setAllSelections(checked) { getSelectors().forEach((selector) => selector.checked = checked); syncSelectionState(); }
@@ -489,15 +497,27 @@ def bulk_delete():
         return {"error": "Invalid CSRF token"}, 403
 
     current_subpath = sanitize_rel_path(request.form.get("current_subpath", "")) if request.form.get("current_subpath") else ""
-    selected = request.form.getlist("filenames")
+    selected_files = request.form.getlist("filenames")
+    selected_folders = request.form.getlist("folders")
 
-    for rel_path in selected:
+    # Delete selected files
+    for rel_path in selected_files:
         if not sanitize_path(rel_path):
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         file_path = source_file_path(safe_rel_path)
         if file_path.exists() and file_path.is_file():
             if move_to_trash(file_path, DATA_FOLDER):
+                remove_thumbnail_cache_for(safe_rel_path)
+
+    # Delete selected folders
+    for rel_path in selected_folders:
+        if not sanitize_path(rel_path):
+            continue
+        safe_rel_path = sanitize_rel_path(rel_path)
+        folder_path = DATA_FOLDER / safe_rel_path
+        if folder_path.exists() and folder_path.is_dir():
+            if move_to_trash(folder_path, DATA_FOLDER):
                 remove_thumbnail_cache_for(safe_rel_path)
 
     return redirect(url_for("index", subpath=current_subpath))
