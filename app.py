@@ -149,6 +149,9 @@ HTML_TEMPLATE = """
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/assets/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Miso Gallery">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>Miso Gallery</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -194,6 +197,7 @@ HTML_TEMPLATE = """
       <div class="breadcrumb">{{ breadcrumb|safe }}</div>
       <a class="refresh-btn" href="/trash" title="Open trash bin">🗑️ Trash</a>
       <a class="refresh-btn" href="/recent" title="Recent uploads">📅 Recent</a>
+      <button type="button" id="installPwaBtn" class="refresh-btn" title="Install app" hidden>⬇ Install</button>
       <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
     </div>
   </header>
@@ -234,11 +238,38 @@ HTML_TEMPLATE = """
     <div class="stats">{{ stats.folders }} folders • {{ stats.images }} images</div>
   </div>
   <script>
+    let deferredInstallPrompt = null;
+    const installBtn = document.getElementById('installPwaBtn');
+
     if ('serviceWorker' in navigator) {
       window.addEventListener('load', () => {
         navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
       });
     }
+
+    window.addEventListener('beforeinstallprompt', (event) => {
+      event.preventDefault();
+      deferredInstallPrompt = event;
+      if (installBtn) installBtn.hidden = false;
+    });
+
+    installBtn?.addEventListener('click', async () => {
+      if (!deferredInstallPrompt) return;
+      deferredInstallPrompt.prompt();
+      const result = await deferredInstallPrompt.userChoice.catch(() => null);
+      deferredInstallPrompt = null;
+      if (result?.outcome === 'dismissed') {
+        installBtn.hidden = false;
+        return;
+      }
+      installBtn.hidden = true;
+    });
+
+    window.addEventListener('appinstalled', () => {
+      deferredInstallPrompt = null;
+      if (installBtn) installBtn.hidden = true;
+    });
+
     document.getElementById('refreshBtn')?.addEventListener('click', () => window.location.reload());
     function getSelectors() { return Array.from(document.querySelectorAll('input.selector[name="filenames"], input.selector[name="folders"]')); }
     function syncSelectionState() {
@@ -263,7 +294,7 @@ HTML_TEMPLATE = """
 
 LOGIN_TEMPLATE = """
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><title>Login - Miso Gallery</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>Login - Miso Gallery</title>
 <style>
  body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
  .card{background:#1a1a1a;padding:32px;border-radius:10px;min-width:320px;max-width:420px;border:1px solid #2f2f2f}
@@ -311,12 +342,20 @@ LOGIN_TEMPLATE = """
   {% endif %}
 
   <p class="note">Need access? Ask your administrator.</p>
-</div></body></html>
+</div>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+    });
+  }
+</script>
+</body></html>
 """
 
 TRASH_TEMPLATE = """
 <!DOCTYPE html>
-<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><meta name=\"theme-color\" content=\"{{ theme_color }}\"><link rel=\"manifest\" href=\"/manifest.webmanifest\"><link rel=\"apple-touch-icon\" href=\"/assets/icon-192.png\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><title>Trash - Miso Gallery</title>
+<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><meta name=\"theme-color\" content=\"{{ theme_color }}\"><link rel=\"manifest\" href=\"/manifest.webmanifest\"><link rel=\"apple-touch-icon\" href=\"/assets/icon-192.png\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black-translucent\"><meta name=\"apple-mobile-web-app-title\" content=\"Miso Gallery\"><meta name=\"mobile-web-app-capable\" content=\"yes\"><title>Trash - Miso Gallery</title>
 <style>
  body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
  .wrap{max-width:1000px;margin:0 auto;padding:24px}
@@ -352,7 +391,15 @@ TRASH_TEMPLATE = """
     {% endfor %}
     </tbody>
   </table>
-</div></body></html>
+</div>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+    });
+  }
+</script>
+</body></html>
 """
 
 RECENT_TEMPLATE = """
@@ -365,6 +412,9 @@ RECENT_TEMPLATE = """
   <link rel="manifest" href="/manifest.webmanifest">
   <link rel="apple-touch-icon" href="/assets/icon-192.png">
   <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Miso Gallery">
+  <meta name="mobile-web-app-capable" content="yes">
   <title>Recent - Miso Gallery</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -388,6 +438,7 @@ RECENT_TEMPLATE = """
 <header>
   <h1>🍲 Recent</h1>
   <div class="header-actions">
+    <button type="button" id="installPwaBtn" class="refresh-btn" hidden>⬇ Install</button>
     <a href="/" class="refresh-btn">← Gallery</a>
   </div>
 </header>
@@ -409,6 +460,39 @@ RECENT_TEMPLATE = """
     <div class="empty">No recent images found</div>
   {% endif %}
 </div>
+<script>
+  let deferredInstallPrompt = null;
+  const installBtn = document.getElementById('installPwaBtn');
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+    });
+  }
+
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    if (installBtn) installBtn.hidden = false;
+  });
+
+  installBtn?.addEventListener('click', async () => {
+    if (!deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt();
+    const result = await deferredInstallPrompt.userChoice.catch(() => null);
+    deferredInstallPrompt = null;
+    if (result?.outcome === 'dismissed') {
+      installBtn.hidden = false;
+      return;
+    }
+    installBtn.hidden = true;
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredInstallPrompt = null;
+    if (installBtn) installBtn.hidden = true;
+  });
+</script>
 </body>
 </html>
 """
