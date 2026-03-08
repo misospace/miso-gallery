@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import secrets
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 from flask import (
     Flask,
     abort,
+    make_response,
     redirect,
     render_template_string,
     request,
@@ -69,12 +71,84 @@ THUMBNAIL_SIZE = (400, 400)
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
+PWA_THEME_COLOR = "#0d0d0d"
+PWA_APP_NAME = "Miso Gallery"
+SERVICE_WORKER_TEMPLATE = """
+const CACHE_VERSION = "miso-gallery-v1";
+const CORE_ASSETS = [
+  "/",
+  "/recent",
+  "/trash",
+  "/manifest.webmanifest",
+  "/assets/icon-192.png",
+  "/assets/icon-512.png"
+];
+
+self.addEventListener("install", (event) => {
+  event.waitUntil(
+    caches.open(CACHE_VERSION).then((cache) => cache.addAll(CORE_ASSETS)).catch(() => undefined)
+  );
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches.keys().then((keys) =>
+      Promise.all(keys.filter((key) => key !== CACHE_VERSION).map((key) => caches.delete(key)))
+    )
+  );
+  self.clients.claim();
+});
+
+self.addEventListener("fetch", (event) => {
+  const { request } = event;
+  if (request.method !== "GET") return;
+
+  const requestUrl = new URL(request.url);
+  if (requestUrl.origin !== self.location.origin) return;
+
+  if (request.destination === "image") {
+    event.respondWith(
+      caches.match(request).then((cached) => {
+        if (cached) return cached;
+        return fetch(request).then((response) => {
+          if (response && response.status === 200) {
+            const copy = response.clone();
+            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        });
+      })
+    );
+    return;
+  }
+
+  if (request.mode === "navigate") {
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          if (response && response.status === 200) {
+            const copy = response.clone();
+            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
+          }
+          return response;
+        })
+        .catch(() => caches.match(request).then((cached) => cached || caches.match("/")))
+    );
+  }
+});
+"""
+
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="{{ theme_color }}">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Miso Gallery</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -160,6 +234,11 @@ HTML_TEMPLATE = """
     <div class="stats">{{ stats.folders }} folders • {{ stats.images }} images</div>
   </div>
   <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+      });
+    }
     document.getElementById('refreshBtn')?.addEventListener('click', () => window.location.reload());
     function getSelectors() { return Array.from(document.querySelectorAll('input.selector[name="filenames"], input.selector[name="folders"]')); }
     function syncSelectionState() {
@@ -184,7 +263,7 @@ HTML_TEMPLATE = """
 
 LOGIN_TEMPLATE = """
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Login - Miso Gallery</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><title>Login - Miso Gallery</title>
 <style>
  body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
  .card{background:#1a1a1a;padding:32px;border-radius:10px;min-width:320px;max-width:420px;border:1px solid #2f2f2f}
@@ -237,7 +316,7 @@ LOGIN_TEMPLATE = """
 
 TRASH_TEMPLATE = """
 <!DOCTYPE html>
-<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>Trash - Miso Gallery</title>
+<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><meta name=\"theme-color\" content=\"{{ theme_color }}\"><link rel=\"manifest\" href=\"/manifest.webmanifest\"><link rel=\"apple-touch-icon\" href=\"/assets/icon-192.png\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><title>Trash - Miso Gallery</title>
 <style>
  body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
  .wrap{max-width:1000px;margin:0 auto;padding:24px}
@@ -282,6 +361,10 @@ RECENT_TEMPLATE = """
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="{{ theme_color }}">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
   <title>Recent - Miso Gallery</title>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -385,7 +468,12 @@ def check_auth():
         return None
 
     # Keep direct assets publicly shareable.
-    if request.path.startswith("/view/") or request.path.startswith("/thumb/") or request.path == "/favicon.ico":
+    if (
+        request.path.startswith("/view/")
+        or request.path.startswith("/thumb/")
+        or request.path.startswith("/assets/")
+        or request.path in {"/favicon.ico", "/manifest.webmanifest", "/service-worker.js"}
+    ):
         return None
 
     if request.path in ["/login", "/auth", "/logout", "/auth/oidc", "/auth/oidc/callback"]:
@@ -407,6 +495,53 @@ def favicon():
         return send_from_directory(str(logo_path.parent), logo_path.name)
 
     return ("", 204)
+
+@app.route("/assets/<path:filename>")
+def assets(filename: str):
+    safe_name = sanitize_rel_path(filename)
+    asset_dir = Path(app.root_path) / "assets"
+    return send_from_directory(str(asset_dir), safe_name)
+
+
+@app.route("/manifest.webmanifest")
+def manifest():
+    payload = {
+        "name": PWA_APP_NAME,
+        "short_name": "Miso",
+        "description": "Mobile-first gallery for Miso images",
+        "start_url": "/",
+        "scope": "/",
+        "display": "standalone",
+        "background_color": PWA_THEME_COLOR,
+        "theme_color": PWA_THEME_COLOR,
+        "icons": [
+            {
+                "src": "/assets/icon-192.png",
+                "sizes": "192x192",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+            {
+                "src": "/assets/icon-512.png",
+                "sizes": "512x512",
+                "type": "image/png",
+                "purpose": "any maskable",
+            },
+        ],
+    }
+    response = make_response(json.dumps(payload))
+    response.headers["Content-Type"] = "application/manifest+json"
+    response.headers["Cache-Control"] = "public, max-age=3600"
+    return response
+
+
+@app.route("/service-worker.js")
+def service_worker():
+    response = make_response(SERVICE_WORKER_TEMPLATE)
+    response.headers["Content-Type"] = "application/javascript; charset=utf-8"
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
 
 
 @app.route("/images/<path:filename>")
@@ -474,6 +609,7 @@ def index(subpath: str = ""):
         stats=stats,
         current_subpath=safe_subpath,
         csrf=csrf_token(),
+        theme_color=PWA_THEME_COLOR,
     )
 
 
@@ -600,7 +736,7 @@ def recent_view():
     for img in images:
         del img["mtime"]
 
-    return render_template_string(RECENT_TEMPLATE, items=images)
+    return render_template_string(RECENT_TEMPLATE, items=images, theme_color=PWA_THEME_COLOR)
 
 
 @app.route("/trash")
@@ -608,7 +744,7 @@ def recent_view():
 @rate_limit(max_requests=30, window=60)
 def trash_view():
     items = list_trash(DATA_FOLDER)
-    return render_template_string(TRASH_TEMPLATE, items=items, csrf=csrf_token())
+    return render_template_string(TRASH_TEMPLATE, items=items, csrf=csrf_token(), theme_color=PWA_THEME_COLOR)
 
 
 @app.route("/trash/restore/<path:item_name>", methods=["POST"])
@@ -667,6 +803,7 @@ def login():
         oidc_label=get_oidc_label(),
         next_url=next_url,
         error=error,
+        theme_color=PWA_THEME_COLOR,
     )
 
 
