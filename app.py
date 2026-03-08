@@ -464,6 +464,12 @@ def thumb(filename: str):
     return send_from_directory(str(THUMBNAIL_CACHE_DIR), cached_name)
 
 
+@app.route("/images/<path:filename>")
+def images(filename: str):
+    rel_path = sanitize_rel_path(filename)
+    return send_from_directory(str(DATA_FOLDER), rel_path)
+
+
 @app.route("/view/<path:filename>")
 def view(filename: str):
     rel_path = sanitize_rel_path(filename)
