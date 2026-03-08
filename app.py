@@ -678,6 +678,7 @@ def check_auth():
     if (
         request.path.startswith("/view/")
         or request.path.startswith("/thumb/")
+        or request.path.startswith("/images/")
         or request.path.startswith("/assets/")
         or request.path in {"/favicon.ico", "/manifest.webmanifest", "/service-worker.js"}
     ):
