@@ -3,3 +3,4 @@ gunicorn>=20.0
 Pillow>=10.0.0
 Authlib>=1.0
 requests>=2.31.0
+redis>=5.0.0

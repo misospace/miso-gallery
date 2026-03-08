@@ -892,7 +892,7 @@ def login():
 
 
 @app.route("/auth", methods=["POST"])
-@rate_limit(max_requests=8, window=60)
+@rate_limit(max_requests=5, window=300)
 def auth():
     if not validate_csrf(request.form.get("csrf_token")):
         return {"error": "Invalid CSRF token"}, 403

@@ -90,6 +90,14 @@ docker run -d \
 | `OIDC_CLIENT_SECRET` | If OIDC | - | OIDC client secret |
 | `OIDC_CALLBACK_URL` | If OIDC | - | Callback URL for OIDC |
 
+#### Rate Limiting
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `RATE_LIMIT_REDIS_URL` | No | - | Redis/Dragonfly URL for shared rate-limit state (falls back to in-memory if unset/unreachable) |
+| `RATE_LIMIT_PREFIX` | No | `miso-gallery:ratelimit` | Key prefix for rate-limit entries |
+| `RATE_LIMIT_ROUTE_LIMITS` | No | - | JSON overrides per endpoint, e.g. `{"auth":{"max_requests":5,"window":300}}` |
+
 #### Authentik Setup
 
 1. Create an Application in Authentik
