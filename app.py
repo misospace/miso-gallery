@@ -202,6 +202,10 @@ HTML_TEMPLATE = """
     </div>
   </header>
   <div class="container">
+    <form method="GET" action="{{ url_for('index', subpath=current_subpath) }}" style="margin-bottom:15px;">
+      <input id="categorySearch" type="text" name="q" placeholder="Search categories..." value="{{ request.args.get('q','') }}" autocomplete="off" spellcheck="false" style="padding:6px 10px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#e0e0e0; min-width: 240px;">
+      <button type="submit" class="refresh-btn" style="margin-left:5px;">🔍 Search</button>
+    </form>
     {% if items %}
     <form id="bulkDeleteForm" method="POST" action="/bulk-delete">
       <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -271,6 +275,22 @@ HTML_TEMPLATE = """
     });
 
     document.getElementById('refreshBtn')?.addEventListener('click', () => window.location.reload());
+
+    // Category search (Issue #51)
+    const categorySearchInput = document.getElementById('categorySearch');
+    function applyCategorySearchFilter() {
+      if (!categorySearchInput) return;
+      const query = (categorySearchInput.value || '').trim().toLowerCase();
+      const folderCards = Array.from(document.querySelectorAll('[data-folder-card]'));
+      if (!folderCards.length) return;
+      folderCards.forEach((card) => {
+        const name = (card.querySelector('.folder-name')?.textContent || '').toLowerCase();
+        card.style.display = !query || name.includes(query) ? '' : 'none';
+      });
+    }
+    categorySearchInput?.addEventListener('input', applyCategorySearchFilter);
+    applyCategorySearchFilter();
+
     function getSelectors() { return Array.from(document.querySelectorAll('input.selector[name="filenames"], input.selector[name="folders"]')); }
     function syncSelectionState() {
       const selectors = getSelectors();
@@ -638,6 +658,8 @@ def images(filename: str):
 @app.route("/<path:subpath>")
 @require_auth
 def index(subpath: str = ""):
+    # Search query for filtering items
+    search_query = request.args.get('q', '').strip().lower()
     safe_subpath = sanitize_rel_path(subpath) if subpath else ""
     folder_path = DATA_FOLDER / safe_subpath
     if not folder_path.exists() or not folder_path.is_dir():
@@ -670,6 +692,12 @@ def index(subpath: str = ""):
                 }
             )
 
+    # Apply category search filter (root only).
+    # Issue #51 expects folder/category name substring matching.
+    if search_query and not safe_subpath:
+        items = [i for i in items if i.get("is_dir") and search_query in i["name"].lower()]
+        stats["folders"] = sum(1 for i in items if i.get("is_dir"))
+        stats["images"] = sum(1 for i in items if not i.get("is_dir"))
     parent_url = None
     if safe_subpath:
         parts = safe_subpath.split("/")
