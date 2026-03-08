@@ -73,6 +73,7 @@ FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
 PWA_THEME_COLOR = "#0d0d0d"
 PWA_APP_NAME = "Miso Gallery"
+APP_VERSION = (os.environ.get("APP_VERSION") or "v0.1.x").strip() or "v0.1.x"
 SERVICE_WORKER_TEMPLATE = """
 const CACHE_VERSION = "miso-gallery-v1";
 const CORE_ASSETS = [
@@ -162,6 +163,20 @@ HTML_TEMPLATE = """
     .breadcrumb { color:#888; font-size:0.9rem; }
     .breadcrumb a { color:#f5a623; text-decoration:none; }
     .refresh-btn { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:8px; padding:8px 12px; font-size:0.9rem; cursor:pointer; }
+    .nav-toggle { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:10px; padding:10px 12px; font-size:1rem; cursor:pointer; line-height:1; }
+    .drawer-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); opacity:0; pointer-events:none; transition:opacity .2s ease; z-index:999; }
+    .drawer-overlay.open { opacity:1; pointer-events:auto; }
+    .drawer { position:fixed; top:0; left:0; height:100vh; width:300px; max-width:85vw; background:#121217; border-right:1px solid #2f2f2f; transform:translateX(-105%); transition:transform .2s ease; z-index:1000; padding:16px; display:flex; flex-direction:column; gap:14px; }
+    .drawer.open { transform:translateX(0); }
+    .drawer-header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .drawer-brand { font-weight:700; color:#f5a623; }
+    .drawer-close { background:transparent; border:1px solid #333; color:#ddd; border-radius:10px; padding:8px 10px; cursor:pointer; }
+    .drawer-path { color:#9aa1a8; font-size:.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .drawer-links { display:flex; flex-direction:column; gap:6px; }
+    .drawer-links a { display:block; padding:10px 10px; border-radius:10px; text-decoration:none; color:#e0e0e0; border:1px solid transparent; }
+    .drawer-links a:hover { background:#1b1b26; border-color:#2c2c3a; }
+    .drawer-links a.current { border-color:rgba(245,166,35,.35); background:rgba(245,166,35,.08); }
+    .drawer-divider { height:1px; background:#2a2a2a; margin:6px 0; }
     .container { padding:20px; }
     .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:15px; }
     .toolbar button { background:#2a2a2a; color:#f0f0f0; border:1px solid #444; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
@@ -189,6 +204,7 @@ HTML_TEMPLATE = """
 </head>
 <body>
   <header>
+    <button type="button" id="navToggleBtn" class="nav-toggle" aria-label="Open menu" aria-expanded="false">☰</button>
     <h1>🍲 Miso Gallery</h1>
     <div class="header-actions">
       {% if parent_url %}
@@ -201,6 +217,28 @@ HTML_TEMPLATE = """
       <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
     </div>
   </header>
+
+  <div id="drawerOverlay" class="drawer-overlay"></div>
+  <nav id="drawer" class="drawer" aria-label="Navigation">
+    <div class="drawer-header">
+      <div class="drawer-brand">🍲 Miso Gallery</div>
+      <button type="button" id="drawerCloseBtn" class="drawer-close" aria-label="Close menu">✕</button>
+    </div>
+    <div class="drawer-path">Path: {{ current_subpath if current_subpath else '/' }}</div>
+    <div class="drawer-links">
+      <a href="/">🏠 Home</a>
+      {% for crumb in nav_crumbs %}
+        <a href="{{ crumb.url }}" class="{% if crumb.is_current %}current{% endif %}">📁 {{ crumb.name }}</a>
+      {% endfor %}
+      <div class="drawer-divider"></div>
+      <a href="/recent">📅 Recent</a>
+      <a href="/trash">🗑️ Trash</a>
+      <a href="/settings">⚙️ Settings</a>
+      <a href="/about">ℹ️ About ({{ app_version }})</a>
+      <a href="/logout">🚪 Logout</a>
+    </div>
+  </nav>
+
   <div class="container">
     {% if items %}
     <form id="bulkDeleteForm" method="POST" action="/bulk-delete">
@@ -269,6 +307,22 @@ HTML_TEMPLATE = """
       deferredInstallPrompt = null;
       if (installBtn) installBtn.hidden = true;
     });
+
+    const drawer = document.getElementById('drawer');
+    const drawerOverlay = document.getElementById('drawerOverlay');
+    const navToggleBtn = document.getElementById('navToggleBtn');
+    const drawerCloseBtn = document.getElementById('drawerCloseBtn');
+
+    function setDrawerOpen(open) {
+      drawer?.classList.toggle('open', open);
+      drawerOverlay?.classList.toggle('open', open);
+      navToggleBtn?.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    navToggleBtn?.addEventListener('click', () => setDrawerOpen(true));
+    drawerCloseBtn?.addEventListener('click', () => setDrawerOpen(false));
+    drawerOverlay?.addEventListener('click', () => setDrawerOpen(false));
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setDrawerOpen(false); });
 
     document.getElementById('refreshBtn')?.addEventListener('click', () => window.location.reload());
     function getSelectors() { return Array.from(document.querySelectorAll('input.selector[name="filenames"], input.selector[name="folders"]')); }
@@ -497,6 +551,55 @@ RECENT_TEMPLATE = """
 </html>
 """
 
+ABOUT_TEMPLATE = """
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>About - Miso Gallery</title>
+<style>
+ body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
+ .wrap{max-width:900px;margin:0 auto;padding:24px}
+ a{color:#f5a623;text-decoration:none}
+ .card{background:#141414;border:1px solid #2f2f2f;border-radius:12px;padding:18px;margin-top:14px}
+ .row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #242424}
+ .row:last-child{border-bottom:none}
+ .k{color:#9aa1a8}
+</style></head>
+<body><div class="wrap">
+  <h2>ℹ️ About</h2>
+  <p><a href="/">← Back to Gallery</a></p>
+  <div class="card">
+    <div class="row"><div class="k">Version</div><div>{{ app_version }}</div></div>
+    <div class="row"><div class="k">Auth enabled</div><div>{{ auth_enabled }}</div></div>
+    <div class="row"><div class="k">Auth mode</div><div>{{ auth_mode }}</div></div>
+    <div class="row"><div class="k">OIDC configured</div><div>{{ oidc_configured }}</div></div>
+  </div>
+</div></body></html>
+"""
+
+SETTINGS_TEMPLATE = """
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>Settings - Miso Gallery</title>
+<style>
+ body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
+ .wrap{max-width:900px;margin:0 auto;padding:24px}
+ a{color:#f5a623;text-decoration:none}
+ .card{background:#141414;border:1px solid #2f2f2f;border-radius:12px;padding:18px;margin-top:14px}
+ .row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #242424}
+ .row:last-child{border-bottom:none}
+ .k{color:#9aa1a8}
+ .note{color:#888;margin-top:10px;font-size:.9rem}
+</style></head>
+<body><div class="wrap">
+  <h2>⚙️ Settings</h2>
+  <p><a href="/">← Back to Gallery</a></p>
+  <div class="card">
+    <div class="row"><div class="k">Data folder</div><div>{{ data_folder }}</div></div>
+    <div class="row"><div class="k">Thumbnail cache</div><div>{{ thumb_cache }}</div></div>
+    <div class="row"><div class="k">Rate limiting</div><div>enabled</div></div>
+  </div>
+  <p class="note">This page intentionally avoids showing secrets or raw environment variables.</p>
+</div></body></html>
+"""
+
 
 def ensure_thumbnail_cache_dir() -> None:
     THUMBNAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
@@ -671,6 +774,7 @@ def index(subpath: str = ""):
             )
 
     parent_url = None
+    nav_crumbs: list[dict[str, object]] = []
     if safe_subpath:
         parts = safe_subpath.split("/")
         crumbs = ['<a href="/">Home</a>']
@@ -679,6 +783,12 @@ def index(subpath: str = ""):
             crumbs.append(f'<a href="/{path}">{part}</a>')
         crumbs.append(parts[-1])
         breadcrumb = " / ".join(crumbs)
+
+        accum: list[str] = []
+        for part in parts:
+            accum.append(part)
+            path = "/".join(accum)
+            nav_crumbs.append({"name": part, "url": url_for("index", subpath=path), "is_current": path == safe_subpath})
 
         parent_subpath = "/".join(parts[:-1])
         parent_url = url_for("index", subpath=parent_subpath) if parent_subpath else url_for("index")
@@ -692,6 +802,8 @@ def index(subpath: str = ""):
         parent_url=parent_url,
         stats=stats,
         current_subpath=safe_subpath,
+        nav_crumbs=nav_crumbs,
+        app_version=APP_VERSION,
         csrf=csrf_token(),
         theme_color=PWA_THEME_COLOR,
     )
@@ -921,6 +1033,30 @@ def auth():
 def logout():
     session.clear()
     return redirect(url_for("login", next="/"))
+
+
+@app.route("/settings")
+@require_auth
+def settings_view():
+    return render_template_string(
+        SETTINGS_TEMPLATE,
+        theme_color=PWA_THEME_COLOR,
+        data_folder=str(DATA_FOLDER),
+        thumb_cache=str(THUMBNAIL_CACHE_DIR),
+    )
+
+
+@app.route("/about")
+@require_auth
+def about_view():
+    return render_template_string(
+        ABOUT_TEMPLATE,
+        theme_color=PWA_THEME_COLOR,
+        app_version=APP_VERSION,
+        auth_enabled=is_auth_enabled(),
+        auth_mode=resolved_auth_mode(),
+        oidc_configured=is_oidc_configured(),
+    )
 
 
 @app.route("/auth/oidc")
