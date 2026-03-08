@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from pathlib import Path
 
 from flask import (
@@ -28,15 +29,42 @@ from auth import (
 from security import add_security_headers, csrf_token, rate_limit, sanitize_path, validate_csrf
 from trash import empty_trash, list_trash, move_to_trash, purge_old_trash, restore_from_trash
 
+DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
+THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
+
+
+def resolve_secret_key() -> str:
+    configured = os.environ.get("SECRET_KEY", "").strip()
+    if configured:
+        return configured
+
+    key_file = Path(os.environ.get("SECRET_KEY_FILE", str(DATA_FOLDER / ".miso-gallery-secret-key")))
+
+    try:
+        if key_file.exists():
+            persisted = key_file.read_text(encoding="utf-8").strip()
+            if persisted:
+                return persisted
+    except OSError:
+        pass
+
+    generated = secrets.token_urlsafe(48)
+    try:
+        key_file.parent.mkdir(parents=True, exist_ok=True)
+        key_file.write_text(generated, encoding="utf-8")
+        os.chmod(key_file, 0o600)
+    except OSError:
+        pass
+
+    return generated
+
+
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", os.urandom(32))
+app.secret_key = resolve_secret_key()
 app.after_request(add_security_headers)
 
 # Configure OAuth for OIDC if enabled
 configure_oauth(app)
-
-DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
-THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
 THUMBNAIL_SIZE = (400, 400)
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
