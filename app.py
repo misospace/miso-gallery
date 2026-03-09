@@ -1215,6 +1215,14 @@ def oidc_callback():
         return redirect(url_for("login", error="oidc_failed", next=next_url))
 
 
+# Health routes
+from health import storage_health, storage_health_read, storage_health_write
+
+app.add_url_rule("/health/storage", "storage_health", storage_health, methods=["GET"])
+app.add_url_rule("/health/storage/read", "storage_health_read", storage_health_read, methods=["GET"])
+app.add_url_rule("/health/storage/write", "storage_health_write", storage_health_write, methods=["GET"])
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
