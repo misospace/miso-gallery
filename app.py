@@ -638,6 +638,8 @@ SETTINGS_TEMPLATE = """
  .row:last-child{border-bottom:none}
  .k{color:#9aa1a8}
  .note{color:#888;margin-top:10px;font-size:.9rem}
+ .btn{margin-top:12px;padding:10px 14px;border-radius:8px;border:1px solid #4b4b75;background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%);color:#f5a623;cursor:pointer}
+ .ok{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #245f3d;background:#10271b;color:#9de2b4}
 </style></head>
 <body><div class="wrap">
   <h2>⚙️ Settings</h2>
@@ -647,6 +649,16 @@ SETTINGS_TEMPLATE = """
     <div class="row"><div class="k">Thumbnail cache</div><div>{{ thumb_cache }}</div></div>
     <div class="row"><div class="k">Rate limiting</div><div>enabled</div></div>
   </div>
+
+  <form method="POST" action="/maintenance/thumbnails/regenerate">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button class="btn" type="submit">🧰 Run thumbnail integrity check</button>
+  </form>
+
+  {% if maintenance_result %}
+    <div class="ok">Checked: {{ maintenance_result.checked }} • Regenerated: {{ maintenance_result.regenerated }} • Failed: {{ maintenance_result.failed }}</div>
+  {% endif %}
+
   <p class="note">This page intentionally avoids showing secrets or raw environment variables.</p>
 </div></body></html>
 """
@@ -689,6 +701,49 @@ def remove_thumbnail_cache_for(rel_path: str) -> None:
                 cached_file.unlink()
             except OSError:
                 pass
+
+
+def run_thumbnail_integrity_check() -> dict[str, int]:
+    """Check thumbnails and regenerate missing/invalid entries on demand."""
+
+    ensure_thumbnail_cache_dir()
+    excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
+    stats = {"checked": 0, "regenerated": 0, "failed": 0}
+
+    for item in DATA_FOLDER.rglob("*"):
+        if not item.is_file() or item.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+        if item.name.startswith("."):
+            continue
+
+        rel_path = item.relative_to(DATA_FOLDER)
+        if any(part in excluded_dirs or part.startswith(".") for part in rel_path.parts):
+            continue
+
+        rel_posix = rel_path.as_posix()
+        stats["checked"] += 1
+
+        cached_name = thumbnail_filename(rel_posix, item)
+        cached_path = THUMBNAIL_CACHE_DIR / cached_name
+
+        needs_regen = not cached_path.exists()
+        if not needs_regen:
+            try:
+                with Image.open(cached_path) as thumb_img:
+                    thumb_img.verify()
+            except (UnidentifiedImageError, OSError):
+                needs_regen = True
+
+        if not needs_regen:
+            continue
+
+        try:
+            generate_thumbnail(item, cached_path)
+            stats["regenerated"] += 1
+        except (UnidentifiedImageError, OSError):
+            stats["failed"] += 1
+
+    return stats
 
 
 def format_size(size: int) -> str:
@@ -1132,14 +1187,57 @@ def logout():
     return redirect(url_for("login", next="/"))
 
 
+@app.route("/maintenance/thumbnails/regenerate", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=5, window=60)
+def maintenance_thumbnails_regenerate():
+    if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("thumb_maintenance", "denied", reason="invalid_csrf")
+        return {"error": "Invalid CSRF token"}, 403
+
+    stats = run_thumbnail_integrity_check()
+    log_security_event(
+        "thumb_maintenance",
+        "success",
+        checked=stats["checked"],
+        regenerated=stats["regenerated"],
+        failed=stats["failed"],
+    )
+
+    return redirect(
+        url_for(
+            "settings_view",
+            thumb_checked=stats["checked"],
+            thumb_regenerated=stats["regenerated"],
+            thumb_failed=stats["failed"],
+        )
+    )
+
+
 @app.route("/settings")
 @require_auth
 def settings_view():
+    maintenance_result = None
+    checked = request.args.get("thumb_checked")
+    regenerated = request.args.get("thumb_regenerated")
+    failed = request.args.get("thumb_failed")
+    if checked is not None and regenerated is not None and failed is not None:
+        try:
+            maintenance_result = {
+                "checked": int(checked),
+                "regenerated": int(regenerated),
+                "failed": int(failed),
+            }
+        except ValueError:
+            maintenance_result = None
+
     return render_template_string(
         SETTINGS_TEMPLATE,
         theme_color=PWA_THEME_COLOR,
         data_folder=str(DATA_FOLDER),
         thumb_cache=str(THUMBNAIL_CACHE_DIR),
+        maintenance_result=maintenance_result,
+        csrf=csrf_token(),
     )
 
 
