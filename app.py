@@ -63,6 +63,18 @@ def resolve_secret_key() -> str:
 
 app = Flask(__name__)
 app.secret_key = resolve_secret_key()
+
+# Session persistence configuration for mobile compatibility
+# PERMANENT_SESSION_LIFETIME: 30 days for persistent sessions
+# SESSION_COOKIE_SECURE: Only send over HTTPS (set via env for flexibility)
+# SESSION_COOKIE_SAMESITE: Lax to allow cross-site navigation while maintaining security
+# SESSION_COOKIE_HTTPONLY: Prevent JavaScript access to session cookie
+app.config["PERMANENT_SESSION_LIFETIME"] = int(os.environ.get("SESSION_LIFETIME_DAYS", 30)) * 24 * 60 * 60
+app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "true").strip().lower() == "true"
+app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+
 app.after_request(add_security_headers)
 
 
@@ -1116,6 +1128,7 @@ def auth():
 
     password = request.form.get("password", "")
     if verify_local_password(password):
+        session.permanent = True
         session["authenticated"] = True
         session["auth_method"] = "local"
         log_security_event("login", "success", auth_method="local")
@@ -1197,7 +1210,8 @@ def oidc_callback():
         if not user_id:
             return "Could not identify user from OIDC response", 400
 
-        # Set session as authenticated
+        # Set session as permanent and authenticated
+        session.permanent = True
         session["authenticated"] = True
         session["user_id"] = user_id
         session["user_name"] = user_name
