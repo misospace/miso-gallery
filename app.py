@@ -98,7 +98,7 @@ def log_security_event(event: str, outcome: str, **fields: object) -> None:
 
 # Configure OAuth for OIDC if enabled
 configure_oauth(app)
-THUMBNAIL_SIZE = (400, 400)
+THUMBNAIL_MAX_SIZE = 600
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
@@ -688,7 +688,7 @@ def thumbnail_filename(rel_path: str, source_path: Path) -> str:
 def generate_thumbnail(source_path: Path, output_path: Path) -> None:
     with Image.open(source_path) as img:
         img = img.convert("RGB")
-        img.thumbnail(THUMBNAIL_SIZE)
+        img.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), Image.Resampling.LANCZOS)
         img.save(output_path, format="JPEG", quality=85, optimize=True)
 
 
