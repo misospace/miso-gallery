@@ -98,7 +98,7 @@ def log_security_event(event: str, outcome: str, **fields: object) -> None:
 
 # Configure OAuth for OIDC if enabled
 configure_oauth(app)
-THUMBNAIL_MAX_SIZE = 400
+THUMBNAIL_MAX_SIZE = 600
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".gif", ".webp")
 FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
