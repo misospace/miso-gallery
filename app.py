@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import shlex
+import subprocess
 from pathlib import Path
 
 from flask import (
@@ -117,6 +119,31 @@ FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 PWA_THEME_COLOR = "#0d0d0d"
 PWA_APP_NAME = "Miso Gallery"
 APP_VERSION = (os.environ.get("APP_VERSION") or "v0.1.x").strip() or "v0.1.x"
+WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
+
+
+def _webhook_enabled() -> bool:
+    return os.environ.get("WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _task_env_key(task_name: str) -> str:
+    normalized = "".join(ch if ch.isalnum() else "_" for ch in task_name).strip("_").upper()
+    return f"{WEBHOOK_TASK_PREFIX}{normalized}" if normalized else ""
+
+
+def _render_task_command(template: str, params: dict[str, object]) -> str:
+    rendered = template
+    for key, value in params.items():
+        if isinstance(value, (dict, list)):
+            raise ValueError(f"params.{key} must be a scalar value")
+        rendered = rendered.replace(f"{{params.{key}}}", shlex.quote(str(value)))
+
+    if "{params." in rendered:
+        raise ValueError("missing required params for command template")
+
+    return rendered
+
+
 SERVICE_WORKER_TEMPLATE = """
 const CACHE_VERSION = "miso-gallery-v1";
 const CORE_ASSETS = [
@@ -1225,6 +1252,77 @@ def maintenance_thumbnails_regenerate():
             thumb_failed=stats["failed"],
         )
     )
+
+
+@app.route("/api/webhook/run", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=20, window=60)
+def webhook_run_task():
+    if not _webhook_enabled():
+        return {"error": "Webhook tasks are disabled"}, 404
+
+    payload = request.get_json(silent=True) or {}
+    task = str(payload.get("task", "")).strip()
+    params = payload.get("params") or {}
+
+    if not task:
+        return {"error": "task is required"}, 400
+    if not isinstance(params, dict):
+        return {"error": "params must be an object"}, 400
+
+    env_key = _task_env_key(task)
+    if not env_key:
+        return {"error": "invalid task name"}, 400
+
+    template = os.environ.get(env_key, "").strip()
+    if not template:
+        return {"error": f"task '{task}' is not configured"}, 404
+
+    try:
+        command = _render_task_command(template, params)
+        argv = shlex.split(command)
+    except ValueError as exc:
+        return {"error": str(exc)}, 400
+
+    if not argv:
+        return {"error": "configured task produced an empty command"}, 500
+
+    try:
+        timeout = max(1, min(600, int(os.environ.get("WEBHOOK_TASK_TIMEOUT", "30"))))
+    except ValueError:
+        timeout = 30
+
+    try:
+        completed = subprocess.run(
+            argv,
+            cwd=str(DATA_FOLDER),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        log_security_event("webhook_task", "error", task=task, reason="timeout", timeout=timeout)
+        return {"task": task, "success": False, "error": f"task timed out after {timeout}s"}, 504
+    except OSError as exc:
+        log_security_event("webhook_task", "error", task=task, reason="spawn_failed", error=str(exc))
+        return {"task": task, "success": False, "error": f"failed to execute task: {exc}"}, 500
+
+    success = completed.returncode == 0
+    log_security_event(
+        "webhook_task",
+        "success" if success else "error",
+        task=task,
+        exit_code=completed.returncode,
+    )
+
+    return {
+        "task": task,
+        "success": success,
+        "exitCode": completed.returncode,
+        "stdout": completed.stdout,
+        "stderr": completed.stderr,
+    }
 
 
 @app.route("/settings")
