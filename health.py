@@ -20,6 +20,9 @@ from flask import Blueprint, jsonify
 
 DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
 THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
+STORAGE_HEALTH_SIGNAL_FILE = Path(
+    os.environ.get("STORAGE_HEALTH_SIGNAL_FILE", "/tmp/miso-gallery-storage-unhealthy.signal")
+)
 
 health_bp = Blueprint("health", __name__)
 
@@ -62,11 +65,33 @@ def check_storage_write(path: Path) -> tuple[bool, str]:
         return False, f"OS error writing to {path}: {e}"
 
 
+def update_unhealthy_signal(health: dict[str, Any]) -> None:
+    """Persist or clear unhealthy storage signal file."""
+    try:
+        if health["status"] == "unhealthy":
+            STORAGE_HEALTH_SIGNAL_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STORAGE_HEALTH_SIGNAL_FILE.write_text(
+                (
+                    f"status={health['status']}\n"
+                    f"timestamp={health['timestamp']}\n"
+                    f"data_folder={DATA_FOLDER}\n"
+                    f"thumbnail_cache={THUMBNAIL_CACHE_DIR}\n"
+                ),
+                encoding="utf-8",
+            )
+        elif STORAGE_HEALTH_SIGNAL_FILE.exists():
+            STORAGE_HEALTH_SIGNAL_FILE.unlink()
+    except OSError:
+        # Signal file update should not break the health endpoint.
+        pass
+
+
 def get_storage_health() -> dict[str, Any]:
     """Get comprehensive storage health status."""
     health: dict[str, Any] = {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
+        "signal_file": str(STORAGE_HEALTH_SIGNAL_FILE),
         "checks": {
             "data_folder": {"path": str(DATA_FOLDER)},
             "thumbnail_cache": {"path": str(THUMBNAIL_CACHE_DIR)},
@@ -104,7 +129,8 @@ def get_storage_health() -> dict[str, Any]:
     # Determine overall status
     if not (read_ok and write_ok and thumb_read_ok and thumb_write_ok):
         health["status"] = "unhealthy"
-    
+
+    update_unhealthy_signal(health)
     return health
 
 
