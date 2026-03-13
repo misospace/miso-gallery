@@ -98,6 +98,8 @@ docker run -d \
 | `RATE_LIMIT_PREFIX` | No | `miso-gallery:ratelimit` | Key prefix for rate-limit entries |
 | `RATE_LIMIT_ROUTE_LIMITS` | No | - | JSON overrides per endpoint, e.g. `{"auth":{"max_requests":5,"window":300}}` |
 
+See [docs/rate-limit-shared-backend.md](docs/rate-limit-shared-backend.md) for recommended production rollout and migration plan.
+
 #### Authentik Setup
 
 1. Create an Application in Authentik
