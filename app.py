@@ -591,6 +591,7 @@ RECENT_TEMPLATE = """
 <header>
   <h1>🍲 Recent</h1>
   <div class="header-actions">
+    <button type="button" id="refreshRecentBtn" class="refresh-btn" title="Refresh recent images">↻ Refresh</button>
     <button type="button" id="installPwaBtn" class="refresh-btn" hidden>⬇ Install</button>
     <a href="/" class="refresh-btn">← Gallery</a>
   </div>
@@ -616,6 +617,7 @@ RECENT_TEMPLATE = """
 <script>
   let deferredInstallPrompt = null;
   const installBtn = document.getElementById('installPwaBtn');
+  const refreshBtn = document.getElementById('refreshRecentBtn');
 
   if ('serviceWorker' in navigator) {
     window.addEventListener('load', () => {
@@ -627,6 +629,10 @@ RECENT_TEMPLATE = """
     event.preventDefault();
     deferredInstallPrompt = event;
     if (installBtn) installBtn.hidden = false;
+  });
+
+  refreshBtn?.addEventListener('click', () => {
+    window.location.reload();
   });
 
   installBtn?.addEventListener('click', async () => {

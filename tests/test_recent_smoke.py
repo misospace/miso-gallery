@@ -48,6 +48,9 @@ def test_recent_cards_have_valid_view_and_thumb_links(monkeypatch, tmp_path):
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
 
+    assert 'id="refreshRecentBtn"' in html
+    assert "↻ Refresh" in html
+
     # Should include real image from data folder
     assert "cats/cat.png" in html
 
