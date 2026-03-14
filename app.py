@@ -272,6 +272,9 @@ HTML_TEMPLATE = """
     .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .delete-btn { position:absolute; top:10px; right:10px; background:rgba(220,53,69,.9); color:white; border:none; padding:8px 12px; border-radius:5px; cursor:pointer; font-size:.8rem; opacity:0; transition:opacity .2s; }
     .image-card:hover .delete-btn { opacity:1; }
+    .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .thumb-preview-btn:hover { background:#f5a623; }
+    .image-card:hover .thumb-preview-btn { opacity:1; }
     .selector { position:absolute; top:10px; left:10px; z-index:2; transform:scale(1.2); cursor:pointer; }
     .empty { text-align:center; padding:50px; color:#666; }
     .stats { color:#666; font-size:.85rem; margin-top:20px; text-align:center; }
@@ -348,6 +351,7 @@ HTML_TEMPLATE = """
               <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy"></a>
               <div class="image-info"><div class="image-name">{{ item.name }}</div><div>{{ item.size }}</div></div>
               <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete {{ item.name }}?')">🗑️</button>
+              <a href="{{ item.thumb_url }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
             </div>
           {% endif %}
         {% endfor %}
@@ -580,10 +584,14 @@ RECENT_TEMPLATE = """
     .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
     .image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; }
     .image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
+    .image-card-link { display:block; }
     .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
     .image-info { padding:10px; font-size:.8rem; color:#888; }
     .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .image-date { color:#666; font-size:.75rem; margin-top:4px; }
+    .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .thumb-preview-btn:hover { background:#f5a623; }
+    .image-card:hover .thumb-preview-btn { opacity:1; }
     .empty { text-align:center; padding:50px; color:#666; }
   </style>
 </head>
@@ -601,13 +609,16 @@ RECENT_TEMPLATE = """
   {% if items %}
     <div class="grid">
     {% for item in items %}
-      <a href="{{ item.url }}" class="image-card" target="_blank">
-        <img src="{{ item.thumb }}" alt="{{ item.name }}">
-        <div class="image-info">
-          <div class="image-name">{{ item.name }}</div>
-          <div class="image-date">{{ item.added }}</div>
-        </div>
-      </a>
+      <div class="image-card" style="position:relative;">
+        <a href="{{ item.url }}" class="image-card-link" target="_blank">
+          <img src="{{ item.thumb }}" alt="{{ item.name }}">
+          <div class="image-info">
+            <div class="image-name">{{ item.name }}</div>
+            <div class="image-date">{{ item.added }}</div>
+          </div>
+        </a>
+        <a href="{{ item.thumb }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
+      </div>
     {% endfor %}
     </div>
   {% else %}
