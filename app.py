@@ -591,7 +591,9 @@ RECENT_TEMPLATE = """
     .image-date { color:#666; font-size:.75rem; margin-top:4px; }
     .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
     .thumb-preview-btn:hover { background:#f5a623; }
-    .image-card:hover .thumb-preview-btn { opacity:1; }
+    .folder-nav-btn { position:absolute; bottom:10px; left:10px; background:rgba(59,130,246,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .folder-nav-btn:hover { background:#3b82f6; }
+    .image-card:hover .folder-nav-btn, .image-card:hover .thumb-preview-btn { opacity:1; }
     .empty { text-align:center; padding:50px; color:#666; }
   </style>
 </head>
@@ -617,6 +619,9 @@ RECENT_TEMPLATE = """
             <div class="image-date">{{ item.added }}</div>
           </div>
         </a>
+        {% if item.folder_url %}
+        <a href="{{ item.folder_url }}" class="folder-nav-btn" title="Go to folder">📁 Folder</a>
+        {% endif %}
         <a href="{{ item.thumb }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
       </div>
     {% endfor %}
@@ -1169,6 +1174,10 @@ def recent_view():
 
             rel_path = item.relative_to(DATA_FOLDER).as_posix()
             date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+            
+            # Get folder path for navigation
+            folder_path = os.path.dirname(rel_path)
+            folder_url = url_for("index", subpath=folder_path) if folder_path else url_for("index")
 
             images.append({
                 "name": item.name,
@@ -1176,6 +1185,7 @@ def recent_view():
                 "thumb": url_for("thumb", filename=rel_path),
                 "added": date_str,
                 "mtime": mtime,
+                "folder_url": folder_url,
             })
     except Exception:
         pass
