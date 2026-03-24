@@ -825,7 +825,13 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
     now = time.time()
     cached = _FOLDER_COVER_CACHE.get(folder_rel_path)
     if cached and now - cached[0] < FOLDER_COVER_CACHE_TTL:
-        return cached[1]
+        cached_rel = cached[1]
+        if cached_rel:
+            cached_path = DATA_FOLDER / sanitize_rel_path(cached_rel)
+            if cached_path.exists() and cached_path.is_file() and cached_path.suffix.lower() in IMAGE_EXTENSIONS:
+                return cached_rel
+        else:
+            cached = None
 
     folder_path = DATA_FOLDER / sanitize_rel_path(folder_rel_path) if folder_rel_path else DATA_FOLDER
     if not folder_path.exists() or not folder_path.is_dir():
@@ -843,7 +849,10 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
         cover_rel = rel_candidate.as_posix()
         break
 
-    _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
+    if cover_rel is None:
+        _FOLDER_COVER_CACHE.pop(folder_rel_path, None)
+    else:
+        _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
     return cover_rel
 
 
