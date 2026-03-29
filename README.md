@@ -214,7 +214,7 @@ docker run -p 5000:5000 -v ./images:/data miso-gallery:latest
 
 ### Releases
 
-Use the **Manual Release** GitHub Actions workflow and enter a version like `0.4.6`. It normalizes `v0.4.6` to `0.4.6`, updates the in-app version string in `app.py`, commits that bump to `main`, creates the plain-semver tag, and creates the GitHub release with generated notes.
+Use the **Manual Release** GitHub Actions workflow and enter a version like `0.4.6`. It normalizes `v0.4.6` to `0.4.6`, updates the in-app version string in `app.py`, pushes that bump to `main` through the configured bot identity, creates the plain-semver tag, and creates the GitHub release with generated notes.
 
 ## License
 
