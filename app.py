@@ -1511,8 +1511,9 @@ def oidc_callback():
 
 
 # Health routes
-from health import storage_health, storage_health_read, storage_health_write
+from health import health, storage_health, storage_health_read, storage_health_write
 
+app.add_url_rule("/health", "health", health, methods=["GET"])
 app.add_url_rule("/health/storage", "storage_health", storage_health, methods=["GET"])
 app.add_url_rule("/health/storage/read", "storage_health_read", storage_health_read, methods=["GET"])
 app.add_url_rule("/health/storage/write", "storage_health_write", storage_health_write, methods=["GET"])

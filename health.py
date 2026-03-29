@@ -170,3 +170,25 @@ def storage_health_write() -> tuple[Any, int]:
             "thumbnail_cache": health["checks"]["thumbnail_cache"]["write"],
         },
     }), status_code
+
+
+
+@health_bp.route("/health")
+def health() -> tuple[Any, int]:
+    """Return root health endpoint with version and storage status."""
+    storage_health_data = get_storage_health()
+    app_version = os.environ.get("APP_VERSION") or "v0.1.x"
+
+    health_data = {
+        "status": storage_health_data["status"],
+        "version": app_version,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "storage": {
+            "status": storage_health_data["status"],
+            "data_folder": storage_health_data["checks"]["data_folder"],
+            "thumbnail_cache": storage_health_data["checks"]["thumbnail_cache"],
+        },
+    }
+
+    status_code = 200 if health_data["status"] == "healthy" else 503
+    return jsonify(health_data), status_code
