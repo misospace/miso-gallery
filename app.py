@@ -277,6 +277,8 @@ HTML_TEMPLATE = """
     .image-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
     .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
     .image-info { padding:10px; font-size:.8rem; color:#888; }
+    .image-meta-row { display:flex; flex-wrap:wrap; gap:6px 10px; margin-top:6px; color:#777; font-size:.75rem; }
+    .image-meta-pill { display:inline-flex; align-items:center; gap:4px; }
     .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .delete-btn { position:absolute; top:10px; right:10px; background:rgba(220,53,69,.9); color:white; border:none; padding:8px 12px; border-radius:5px; cursor:pointer; font-size:.8rem; opacity:0; transition:opacity .2s; }
     .image-card:hover .delete-btn { opacity:1; }
@@ -370,8 +372,15 @@ HTML_TEMPLATE = """
           {% else %}
             <div class="image-card" data-image-card>
               <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
+<<<<<<< HEAD
               <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async"></a>
-              <div class="image-info"><div class="image-name">{{ item.name }}</div><div>{{ item.size }}</div></div>
+              <div class="image-info">
+                <div class="image-name">{{ item.name }}</div>
+                <div class="image-meta-row">
+                  <span class="image-meta-pill">📦 {{ item.size }}</span>
+                  <span class="image-meta-pill">🕒 {{ item.modified }}</span>
+                </div>
+              </div>
               <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete {{ item.name }}?')">🗑️</button>
               <a href="{{ item.thumb_url }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
             </div>
@@ -645,7 +654,10 @@ RECENT_TEMPLATE = """
           <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async">
           <div class="image-info">
             <div class="image-name">{{ item.name }}</div>
-            <div class="image-date">{{ item.added }}</div>
+            <div class="image-meta-row">
+              <span class="image-meta-pill">📦 {{ item.size }}</span>
+              <span class="image-meta-pill">🕒 {{ item.added }}</span>
+            </div>
           </div>
         </a>
         {% if item.folder_url %}
@@ -987,6 +999,8 @@ def images(filename: str):
 @app.route("/<path:subpath>")
 @require_auth
 def index(subpath: str = ""):
+    import time
+
     # Search query for filtering items
     search_query = request.args.get('q', '').strip().lower()
     safe_subpath = sanitize_rel_path(subpath) if subpath else ""
@@ -1018,6 +1032,7 @@ def index(subpath: str = ""):
             )
         elif item.suffix.lower() in IMAGE_EXTENSIONS:
             stats["images"] += 1
+            item_stat = item.stat()
             items.append(
                 {
                     "name": item.name,
@@ -1025,7 +1040,8 @@ def index(subpath: str = ""):
                     "thumb_url": url_for("thumb", filename=rel_path),
                     "view_url": url_for("view", filename=rel_path),
                     "delete_url": url_for("delete", filename=rel_path),
-                    "size": format_size(item.stat().st_size),
+                    "size": format_size(item_stat.st_size),
+                    "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
                     "is_dir": False,
                 }
             )
@@ -1224,6 +1240,7 @@ def recent_view():
                 "url": url_for("view", filename=rel_path),
                 "thumb": url_for("thumb", filename=rel_path),
                 "added": date_str,
+                "size": format_size(item.stat().st_size),
                 "mtime": mtime,
                 "folder_url": folder_url,
             })
