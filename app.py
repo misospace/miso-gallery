@@ -253,6 +253,10 @@ HTML_TEMPLATE = """
     .drawer-divider { height:1px; background:#2a2a2a; margin:6px 0; }
     .container { padding:20px; }
     .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:15px; }
+    .filter-summary { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:-4px 0 15px; color:#cfcfcf; }
+    .filter-chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:rgba(245,166,35,.12); border:1px solid rgba(245,166,35,.35); color:#f6c36d; font-size:.92rem; }
+    .clear-filter-link { color:#f5a623; text-decoration:none; font-size:.92rem; }
+    .clear-filter-link:hover { text-decoration:underline; }
     .toolbar button { background:#2a2a2a; color:#f0f0f0; border:1px solid #444; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
     .toolbar .danger { background:#a52834; border-color:#dc3545; }
     .toolbar .danger:disabled { opacity:0.5; cursor:not-allowed; }
@@ -323,9 +327,19 @@ HTML_TEMPLATE = """
 
   <div class="container">
     <form method="GET" action="{{ url_for('index', subpath=current_subpath) }}" style="margin-bottom:15px;">
-      <input id="categorySearch" type="text" name="q" placeholder="Search categories..." value="{{ request.args.get('q','') }}" autocomplete="off" spellcheck="false" style="padding:6px 10px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#e0e0e0; min-width: 240px;">
-      <button type="submit" class="refresh-btn" style="margin-left:5px;">🔍 Search</button>
+      <input id="categorySearch" type="text" name="q" placeholder="Filter categories..." value="{{ search_query }}" autocomplete="off" spellcheck="false" aria-label="Filter categories by name" style="padding:6px 10px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#e0e0e0; min-width: 240px;">
+      <button type="submit" class="refresh-btn" style="margin-left:5px;">🔍 Apply filter</button>
+      {% if category_filter_active %}
+      <a href="{{ url_for('index', subpath=current_subpath) }}" class="refresh-btn" style="margin-left:5px; text-decoration:none; display:inline-flex; align-items:center;">✕ Clear</a>
+      {% endif %}
     </form>
+    {% if category_filter_active %}
+    <div class="filter-summary" role="status" aria-live="polite">
+      <span>Active filter:</span>
+      <span class="filter-chip">Category name contains “{{ search_query }}”</span>
+      <a href="{{ url_for('index', subpath=current_subpath) }}" class="clear-filter-link">Clear filter</a>
+    </div>
+    {% endif %}
     {% if items %}
     <form id="bulkDeleteForm" method="POST" action="/bulk-delete">
       <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -346,7 +360,7 @@ HTML_TEMPLATE = """
               <input class="selector" type="checkbox" name="folders" value="{{ item.rel_path }}" onchange="syncSelectionState()">
               <a href="{{ item.url }}" class="folder">
                 {% if item.cover_thumb_url %}
-                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy">
+                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy" decoding="async">
                 {% else %}
                   <div class="folder-icon">📁</div>
                 {% endif %}
@@ -356,7 +370,7 @@ HTML_TEMPLATE = """
           {% else %}
             <div class="image-card" data-image-card>
               <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
-              <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy"></a>
+              <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async"></a>
               <div class="image-info"><div class="image-name">{{ item.name }}</div><div>{{ item.size }}</div></div>
               <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete {{ item.name }}?')">🗑️</button>
               <a href="{{ item.thumb_url }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
@@ -628,7 +642,7 @@ RECENT_TEMPLATE = """
     {% for item in items %}
       <div class="image-card" style="position:relative;">
         <a href="{{ item.url }}" class="image-card-link" target="_blank">
-          <img src="{{ item.thumb }}" alt="{{ item.name }}">
+          <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async">
           <div class="image-info">
             <div class="image-name">{{ item.name }}</div>
             <div class="image-date">{{ item.added }}</div>
@@ -1052,6 +1066,8 @@ def index(subpath: str = ""):
         stats=stats,
         current_subpath=safe_subpath,
         nav_crumbs=nav_crumbs,
+        search_query=search_query,
+        category_filter_active=bool(search_query and not safe_subpath),
         app_version=APP_VERSION,
         csrf=csrf_token(),
         theme_color=PWA_THEME_COLOR,
