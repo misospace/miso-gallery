@@ -1109,6 +1109,7 @@ def index(subpath: str = ""):
                     "view_url": url_for("view", filename=rel_path),
                     "delete_url": url_for("delete", filename=rel_path),
                     "size": format_size(item_stat.st_size),
+                    "dimensions": get_image_dimensions(item),
                     "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
                     "is_dir": False,
                 }
