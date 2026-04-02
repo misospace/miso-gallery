@@ -70,3 +70,14 @@ def test_recent_cards_have_valid_view_and_thumb_links(monkeypatch, tmp_path):
         t = client.get(url)
         assert t.status_code == 200, f"Broken thumbnail URL: {url}"
         assert t.headers.get("Content-Type", "").startswith("image/")
+
+
+def test_recent_cards_render_details_panel(monkeypatch, tmp_path):
+    client = _build_client(monkeypatch, tmp_path)
+
+    resp = client.get("/recent")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+
+    assert "<summary>Details</summary>" in html
+    assert 'Path</span><span class="image-details-value">cats/cat.png' in html

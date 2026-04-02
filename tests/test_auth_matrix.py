@@ -106,3 +106,12 @@ def test_images_route_is_public_even_with_auth_enabled(monkeypatch, tmp_path):
     client = build_client(monkeypatch, tmp_path, auth_type="local", admin_password="pass123")
     resp = client.get("/images/sample.png", follow_redirects=False)
     assert resp.status_code == 200
+
+
+def test_root_gallery_renders_inline_details_panel(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path, auth_type="none")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    assert "<summary>Details</summary>" in html
+    assert "Path</span><span class=\"image-details-value\">sample.png" in html

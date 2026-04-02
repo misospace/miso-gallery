@@ -277,7 +277,18 @@ HTML_TEMPLATE = """
     .image-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
     .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
     .image-info { padding:10px; font-size:.8rem; color:#888; }
+    .image-meta-row { display:flex; flex-wrap:wrap; gap:6px 10px; margin-top:6px; color:#777; font-size:.75rem; }
+    .image-meta-pill { display:inline-flex; align-items:center; gap:4px; }
     .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .image-details { margin:0 10px 10px; border:1px solid #323232; border-radius:8px; background:#151515; }
+    .image-details summary { cursor:pointer; list-style:none; padding:8px 10px; color:#d6d6d6; font-size:.78rem; font-weight:600; }
+    .image-details summary::-webkit-details-marker { display:none; }
+    .image-details summary::after { content:'▾'; float:right; color:#888; }
+    .image-details[open] summary::after { content:'▴'; }
+    .image-details-body { padding:0 10px 10px; display:grid; gap:6px; font-size:.75rem; color:#a9a9a9; }
+    .image-details-row { display:flex; justify-content:space-between; gap:12px; }
+    .image-details-label { color:#7c7c7c; }
+    .image-details-value { text-align:right; word-break:break-word; }
     .delete-btn { position:absolute; top:10px; right:10px; background:rgba(220,53,69,.9); color:white; border:none; padding:8px 12px; border-radius:5px; cursor:pointer; font-size:.8rem; opacity:0; transition:opacity .2s; }
     .image-card:hover .delete-btn { opacity:1; }
     .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
@@ -371,7 +382,22 @@ HTML_TEMPLATE = """
             <div class="image-card" data-image-card>
               <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
               <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async"></a>
-              <div class="image-info"><div class="image-name">{{ item.name }}</div><div>{{ item.size }}</div></div>
+              <div class="image-info">
+                <div class="image-name">{{ item.name }}</div>
+                <div class="image-meta-row">
+                  <span class="image-meta-pill">📦 {{ item.size }}</span>
+                  <span class="image-meta-pill">🕒 {{ item.modified }}</span>
+                </div>
+              </div>
+              <details class="image-details">
+                <summary>Details</summary>
+                <div class="image-details-body">
+                  <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
+                  <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
+                  <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
+                  <div class="image-details-row"><span class="image-details-label">Modified</span><span class="image-details-value">{{ item.modified }}</span></div>
+                </div>
+              </details>
               <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete {{ item.name }}?')">🗑️</button>
               <a href="{{ item.thumb_url }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
             </div>
@@ -616,8 +642,19 @@ RECENT_TEMPLATE = """
     .image-card-link { display:block; }
     .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
     .image-info { padding:10px; font-size:.8rem; color:#888; }
+    .image-meta-row { display:flex; flex-wrap:wrap; gap:6px 10px; margin-top:6px; color:#777; font-size:.75rem; }
+    .image-meta-pill { display:inline-flex; align-items:center; gap:4px; }
     .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
     .image-date { color:#666; font-size:.75rem; margin-top:4px; }
+    .image-details { margin:0 10px 10px; border:1px solid #323232; border-radius:8px; background:#151515; }
+    .image-details summary { cursor:pointer; list-style:none; padding:8px 10px; color:#d6d6d6; font-size:.78rem; font-weight:600; }
+    .image-details summary::-webkit-details-marker { display:none; }
+    .image-details summary::after { content:'▾'; float:right; color:#888; }
+    .image-details[open] summary::after { content:'▴'; }
+    .image-details-body { padding:0 10px 10px; display:grid; gap:6px; font-size:.75rem; color:#a9a9a9; }
+    .image-details-row { display:flex; justify-content:space-between; gap:12px; }
+    .image-details-label { color:#7c7c7c; }
+    .image-details-value { text-align:right; word-break:break-word; }
     .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
     .thumb-preview-btn:hover { background:#f5a623; }
     .folder-nav-btn { position:absolute; bottom:10px; left:10px; background:rgba(59,130,246,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
@@ -645,9 +682,21 @@ RECENT_TEMPLATE = """
           <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async">
           <div class="image-info">
             <div class="image-name">{{ item.name }}</div>
-            <div class="image-date">{{ item.added }}</div>
+            <div class="image-meta-row">
+              <span class="image-meta-pill">📦 {{ item.size }}</span>
+              <span class="image-meta-pill">🕒 {{ item.added }}</span>
+            </div>
           </div>
         </a>
+        <details class="image-details">
+          <summary>Details</summary>
+          <div class="image-details-body">
+            <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
+            <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
+            <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
+            <div class="image-details-row"><span class="image-details-label">Added</span><span class="image-details-value">{{ item.added }}</span></div>
+          </div>
+        </details>
         {% if item.folder_url %}
         <a href="{{ item.folder_url }}" class="folder-nav-btn" title="Go to folder">📁 Folder</a>
         {% endif %}
@@ -987,6 +1036,8 @@ def images(filename: str):
 @app.route("/<path:subpath>")
 @require_auth
 def index(subpath: str = ""):
+    import time
+
     # Search query for filtering items
     search_query = request.args.get('q', '').strip().lower()
     safe_subpath = sanitize_rel_path(subpath) if subpath else ""
@@ -1018,6 +1069,7 @@ def index(subpath: str = ""):
             )
         elif item.suffix.lower() in IMAGE_EXTENSIONS:
             stats["images"] += 1
+            item_stat = item.stat()
             items.append(
                 {
                     "name": item.name,
@@ -1025,7 +1077,8 @@ def index(subpath: str = ""):
                     "thumb_url": url_for("thumb", filename=rel_path),
                     "view_url": url_for("view", filename=rel_path),
                     "delete_url": url_for("delete", filename=rel_path),
-                    "size": format_size(item.stat().st_size),
+                    "size": format_size(item_stat.st_size),
+                    "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
                     "is_dir": False,
                 }
             )
@@ -1221,9 +1274,11 @@ def recent_view():
 
             images.append({
                 "name": item.name,
+                "rel_path": rel_path,
                 "url": url_for("view", filename=rel_path),
                 "thumb": url_for("thumb", filename=rel_path),
                 "added": date_str,
+                "size": format_size(item.stat().st_size),
                 "mtime": mtime,
                 "folder_url": folder_url,
             })
