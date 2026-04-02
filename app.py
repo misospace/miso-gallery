@@ -399,6 +399,7 @@ HTML_TEMPLATE = """
                   <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
                   {% if item.dimensions %}<div class="image-details-row"><span class="image-details-label">Dimensions</span><span class="image-details-value">{{ item.dimensions }}</span></div>{% endif %}
+                  <div class="image-details-row"><span class="image-details-label">Added</span><span class="image-details-value">{{ item.added }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Modified</span><span class="image-details-value">{{ item.modified }}</span></div>
                 </div>
               </details>
@@ -1111,6 +1112,7 @@ def index(subpath: str = ""):
                     "delete_url": url_for("delete", filename=rel_path),
                     "size": format_size(item_stat.st_size),
                     "dimensions": get_image_dimensions(item),
+                    "added": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
                     "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
                     "is_dir": False,
                 }
