@@ -293,6 +293,9 @@ HTML_TEMPLATE = """
     .image-card:hover .delete-btn { opacity:1; }
     .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
     .thumb-preview-btn:hover { background:#f5a623; }
+    .tag-btn { position:absolute; bottom:10px; left:10px; background:rgba(52,152,219,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .tag-btn:hover { background:#3498db; }
+    .image-card:hover .tag-btn { opacity:1; }
     .image-card:hover .thumb-preview-btn { opacity:1; }
     .selector { position:absolute; top:10px; left:10px; z-index:2; transform:scale(1.2); cursor:pointer; }
     .empty { text-align:center; padding:50px; color:#666; }
@@ -401,6 +404,7 @@ HTML_TEMPLATE = """
               </details>
               <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete {{ item.name }}?')">🗑️</button>
               <a href="{{ item.thumb_url }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
+              <button type="button" class="tag-btn" onclick="openTagEditor('{{ item.rel_path }}', '{{ item.name }}')">🏷️ Tag</button>
             </div>
           {% endif %}
         {% endfor %}
@@ -500,6 +504,22 @@ HTML_TEMPLATE = """
     document.getElementById('deselectAllBtn')?.addEventListener('click', () => setAllSelections(false));
     document.getElementById('clearSelectionBtn')?.addEventListener('click', () => setAllSelections(false));
     syncSelectionState();
+    function openTagEditor(relPath, imageName) {
+      const tag = prompt('Enter a tag for "' + imageName + '":', '');
+      if (tag && tag.trim()) {
+        fetch('/tag', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: 'rel_path=' + encodeURIComponent(relPath) + '&tag=' + encodeURIComponent(tag.trim()) + '&csrf_token={{ csrf }}'
+        }).then(response => {
+          if (response.ok) {
+            alert('Tag added successfully');
+          } else {
+            response.json().then(err => alert('Error: ' + (err.error || 'Unknown error')));
+          }
+        }).catch(err => alert('Error: ' + err.message));
+      }
+    }
   </script>
 </body>
 </html>
@@ -1242,8 +1262,32 @@ def bulk_delete():
         current_subpath=current_subpath,
     )
 
-    return redirect(url_for("index", subpath=current_subpath))
 
+
+@app.route("/tag", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=20, window=60)
+def add_tag():
+    if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("add_tag", "denied", reason="invalid_csrf")
+        return {"error": "Invalid CSRF token"}, 403
+
+    rel_path = sanitize_rel_path(request.form.get("rel_path", ""))
+    tag = request.form.get("tag", "").strip()
+
+    if not rel_path or not tag:
+        return {"error": "Missing rel_path or tag"}, 400
+
+    # For now, just log the tag assignment (no backend storage yet)
+    # This is a UI-first partial fix for #91
+    log_security_event(
+        "add_tag",
+        "success",
+        target=rel_path,
+        tag=tag,
+    )
+
+    return {"status": "ok"}
 
 @app.route("/recent")
 @require_auth
