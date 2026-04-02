@@ -115,3 +115,5 @@ def test_root_gallery_renders_inline_details_panel(monkeypatch, tmp_path):
     html = resp.get_data(as_text=True)
     assert "<summary>Details</summary>" in html
     assert "Path</span><span class=\"image-details-value\">sample.png" in html
+    assert "content-visibility:auto" in html
+    assert "contain-intrinsic-size:260px 320px" in html

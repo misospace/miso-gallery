@@ -81,3 +81,5 @@ def test_recent_cards_render_details_panel(monkeypatch, tmp_path):
 
     assert "<summary>Details</summary>" in html
     assert 'Path</span><span class="image-details-value">cats/cat.png' in html
+    assert "content-visibility:auto" in html
+    assert "contain-intrinsic-size:260px 320px" in html
