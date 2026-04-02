@@ -267,6 +267,8 @@ HTML_TEMPLATE = """
     .selection-actions.active { display:flex; flex-wrap:wrap; }
     .selection-count { color:#f5a623; font-weight:600; }
     .selection-actions .ghost-btn { background:transparent; color:#c9c9c9; border:1px solid #4a4a4a; }
+    .selection-hint { flex-basis:100%; color:#9a9a9a; font-size:.8rem; }
+    .selection-hint code { color:#f6c36d; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
     .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
     .folder-card,.image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; position:relative; content-visibility:auto; contain-intrinsic-size:260px 320px; }
     .folder-card:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
@@ -374,7 +376,9 @@ HTML_TEMPLATE = """
       <div id="selectionActions" class="selection-actions" aria-live="polite">
         <span id="selectionCount" class="selection-count">0 selected</span>
         <button type="button" id="clearSelectionBtn" class="ghost-btn">Clear selection</button>
+        <button type="button" id="bulkDownloadBtn" class="ghost-btn" disabled title="Bulk download is not available yet. Open items individually to download.">Download selected (unavailable)</button>
         <button type="submit" id="bulkDeleteBtn" class="danger" disabled onclick="return confirmBulkDelete()">Delete selected (0)</button>
+        <div class="selection-hint">Bulk download is not available yet. Use each item’s direct view/thumb actions for now.</div>
       </div>
       <div class="grid">
         {% for item in items %}

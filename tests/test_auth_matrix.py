@@ -143,3 +143,12 @@ def test_bulk_delete_redirects_with_feedback(monkeypatch, tmp_path):
     body = follow.get_data(as_text=True)
     assert follow.status_code == 200
     assert "Moved 1 image to trash. Selection cleared." in body
+
+
+def test_bulk_toolbar_shows_download_unavailable_fallback(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path, auth_type="none")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "Download selected (unavailable)" in body
+    assert "Bulk download is not available yet. Use each item’s direct view/thumb actions for now." in body
