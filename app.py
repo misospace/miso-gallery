@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import secrets
 import shlex
@@ -402,6 +403,7 @@ HTML_TEMPLATE = """
                   <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
+                  {% if item.media_type %}<div class="image-details-row"><span class="image-details-label">Type</span><span class="image-details-value">{{ item.media_type }}</span></div>{% endif %}
                   {% if item.dimensions %}<div class="image-details-row"><span class="image-details-label">Dimensions</span><span class="image-details-value">{{ item.dimensions }}</span></div>{% endif %}
                   <div class="image-details-row"><span class="image-details-label">Added</span><span class="image-details-value">{{ item.added }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Modified</span><span class="image-details-value">{{ item.modified }}</span></div>
@@ -724,6 +726,7 @@ RECENT_TEMPLATE = """
             <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
+            {% if item.media_type %}<div class="image-details-row"><span class="image-details-label">Type</span><span class="image-details-value">{{ item.media_type }}</span></div>{% endif %}
             {% if item.dimensions %}<div class="image-details-row"><span class="image-details-label">Dimensions</span><span class="image-details-value">{{ item.dimensions }}</span></div>{% endif %}
             <div class="image-details-row"><span class="image-details-label">Added</span><span class="image-details-value">{{ item.added }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Modified</span><span class="image-details-value">{{ item.modified }}</span></div>
@@ -984,6 +987,11 @@ def get_image_dimensions(path: Path) -> str | None:
         return None
 
 
+def get_media_type(path: Path) -> str | None:
+    media_type, _ = mimetypes.guess_type(path.name)
+    return media_type
+
+
 @app.before_request
 def check_auth():
     if not is_auth_enabled():
@@ -1119,6 +1127,7 @@ def index(subpath: str = ""):
                     "view_url": url_for("view", filename=rel_path),
                     "delete_url": url_for("delete", filename=rel_path),
                     "size": format_size(item_stat.st_size),
+                    "media_type": get_media_type(item),
                     "dimensions": get_image_dimensions(item),
                     "added": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
                     "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
@@ -1347,6 +1356,7 @@ def recent_view():
                 "added": date_str,
                 "modified": date_str,
                 "size": format_size(item.stat().st_size),
+                "media_type": get_media_type(item),
                 "dimensions": get_image_dimensions(item),
                 "mtime": mtime,
                 "folder_url": folder_url,
