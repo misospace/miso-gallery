@@ -397,7 +397,7 @@ HTML_TEMPLATE = """
                 </div>
               </div>
               <details class="image-details">
-                <summary>Details</summary>
+                <summary>Image details</summary>
                 <div class="image-details-body">
                   <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
                   <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
@@ -719,7 +719,7 @@ RECENT_TEMPLATE = """
           </div>
         </a>
         <details class="image-details">
-          <summary>Details</summary>
+          <summary>Image details</summary>
           <div class="image-details-body">
             <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>

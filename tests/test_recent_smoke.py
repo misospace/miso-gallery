@@ -79,7 +79,7 @@ def test_recent_cards_render_details_panel(monkeypatch, tmp_path):
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
 
-    assert "<summary>Details</summary>" in html
+    assert "<summary>Image details</summary>" in html
     assert 'Path</span><span class="image-details-value">cats/cat.png' in html
     assert 'Dimensions</span><span class="image-details-value">64 × 64' in html
     assert 'Modified</span><span class="image-details-value">' in html
