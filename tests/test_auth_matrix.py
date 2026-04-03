@@ -154,3 +154,13 @@ def test_bulk_toolbar_shows_download_unavailable_fallback(monkeypatch, tmp_path)
     assert "Bulk download is not available yet. Use each item’s direct view/thumb actions for now." in body
     assert "@media (max-width: 640px)" in body
     assert ".selection-actions button" in body
+
+
+def test_bulk_toolbar_buttons_reflect_selection_state(monkeypatch, tmp_path):
+    client = build_client(monkeypatch, tmp_path, auth_type="none")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert "if (selectAllBtn) { selectAllBtn.disabled = totalCount === 0 || selectedCount === totalCount; }" in body
+    assert "if (deselectAllBtn) { deselectAllBtn.disabled = selectedCount === 0; }" in body
+    assert ".toolbar button:disabled { opacity:0.5; cursor:not-allowed; }" in body

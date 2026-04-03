@@ -262,6 +262,7 @@ HTML_TEMPLATE = """
     .bulk-feedback strong { color:#f5a623; }
     .toolbar button { background:#2a2a2a; color:#f0f0f0; border:1px solid #444; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
     .toolbar .danger { background:#a52834; border-color:#dc3545; }
+    .toolbar button:disabled { opacity:0.5; cursor:not-allowed; }
     .toolbar .danger:disabled { opacity:0.5; cursor:not-allowed; }
     .selection-actions { display:none; align-items:center; gap:10px; padding:10px 12px; margin:-4px 0 15px; background:#171717; border:1px solid #343434; border-radius:8px; }
     .selection-actions.active { display:flex; flex-wrap:wrap; }
@@ -512,10 +513,13 @@ HTML_TEMPLATE = """
     function syncSelectionState() {
       const selectors = getSelectors();
       const selectedCount = selectors.filter(s => s.checked).length;
+      const totalCount = selectors.length;
       const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
       const selectionActions = document.getElementById('selectionActions');
       const selectionCount = document.getElementById('selectionCount');
       const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+      const selectAllBtn = document.getElementById('selectAllBtn');
+      const deselectAllBtn = document.getElementById('deselectAllBtn');
       selectors.forEach((selector) => {
         const card = selector.closest('[data-image-card]') || selector.closest('[data-folder-card]');
         card?.classList.toggle('selected', selector.checked);
@@ -524,6 +528,8 @@ HTML_TEMPLATE = """
       if (selectionCount) { selectionCount.textContent = `${selectedCount} selected`; }
       if (selectionActions) { selectionActions.classList.toggle('active', selectedCount > 0); }
       if (clearSelectionBtn) { clearSelectionBtn.disabled = selectedCount === 0; }
+      if (selectAllBtn) { selectAllBtn.disabled = totalCount === 0 || selectedCount === totalCount; }
+      if (deselectAllBtn) { deselectAllBtn.disabled = selectedCount === 0; }
     }
     function setAllSelections(checked) { getSelectors().forEach((selector) => selector.checked = checked); syncSelectionState(); }
     function confirmBulkDelete() { const c = getSelectors().filter(s => s.checked).length; return c > 0 && confirm(`Delete ${c} selected image(s)?`); }
