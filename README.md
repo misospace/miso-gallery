@@ -1,7 +1,8 @@
 # Miso Gallery
 
 <p align="center">
-  <img src="https://img.shields.io/docker/v/joryirving/miso-gallery?sort=semver&label=docker" alt="Docker">
+  <img src="https://img.shields.io/docker/v/ghcr.io/joryirving/miso-gallery?sort=semver&label=ghcr" alt="GHCR">
+  <img src="https://github.com/joryirving/miso-gallery/actions/workflows/build.yaml/badge.svg" alt="Build">
   <img src="https://img.shields.io/github/v/release/joryirving/miso-gallery?sort=semver" alt="Release">
   <img src="https://img.shields.io/github/license/joryirving/miso-gallery" alt="License">
 </p>
