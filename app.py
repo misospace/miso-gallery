@@ -1367,34 +1367,38 @@ def recent_view():
 
     try:
         for item in DATA_FOLDER.rglob("*"):
-            if not item.is_file() or not is_image(item):
-                continue
-            if is_excluded_from_recent(item):
-                continue
-            if item.name.startswith("."):
-                continue
             try:
-                mtime = item.stat().st_mtime
-            except OSError:
+                if not item.is_file() or not is_image(item):
+                    continue
+                if is_excluded_from_recent(item):
+                    continue
+                if item.name.startswith("."):
+                    continue
+                try:
+                    mtime = item.stat().st_mtime
+                except OSError:
+                    continue
+
+                rel_path = item.relative_to(DATA_FOLDER).as_posix()
+                date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+                
+                # Get folder path for navigation
+                folder_path = os.path.dirname(rel_path)
+                folder_url = url_for("index", subpath=folder_path) if folder_path else url_for("index")
+
+                images.append({
+                    "name": item.name,
+                    "rel_path": rel_path,
+                    "url": url_for("view", filename=rel_path),
+                    "thumb": url_for("thumb", filename=rel_path),
+                    "added": date_str,
+                    "size": format_size(item.stat().st_size),
+                    "mtime": mtime,
+                    "folder_url": folder_url,
+                })
+            except (OSError, PermissionError) as e:
+                # Skip items that become inaccessible during NFS attribute cache inconsistency
                 continue
-
-            rel_path = item.relative_to(DATA_FOLDER).as_posix()
-            date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
-            
-            # Get folder path for navigation
-            folder_path = os.path.dirname(rel_path)
-            folder_url = url_for("index", subpath=folder_path) if folder_path else url_for("index")
-
-            images.append({
-                "name": item.name,
-                "rel_path": rel_path,
-                "url": url_for("view", filename=rel_path),
-                "thumb": url_for("thumb", filename=rel_path),
-                "added": date_str,
-                "size": format_size(item.stat().st_size),
-                "mtime": mtime,
-                "folder_url": folder_url,
-            })
     except Exception:
         pass
 
