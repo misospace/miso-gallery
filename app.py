@@ -1365,42 +1365,46 @@ def recent_view():
         rel_parts = path.relative_to(DATA_FOLDER).parts
         return any(part in excluded_dirs for part in rel_parts)
 
-    try:
-        for item in DATA_FOLDER.rglob("*"):
+    for item in DATA_FOLDER.rglob("*"):
+        try:
+            if not item.is_file() or not is_image(item):
+                continue
+            if is_excluded_from_recent(item):
+                continue
+            if item.name.startswith("."):
+                continue
+
             try:
-                if not item.is_file() or not is_image(item):
-                    continue
-                if is_excluded_from_recent(item):
-                    continue
-                if item.name.startswith("."):
-                    continue
-                try:
-                    mtime = item.stat().st_mtime
-                except OSError:
-                    continue
-
-                rel_path = item.relative_to(DATA_FOLDER).as_posix()
-                date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
-                
-                # Get folder path for navigation
-                folder_path = os.path.dirname(rel_path)
-                folder_url = url_for("index", subpath=folder_path) if folder_path else url_for("index")
-
-                images.append({
-                    "name": item.name,
-                    "rel_path": rel_path,
-                    "url": url_for("view", filename=rel_path),
-                    "thumb": url_for("thumb", filename=rel_path),
-                    "added": date_str,
-                    "size": format_size(item.stat().st_size),
-                    "mtime": mtime,
-                    "folder_url": folder_url,
-                })
-            except (OSError, PermissionError) as e:
+                mtime = item.stat().st_mtime
+                size = item.stat().st_size
+            except (OSError, PermissionError):
                 # Skip items that become inaccessible during NFS attribute cache inconsistency
                 continue
-    except Exception:
-        pass
+
+            try:
+                rel_path = item.relative_to(DATA_FOLDER).as_posix()
+            except (OSError, ValueError):
+                continue
+
+            date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+
+            # Get folder path for navigation
+            folder_path = os.path.dirname(rel_path)
+            folder_url = url_for("index", subpath=folder_path) if folder_path else url_for("index")
+
+            images.append({
+                "name": item.name,
+                "rel_path": rel_path,
+                "url": url_for("view", filename=rel_path),
+                "thumb": url_for("thumb", filename=rel_path),
+                "added": date_str,
+                "size": format_size(size),
+                "mtime": mtime,
+                "folder_url": folder_url,
+            })
+        except (OSError, PermissionError):
+            # Skip items that raise during iteration
+            continue
 
     images.sort(key=lambda x: x["mtime"], reverse=True)
     images = images[:max_items]
