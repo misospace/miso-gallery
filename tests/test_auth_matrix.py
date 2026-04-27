@@ -28,6 +28,7 @@ def build_client(monkeypatch, tmp_path, *, auth_type: str, admin_password: str =
     monkeypatch.setenv("OIDC_ISSUER", "https://issuer.example" if oidc_enabled else "")
     monkeypatch.setenv("OIDC_CLIENT_ID", "client" if oidc_enabled else "")
     monkeypatch.setenv("OIDC_CLIENT_SECRET", "secret" if oidc_enabled else "")
+    monkeypatch.setenv("SECRET_KEY", "test-secret-for-ci")
 
     for mod in ("auth", "app"):
         if mod in sys.modules:

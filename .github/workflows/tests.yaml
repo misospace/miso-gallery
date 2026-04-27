@@ -46,7 +46,7 @@ jobs:
 
       - name: Run container
         run: |
-          docker run -d --name gallery -p 5000:5000 -v /tmp/test_images:/data miso-gallery:test
+          docker run -d --name gallery -p 5000:5000 -v /tmp/test_images:/data -e SECRET_KEY=test-secret-key-for-ci miso-gallery:test
           sleep 5
 
       - name: Wait for app and run smoke test
