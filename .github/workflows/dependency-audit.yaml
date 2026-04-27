@@ -19,10 +19,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@0b0f2145ea8d459c7cc8e2d5c4a1e8d1e9c0a5c # v5.5.0
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
 
@@ -39,7 +39,7 @@ jobs:
 
       - name: Upload audit results
         if: always()
-        uses: actions/upload-artifact@5d5f22ba05c41eb84a4fc2c5e24c2df0e1a0eabe # v4.6.2
+        uses: actions/upload-artifact@v4
         with:
           name: pip-audit-results
           path: ${{ runner.temp }}/pip-audit-*.json
