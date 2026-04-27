@@ -249,3 +249,12 @@ def csrf_token() -> str:
 def validate_csrf(submitted: str | None) -> bool:
     token = session.get("csrf_token")
     return bool(token and submitted and submitted == token)
+
+
+def is_safe_redirect_url(url: str | None) -> bool:
+    if not url:
+        return True
+    from urllib.parse import urlsplit
+
+    split = urlsplit(url)
+    return split.netloc == "" and split.scheme == "" and not url.startswith("//")

@@ -31,38 +31,35 @@ def check_storage_read(path: Path) -> tuple[bool, str]:
     """Check if we can read from the storage path."""
     try:
         if not path.exists():
-            return False, f"Path does not exist: {path}"
+            return False, "Path does not exist"
         if not os.access(path, os.R_OK):
-            return False, f"Path is not readable: {path}"
-        # Try to list directory
+            return False, "Path is not readable"
         list(path.iterdir())
         return True, "Read access OK"
-    except PermissionError as e:
-        return False, f"Permission denied reading {path}: {e}"
-    except OSError as e:
-        return False, f"OS error reading {path}: {e}"
+    except PermissionError:
+        return False, "Permission denied reading"
+    except OSError:
+        return False, "OS error reading"
 
 
 def check_storage_write(path: Path) -> tuple[bool, str]:
     """Check if we can write to the storage path (safe test)."""
     try:
         if not path.exists():
-            return False, f"Path does not exist: {path}"
+            return False, "Path does not exist"
         if not os.access(path, os.W_OK):
-            return False, f"Path is not writable: {path}"
-        
-        # Safe write test - create temp file and delete
+            return False, "Path is not writable"
+
         with tempfile.NamedTemporaryFile(dir=path, delete=False) as tmp:
             tmp.write(b"health probe write test")
             tmp_path = tmp.name
-        
-        # Cleanup
+
         os.unlink(tmp_path)
         return True, "Write access OK"
-    except PermissionError as e:
-        return False, f"Permission denied writing to {path}: {e}"
-    except OSError as e:
-        return False, f"OS error writing to {path}: {e}"
+    except PermissionError:
+        return False, "Permission denied writing"
+    except OSError:
+        return False, "OS error writing"
 
 
 def update_unhealthy_signal(health: dict[str, Any]) -> None:
@@ -91,42 +88,36 @@ def get_storage_health() -> dict[str, Any]:
     health: dict[str, Any] = {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "signal_file": str(STORAGE_HEALTH_SIGNAL_FILE),
         "checks": {
-            "data_folder": {"path": str(DATA_FOLDER)},
-            "thumbnail_cache": {"path": str(THUMBNAIL_CACHE_DIR)},
+            "data_folder": {},
+            "thumbnail_cache": {},
         },
     }
-    
-    # Check data folder read
+
     read_ok, read_msg = check_storage_read(DATA_FOLDER)
     health["checks"]["data_folder"]["read"] = {
         "ok": read_ok,
         "message": read_msg,
     }
-    
-    # Check data folder write (safe test)
+
     write_ok, write_msg = check_storage_write(DATA_FOLDER)
     health["checks"]["data_folder"]["write"] = {
         "ok": write_ok,
         "message": write_msg,
     }
-    
-    # Check thumbnail cache read
+
     thumb_read_ok, thumb_read_msg = check_storage_read(THUMBNAIL_CACHE_DIR)
     health["checks"]["thumbnail_cache"]["read"] = {
         "ok": thumb_read_ok,
         "message": thumb_read_msg,
     }
-    
-    # Check thumbnail cache write (safe test)
+
     thumb_write_ok, thumb_write_msg = check_storage_write(THUMBNAIL_CACHE_DIR)
     health["checks"]["thumbnail_cache"]["write"] = {
         "ok": thumb_write_ok,
         "message": thumb_write_msg,
     }
-    
-    # Determine overall status
+
     if not (read_ok and write_ok and thumb_read_ok and thumb_write_ok):
         health["status"] = "unhealthy"
 

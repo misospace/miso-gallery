@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import json
 import os
 import secrets
@@ -31,7 +32,7 @@ from auth import (
     resolved_auth_mode,
     verify_local_password,
 )
-from security import add_security_headers, csrf_token, rate_limit, sanitize_path, validate_csrf
+from security import add_security_headers, csrf_token, is_safe_redirect_url, rate_limit, sanitize_path, validate_csrf
 from trash import empty_trash, list_trash, move_to_trash, purge_old_trash, restore_from_trash
 
 DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
@@ -435,9 +436,9 @@ HTML_TEMPLATE = """
                   <div class="image-details-row"><span class="image-details-label">Modified</span><span class="image-details-value">{{ item.modified }}</span></div>
                 </div>
               </details>
-              <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete {{ item.name }}?')">🗑️</button>
+              <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete ' + {{ item.name | tojson }} + '?')">🗑️</button>
               <a href="{{ item.thumb_url }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
-              <button type="button" class="tag-btn" onclick="openTagEditor('{{ item.rel_path }}', '{{ item.name }}')">🏷️ Tag</button>
+              <button type="button" class="tag-btn" onclick="openTagEditor({{ item.rel_path | tojson }}, {{ item.name | tojson }})">🏷️ Tag</button>
             </div>
           {% endif %}
         {% endfor %}
@@ -1160,8 +1161,8 @@ def index(subpath: str = ""):
         crumbs = ['<a href="/">Home</a>']
         for i, part in enumerate(parts[:-1]):
             path = "/".join(parts[: i + 1])
-            crumbs.append(f'<a href="/{path}">{part}</a>')
-        crumbs.append(parts[-1])
+            crumbs.append(f'<a href="/{html.escape(path)}">{html.escape(part)}</a>')
+        crumbs.append(html.escape(parts[-1]))
         breadcrumb = " / ".join(crumbs)
 
         accum: list[str] = []
@@ -1231,7 +1232,7 @@ def thumb(filename: str):
         try:
             generate_thumbnail(source_path, cached_path)
         except (UnidentifiedImageError, OSError):
-            return send_from_directory(str(DATA_FOLDER), rel_path)
+            return "Not found", 404
 
     return send_from_directory(str(THUMBNAIL_CACHE_DIR), cached_name)
 
@@ -1476,7 +1477,8 @@ def trash_purge():
 
 @app.route("/login")
 def login():
-    next_url = request.args.get("next") or "/"
+    raw_next = request.args.get("next") or "/"
+    next_url = raw_next if is_safe_redirect_url(raw_next) else "/"
 
     error_code = (request.args.get("error") or "").strip().lower()
     error_map = {
@@ -1505,7 +1507,8 @@ def auth():
     if not validate_csrf(request.form.get("csrf_token")):
         return {"error": "Invalid CSRF token"}, 403
 
-    next_url = request.form.get("next") or request.args.get("next") or url_for("index")
+    raw_next = request.form.get("next") or request.args.get("next") or "/"
+    next_url = raw_next if is_safe_redirect_url(raw_next) else url_for("index")
 
     if resolved_auth_mode() != "local":
         return redirect(url_for("login", error="local_disabled", next=next_url))
@@ -1562,6 +1565,9 @@ def maintenance_thumbnails_regenerate():
 def webhook_run_task():
     if not _webhook_enabled():
         return {"error": "Webhook tasks are disabled"}, 404
+
+    if not validate_csrf(request.headers.get("X-CSRF-Token")):
+        return {"error": "Invalid CSRF token"}, 403
 
     payload = request.get_json(silent=True) or {}
     task = str(payload.get("task", "")).strip()
@@ -1674,7 +1680,8 @@ def oidc_login():
         return redirect(url_for("login"))
 
     # Store the return URL in session
-    next_url = request.args.get("next") or request.referrer or url_for("index")
+    raw_next = request.args.get("next") or url_for("index")
+    next_url = raw_next if is_safe_redirect_url(raw_next) else url_for("index")
     session["oidc_next_url"] = next_url
 
     # Get the callback URL
