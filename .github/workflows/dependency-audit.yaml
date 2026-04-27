@@ -1,0 +1,46 @@
+---
+name: Dependency Audit
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  schedule:
+    - cron: "0 0 * * 0"  # Weekly on Sunday
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: read
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python
+        uses: actions/setup-python@8d9ed9ac5c53483de85588cdf95a591a75ab9f55 # v5.5.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pip-audit
+
+      - name: Audit requirements.txt
+        run: pip-audit -r requirements.txt --format=spdx --output-file=${{ runner.temp }}/pip-audit-reqs.json
+        continue-on-error: true
+
+      - name: Audit installed environment
+        run: pip-audit --format=spdx --output-file=${{ runner.temp }}/pip-audit-env.json
+        continue-on-error: true
+
+      - name: Upload audit results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pip-audit-results
+          path: ${{ runner.temp }}/pip-audit-*.json
+          retention-days: 30
