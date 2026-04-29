@@ -1,10 +1,10 @@
 # Miso Gallery
 
 <p align="center">
-  <img src="https://img.shields.io/docker/v/ghcr.io/joryirving/miso-gallery?sort=semver&label=ghcr" alt="GHCR">
-  <img src="https://github.com/joryirving/miso-gallery/actions/workflows/build.yaml/badge.svg" alt="Build">
-  <img src="https://img.shields.io/github/v/release/joryirving/miso-gallery?sort=semver" alt="Release">
-  <img src="https://img.shields.io/github/license/joryirving/miso-gallery" alt="License">
+  <img src="https://img.shields.io/docker/v/ghcr.io/misospace/miso-gallery?sort=semver&label=ghcr" alt="GHCR">
+  <img src="https://github.com/misospace/miso-gallery/actions/workflows/build.yaml/badge.svg" alt="Build">
+  <img src="https://img.shields.io/github/v/release/misospace/miso-gallery?sort=semver" alt="Release">
+  <img src="https://img.shields.io/github/license/misospace/miso-gallery" alt="License">
 </p>
 
 > A lightweight, self-hosted image gallery for AI-generated images.
@@ -27,7 +27,7 @@
 docker run -d --name miso-gallery \
   -p 5000:5000 \
   -v /path/to/images:/data \
-  ghcr.io/joryirving/miso-gallery:latest
+  ghcr.io/misospace/miso-gallery:latest
 ```
 
 ### Docker Compose
@@ -35,7 +35,7 @@ docker run -d --name miso-gallery \
 ```yaml
 services:
   miso-gallery:
-    image: ghcr.io/joryirving/miso-gallery:latest
+    image: ghcr.io/misospace/miso-gallery:latest
     ports:
       - "5000:5000"
     volumes:
@@ -63,7 +63,7 @@ Miso Gallery supports two authentication methods:
 ```bash
 docker run -d \
   -e ADMIN_PASSWORD=your-password \
-  ghcr.io/joryirving/miso-gallery:latest
+  ghcr.io/misospace/miso-gallery:latest
 ```
 
 #### OIDC / Authentik
@@ -76,7 +76,7 @@ docker run -d \
   -e OIDC_CLIENT_SECRET=your-secret \
   -e OIDC_CALLBACK_URL=https://miso-gallery.yourdomain.com/auth/callback \
   -e SECRET_KEY=your-session-secret \
-  ghcr.io/joryirving/miso-gallery:latest
+  ghcr.io/misospace/miso-gallery:latest
 ```
 
 #### Auth Configuration Options
@@ -133,7 +133,7 @@ spec:
         containers:
           app:
             image:
-              repository: ghcr.io/joryirving/miso-gallery
+              repository: ghcr.io/misospace/miso-gallery
               tag: latest
             env:
               - name: ADMIN_PASSWORD
@@ -197,7 +197,7 @@ docker run -d --name miso-gallery \
   -e SECRET_KEY=your-session-secret \
   -e ADMIN_PASSWORD=your-password \
   -e LLM_API_KEYS=agent-key-1,agent-key-2 \
-  ghcr.io/joryirving/miso-gallery:latest
+  ghcr.io/misospace/miso-gallery:latest
 ```
 
 Authenticate each request with a Bearer token:
@@ -289,7 +289,7 @@ docker run -d --name miso-gallery \
   -e LLM_API_KEYS=agent-key-1 \
   -e WEBHOOK_ENABLED=true \
   -e 'WEBHOOK_TASK_GENERATE=python3 /data/scripts/generate.py {params.prompt}' \
-  ghcr.io/joryirving/miso-gallery:latest
+  ghcr.io/misospace/miso-gallery:latest
 ```
 
 Run a configured task:
@@ -310,7 +310,7 @@ Task commands run from `DATA_FOLDER`, scalar params are shell-quoted, and the ti
 
 ```bash
 # Clone and setup
-git clone https://github.com/joryirving/miso-gallery.git
+git clone https://github.com/misospace/miso-gallery.git
 cd miso-gallery
 
 # Create virtual environment
