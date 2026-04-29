@@ -186,7 +186,9 @@ This allows sharing images while protecting the gallery UI.
 
 ## LLM API
 
-Miso Gallery includes a JSON API intended for LLM agents and other machine-to-machine clients. Enable it by setting one or more comma-separated API keys:
+Miso Gallery includes a JSON API intended for LLM agents and other machine-to-machine clients. The primary purpose is to let an external LLM client inspect and manage gallery state: list/search media, read metadata, tag, delete, bulk-delete, and deduplicate images.
+
+Enable the API by setting one or more comma-separated API keys:
 
 ```bash
 docker run -d --name miso-gallery \
@@ -273,9 +275,11 @@ curl -X POST \
   http://localhost:5000/api/llm/dedup
 ```
 
-### Task Execution
+### Optional: Server-Side Task Execution
 
-The LLM API can run configured webhook tasks without CSRF, using the same task configuration as `/api/webhook/run`.
+Most LLM integrations do **not** need task execution. Use the gallery-management endpoints above unless you intentionally want Miso Gallery to expose a small set of preconfigured server-side automation commands.
+
+Task execution is an optional advanced feature that reuses the existing webhook task infrastructure. It is disabled unless `WEBHOOK_ENABLED=true`, and only commands explicitly configured through `WEBHOOK_TASK_*` environment variables can be run. This can be useful for trusted maintenance or generation scripts that should run on the gallery host, but it is not required for normal LLM-to-gallery interaction.
 
 ```bash
 docker run -d --name miso-gallery \
@@ -288,7 +292,7 @@ docker run -d --name miso-gallery \
   ghcr.io/joryirving/miso-gallery:latest
 ```
 
-Run a task:
+Run a configured task:
 
 ```bash
 curl -X POST \
