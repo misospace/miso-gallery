@@ -107,7 +107,7 @@ FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
 PWA_THEME_COLOR = "#0d0d0d"
 PWA_APP_NAME = "Miso Gallery"
-APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.14").strip() or "0.1.14"
+APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.16").strip() or "0.1.16"
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
 AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
 FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
