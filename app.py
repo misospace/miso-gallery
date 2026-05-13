@@ -30,6 +30,7 @@ from auth import (
     is_oidc_configured,
     oauth,
     require_api_key,
+    require_api_key_with_scope,
     require_auth,
     resolved_auth_mode,
     verify_local_password,
@@ -107,7 +108,7 @@ FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
 PWA_THEME_COLOR = "#0d0d0d"
 PWA_APP_NAME = "Miso Gallery"
-APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.14").strip() or "0.1.14"
+APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.16").strip() or "0.1.16"
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
 AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
 FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
@@ -1714,7 +1715,7 @@ def webhook_run_task():
 
 
 @app.route("/api/llm/images")
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_images():
     query = request.args.get("q", "").strip().lower()
@@ -1728,7 +1729,7 @@ def llm_images():
 
 
 @app.route("/api/llm/image/<path:relpath>")
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_image(relpath: str):
     if not sanitize_path(relpath):
@@ -1740,7 +1741,7 @@ def llm_image(relpath: str):
 
 
 @app.route("/api/llm/recent")
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_recent():
     try:
@@ -1752,7 +1753,7 @@ def llm_recent():
 
 
 @app.route("/api/llm/folders")
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=60, window=60)
 def llm_folders():
     folders = [{"rel_path": "", "name": "", "parent": None}]
@@ -1764,7 +1765,7 @@ def llm_folders():
 
 
 @app.route("/api/llm/tags", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=30, window=60)
 def llm_tags():
     payload = request.get_json(silent=True) or {}
@@ -1790,7 +1791,7 @@ def llm_tags():
 
 
 @app.route("/api/llm/delete", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("write")
 @rate_limit(max_requests=20, window=60)
 def llm_delete():
     payload = request.get_json(silent=True) or {}
@@ -1809,7 +1810,7 @@ def llm_delete():
 
 
 @app.route("/api/llm/bulk-delete", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("write")
 @rate_limit(max_requests=10, window=60)
 def llm_bulk_delete():
     payload = request.get_json(silent=True) or {}
@@ -1834,7 +1835,7 @@ def llm_bulk_delete():
 
 
 @app.route("/api/llm/dedup", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("write")
 @rate_limit(max_requests=5, window=60)
 def llm_dedup():
     payload = request.get_json(silent=True) or {}
@@ -1853,7 +1854,7 @@ def llm_dedup():
 
 
 @app.route("/api/llm/task/run", methods=["POST"])
-@require_api_key
+@require_api_key_with_scope("read")
 @rate_limit(max_requests=10, window=60)
 def llm_task_run():
     body, status = run_configured_task(request.get_json(silent=True) or {})
