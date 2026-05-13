@@ -27,9 +27,13 @@ def test_llm_images_search_metadata_recent_and_folders(monkeypatch, tmp_path):
     assert payload["count"] == 1
     assert payload["images"][0]["rel_path"] == "cats/cat.jpg"
 
-    recent = client.get("/api/llm/recent", headers=auth_header())
+    image = client.get("/api/llm/image/cats/cat.jpg", headers=auth_header())
+    assert image.status_code == 200
+    assert image.get_json()["media_type"] == "image"
+
+    recent = client.get("/api/llm/recent?limit=2", headers=auth_header())
     assert recent.status_code == 200
-    assert recent.get_json()["count"] >= 1
+    assert recent.get_json()["count"] == 2
 
     folders = client.get("/api/llm/folders", headers=auth_header())
     assert folders.status_code == 200
@@ -66,3 +70,25 @@ def test_llm_dedup_dry_run_and_remove(monkeypatch, tmp_path):
     assert payload["dry_run"] is False
     assert payload["removed"] == ["sample.png"]
     assert not (data_dir / "sample.png").exists()
+
+
+def test_llm_tags_and_task_run(monkeypatch, tmp_path):
+    monkeypatch.setenv("WEBHOOK_ENABLED", "true")
+    monkeypatch.setenv("WEBHOOK_TASK_ECHO", "python3 -c \"import sys;print(sys.argv[1])\" {params.value}")
+    client, _ = build_client(monkeypatch, tmp_path)
+
+    tags = client.post(
+        "/api/llm/tags",
+        json={"rel_path": "sample.png", "tag": "miso", "action": "add"},
+        headers=auth_header(),
+    )
+    assert tags.status_code == 200
+    assert tags.get_json()["updated"] == ["sample.png"]
+
+    task = client.post(
+        "/api/llm/task/run",
+        json={"task": "echo", "params": {"value": "hello"}},
+        headers=auth_header(),
+    )
+    assert task.status_code == 200
+    assert task.get_json()["stdout"].strip() == "hello"
