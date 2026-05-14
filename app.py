@@ -74,13 +74,20 @@ def _client_ip() -> str | None:
     return forwarded or request.remote_addr
 
 
-def log_security_event(event: str, outcome: str, **fields: object) -> None:
+def _request_id() -> str:
+    """Generate a short unique request ID for audit logging."""
+    return secrets.token_hex(8)
+
+
+def log_security_event(event: str, outcome: str, *, request_id: str = "", **fields: object) -> None:
     """Emit a structured log line for security/access events.
 
     Intentionally avoids logging secrets (passwords, OIDC tokens, raw userinfo).
     """
 
     try:
+        if not request_id:
+            request_id = _request_id()
         payload: dict[str, object] = {
             "event": event,
             "outcome": outcome,
@@ -90,6 +97,7 @@ def log_security_event(event: str, outcome: str, **fields: object) -> None:
             "user_id": session.get("user_id"),
             "user_name": session.get("user_name"),
             "auth_method": session.get("auth_method") or ("local" if session.get("authenticated") else None),
+            "request_id": request_id,
         }
         payload.update(fields)
         payload = {k: v for k, v in payload.items() if v is not None}
@@ -1802,11 +1810,14 @@ def llm_delete():
     media_path = source_file_path(safe_rel_path)
     if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
         return {"error": "Image not found"}, 404
-    moved = move_to_trash(media_path, DATA_FOLDER)
-    if moved:
-        remove_thumbnail_cache_for(safe_rel_path)
-    log_security_event("llm_delete", "success" if moved else "error", target=safe_rel_path)
-    return {"deleted": moved, "rel_path": safe_rel_path}, 200 if moved else 500
+    dry_run = bool(payload.get("dry_run", False))
+    moved = False
+    if not dry_run:
+        moved = move_to_trash(media_path, DATA_FOLDER)
+        if moved:
+            remove_thumbnail_cache_for(safe_rel_path)
+    log_security_event("llm_delete", "success" if (moved and not dry_run) else "dry_run", target=safe_rel_path, dry_run=dry_run)
+    return {"deleted": moved if not dry_run else True, "rel_path": safe_rel_path, "dry_run": dry_run}, 200
 
 
 @app.route("/api/llm/bulk-delete", methods=["POST"])
@@ -1817,6 +1828,7 @@ def llm_bulk_delete():
     rel_paths = payload.get("rel_paths") or payload.get("images") or []
     if not isinstance(rel_paths, list):
         return {"error": "rel_paths/images must be a list"}, 400
+    dry_run = bool(payload.get("dry_run", False))
     deleted = []
     skipped = []
     for rel_path in rel_paths:
@@ -1825,13 +1837,18 @@ def llm_bulk_delete():
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         media_path = source_file_path(safe_rel_path)
-        if media_path.exists() and is_media_file(media_path) and not is_excluded_gallery_path(media_path) and move_to_trash(media_path, DATA_FOLDER):
+        if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
+            skipped.append(safe_rel_path)
+            continue
+        if dry_run:
+            deleted.append(safe_rel_path)
+        elif move_to_trash(media_path, DATA_FOLDER):
             remove_thumbnail_cache_for(safe_rel_path)
             deleted.append(safe_rel_path)
         else:
             skipped.append(safe_rel_path)
-    log_security_event("llm_bulk_delete", "success" if deleted else "noop", deleted=len(deleted), skipped=len(skipped))
-    return {"deleted": deleted, "skipped": skipped, "deleted_count": len(deleted), "skipped_count": len(skipped)}
+    log_security_event("llm_bulk_delete", "success" if (deleted and not dry_run) else "dry_run", deleted=len(deleted), skipped=len(skipped), dry_run=dry_run)
+    return {"deleted": deleted, "skipped": skipped, "deleted_count": len(deleted), "skipped_count": len(skipped), "dry_run": dry_run}
 
 
 @app.route("/api/llm/dedup", methods=["POST"])
