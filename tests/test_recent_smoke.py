@@ -1,23 +1,18 @@
-import importlib
 import re
-import sys
-from pathlib import Path
 
 from PIL import Image
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from conftest import build_client
 
 
 def _build_client(monkeypatch, tmp_path):
-    data_dir = tmp_path / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
+    """Build client using shared bootstrap, then add per-test data."""
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
 
-    # Real image that can be thumbnailed
+    # Real image that can be thumbnailed (use same name as conftest fixture)
     img = Image.new("RGB", (64, 64), color="red")
     (data_dir / "cats").mkdir(parents=True, exist_ok=True)
-    img.save(data_dir / "cats" / "cat.png")
+    img.save(data_dir / "cats" / "cat.jpg")
 
     # Files that should never appear in /recent
     (data_dir / ".thumb_cache").mkdir(parents=True, exist_ok=True)
@@ -25,20 +20,7 @@ def _build_client(monkeypatch, tmp_path):
     (data_dir / ".trash").mkdir(parents=True, exist_ok=True)
     img.save(data_dir / ".trash" / "trash.png")
 
-    monkeypatch.setenv("DATA_FOLDER", str(data_dir))
-    monkeypatch.setenv("AUTH_TYPE", "none")
-    monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
-    monkeypatch.setenv("OIDC_ENABLED", "false")
-
-    for mod in ("auth", "app"):
-        if mod in sys.modules:
-            del sys.modules[mod]
-
-    app_module = importlib.import_module("app")
-    app_module.DATA_FOLDER = data_dir
-    app_module.THUMBNAIL_CACHE_DIR = data_dir / ".thumb_cache"
-    app_module.app.config["TESTING"] = True
-    return app_module.app.test_client()
+    return client
 
 
 def test_recent_cards_have_valid_view_and_thumb_links(monkeypatch, tmp_path):
@@ -52,7 +34,7 @@ def test_recent_cards_have_valid_view_and_thumb_links(monkeypatch, tmp_path):
     assert "↻ Refresh" in html
 
     # Should include real image from data folder
-    assert "cats/cat.png" in html
+    assert "cats/cat.jpg" in html
 
     # Should not include internal cache/trash files
     assert ".thumb_cache" not in html
@@ -80,7 +62,7 @@ def test_recent_cards_render_details_panel(monkeypatch, tmp_path):
     html = resp.get_data(as_text=True)
 
     assert "<summary>Details</summary>" in html
-    assert 'Path</span><span class="image-details-value">cats/cat.png' in html
+    assert 'Path</span><span class="image-details-value">cats/cat.jpg' in html
     assert "content-visibility:auto" in html
     assert "contain-intrinsic-size:260px 320px" in html
     assert "fetchpriority=\"low\"" in html
