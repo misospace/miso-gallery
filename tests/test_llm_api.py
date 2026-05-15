@@ -92,3 +92,110 @@ def test_llm_tags_and_task_run(monkeypatch, tmp_path):
     )
     assert task.status_code == 200
     assert task.get_json()["stdout"].strip() == "hello"
+def test_write_key_can_access_read_endpoints(monkeypatch, tmp_path):
+    """Write-scoped keys should be accepted on read endpoints."""
+    client, _ = build_client(monkeypatch, tmp_path, api_keys="write-only-key")
+
+    # Write key should work on read endpoints
+    images = client.get("/api/llm/images", headers=auth_header("write-only-key"))
+    assert images.status_code == 200
+
+
+def test_read_key_rejected_from_write_endpoints(monkeypatch, tmp_path):
+    """Read-scoped keys should be rejected from write endpoints."""
+    client, data_dir = build_client(
+        monkeypatch,
+        tmp_path,
+        auth_type="local",
+        extra_env={
+            "LLM_READ_API_KEYS": "read-only-key",
+            "LLM_WRITE_API_KEYS": "write-secret-key",
+        },
+    )
+
+    # Read key should NOT work on delete endpoint (requires write scope)
+    delete = client.post("/api/llm/delete", json={"rel_path": "cats/cat.jpg"}, headers=auth_header("read-only-key"))
+    assert delete.status_code == 401
+
+    # Read key should NOT work on bulk-delete
+    bulk = client.post("/api/llm/bulk-delete", json={"rel_paths": ["cats/cat.jpg"]}, headers=auth_header("read-only-key"))
+    assert bulk.status_code == 401
+
+
+def test_llm_bulk_delete_dry_run(monkeypatch, tmp_path):
+    """Bulk delete dry_run mode should report targets without deleting."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    # Verify files exist before dry run
+    assert (data_dir / "cats" / "cat.jpg").exists()
+
+    # Dry run should report what would be deleted but not delete anything
+    dry_run = client.post("/api/llm/bulk-delete", json={"rel_paths": ["cats/cat.jpg"], "dry_run": True}, headers=auth_header())
+    assert dry_run.status_code == 200
+    payload = dry_run.get_json()
+    assert payload["dry_run"] is True
+    assert "cats/cat.jpg" in payload["deleted"]
+    assert (data_dir / "cats" / "cat.jpg").exists()
+
+    # Actual delete should remove the file
+    actual = client.post("/api/llm/bulk-delete", json={"rel_paths": ["cats/cat.jpg"]}, headers=auth_header())
+    assert actual.status_code == 200
+    assert not (data_dir / "cats" / "cat.jpg").exists()
+
+
+def test_llm_browser_session_rejected_on_llm_endpoints(monkeypatch, tmp_path):
+    """Browser session auth should be rejected on LLM API endpoints."""
+    client, _ = build_client(monkeypatch, tmp_path, api_keys="test-key", auth_type="local")
+
+    # Simulate browser session by setting session cookie
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["user_id"] = "test-user"
+
+    # Should be rejected on read endpoint
+    resp = client.get("/api/llm/images")
+    assert resp.status_code == 403
+    assert "Browser sessions are not accepted" in resp.get_json()["error"]
+
+    # Should also be rejected on write endpoint
+    delete_resp = client.post("/api/llm/delete", json={"rel_path": "cats/cat.jpg"})
+    assert delete_resp.status_code == 403
+
+
+def test_llm_dedup_dry_run_default(monkeypatch, tmp_path):
+    """Dedup without remove flag should default to dry_run mode."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    # Verify files exist
+    assert (data_dir / "sample.png").exists()
+    assert (data_dir / "copy.png").exists()
+
+    # No remove flag - should be dry_run
+    resp = client.post("/api/llm/dedup", json={}, headers=auth_header())
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["dry_run"] is True
+    # Files should still exist
+    assert (data_dir / "sample.png").exists()
+    assert (data_dir / "copy.png").exists()
+
+
+def test_llm_delete_dry_run(monkeypatch, tmp_path):
+    """Single delete dry_run mode should report without deleting."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    # Verify file exists
+    assert (data_dir / "cats" / "cat.jpg").exists()
+
+    # Dry run should not delete
+    dry_run = client.post("/api/llm/delete", json={"rel_path": "cats/cat.jpg", "dry_run": True}, headers=auth_header())
+    assert dry_run.status_code == 200
+    payload = dry_run.get_json()
+    assert payload.get("dry_run") is True
+    # File should still exist
+    assert (data_dir / "cats" / "cat.jpg").exists()
+
+    # Actual delete should remove
+    actual = client.post("/api/llm/delete", json={"rel_path": "cats/cat.jpg"}, headers=auth_header())
+    assert actual.status_code == 200
+    assert not (data_dir / "cats" / "cat.jpg").exists()
