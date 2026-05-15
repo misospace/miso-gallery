@@ -1,13 +1,8 @@
-import importlib
 import re
-import sys
-from pathlib import Path
 
 import pytest
 
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
+from conftest import build_client
 
 
 def _extract_csrf(html: str) -> str:
@@ -16,47 +11,38 @@ def _extract_csrf(html: str) -> str:
     return m.group(1)
 
 
-def build_client(monkeypatch, tmp_path, *, auth_type: str, admin_password: str = "", oidc_enabled: bool = False):
-    data_dir = tmp_path / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
-    (data_dir / "sample.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+def _build_auth_client(monkeypatch, tmp_path, *, auth_type: str, admin_password: str = "", oidc_enabled: bool = False):
+    """Thin wrapper around conftest.build_client for auth-specific env vars."""
+    extra_env = {}
+    if oidc_enabled:
+        extra_env["OIDC_ENABLED"] = "true"
+        extra_env["OIDC_ISSUER"] = "https://issuer.example"
+        extra_env["OIDC_CLIENT_ID"] = "client"
+        extra_env["OIDC_CLIENT_SECRET"] = "secret"
 
-    monkeypatch.setenv("DATA_FOLDER", str(data_dir))
-    monkeypatch.setenv("AUTH_TYPE", auth_type)
-    monkeypatch.setenv("ADMIN_PASSWORD", admin_password)
-    monkeypatch.setenv("OIDC_ENABLED", "true" if oidc_enabled else "false")
-    monkeypatch.setenv("OIDC_ISSUER", "https://issuer.example" if oidc_enabled else "")
-    monkeypatch.setenv("OIDC_CLIENT_ID", "client" if oidc_enabled else "")
-    monkeypatch.setenv("OIDC_CLIENT_SECRET", "secret" if oidc_enabled else "")
-    monkeypatch.setenv("SECRET_KEY", "test-secret-for-ci")
+    # Override ADMIN_PASSWORD if explicitly provided (e.g. admin_password="pass123")
+    if admin_password:
+        extra_env["ADMIN_PASSWORD"] = admin_password
 
-    for mod in ("auth", "app"):
-        if mod in sys.modules:
-            del sys.modules[mod]
-
-    app_module = importlib.import_module("app")
-    app_module.DATA_FOLDER = data_dir
-    app_module.THUMBNAIL_CACHE_DIR = data_dir / ".thumb_cache"
-    app_module.app.config["TESTING"] = True
-
-    return app_module.app.test_client()
+    client, _ = build_client(monkeypatch, tmp_path, auth_type=auth_type, extra_env=extra_env)
+    return client
 
 
 def test_auth_none_root_is_public(monkeypatch, tmp_path):
-    client = build_client(monkeypatch, tmp_path, auth_type="none")
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="none")
     resp = client.get("/")
     assert resp.status_code == 200
 
 
 def test_auth_local_unauth_redirects_to_login(monkeypatch, tmp_path):
-    client = build_client(monkeypatch, tmp_path, auth_type="local", admin_password="pass123")
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="local", admin_password="pass123")
     resp = client.get("/", follow_redirects=False)
     assert resp.status_code == 302
     assert "/login?next=/" in resp.headers["Location"]
 
 
 def test_auth_local_password_matrix(monkeypatch, tmp_path):
-    client = build_client(monkeypatch, tmp_path, auth_type="local", admin_password="pass123")
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="local", admin_password="pass123")
 
     login_page = client.get("/login")
     csrf = _extract_csrf(login_page.get_data(as_text=True))
@@ -84,7 +70,7 @@ def test_auth_local_password_matrix(monkeypatch, tmp_path):
 
 
 def test_auth_oidc_unauth_redirects_and_local_auth_disabled(monkeypatch, tmp_path):
-    client = build_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
 
     resp = client.get("/", follow_redirects=False)
     assert resp.status_code == 302
@@ -104,13 +90,13 @@ def test_auth_oidc_unauth_redirects_and_local_auth_disabled(monkeypatch, tmp_pat
 
 
 def test_images_route_is_public_even_with_auth_enabled(monkeypatch, tmp_path):
-    client = build_client(monkeypatch, tmp_path, auth_type="local", admin_password="pass123")
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="local", admin_password="pass123")
     resp = client.get("/images/sample.png", follow_redirects=False)
     assert resp.status_code == 200
 
 
 def test_root_gallery_renders_inline_details_panel(monkeypatch, tmp_path):
-    client = build_client(monkeypatch, tmp_path, auth_type="none")
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="none")
     resp = client.get("/")
     assert resp.status_code == 200
     html = resp.get_data(as_text=True)
@@ -122,7 +108,7 @@ def test_root_gallery_renders_inline_details_panel(monkeypatch, tmp_path):
 
 
 def test_bulk_delete_redirects_with_feedback(monkeypatch, tmp_path):
-    client = build_client(monkeypatch, tmp_path, auth_type="none")
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="none")
 
     with client.session_transaction() as sess:
         sess["csrf_token"] = "bulk-csrf"
@@ -147,7 +133,7 @@ def test_bulk_delete_redirects_with_feedback(monkeypatch, tmp_path):
 
 
 def test_bulk_toolbar_shows_download_unavailable_fallback(monkeypatch, tmp_path):
-    client = build_client(monkeypatch, tmp_path, auth_type="none")
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="none")
     resp = client.get("/")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)
@@ -158,7 +144,7 @@ def test_bulk_toolbar_shows_download_unavailable_fallback(monkeypatch, tmp_path)
 
 
 def test_bulk_toolbar_buttons_reflect_selection_state(monkeypatch, tmp_path):
-    client = build_client(monkeypatch, tmp_path, auth_type="none")
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="none")
     resp = client.get("/")
     assert resp.status_code == 200
     body = resp.get_data(as_text=True)

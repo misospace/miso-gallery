@@ -30,6 +30,11 @@ jobs:
           pip install -r requirements.txt
           pip install pytest requests
 
+      - name: Run unit tests
+        run: python -m pytest -q
+        env:
+          SECRET_KEY: test-secret-ci-gateway
+
       - name: Create test images directory
         run: mkdir -p /tmp/test_images
 
