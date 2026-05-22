@@ -230,3 +230,121 @@ def test_llm_delete_dry_run(monkeypatch, tmp_path):
     actual = client.post("/api/llm/delete", json={"rel_path": "cats/cat.jpg"}, headers=auth_header())
     assert actual.status_code == 200
     assert not (data_dir / "cats" / "cat.jpg").exists()
+
+
+def test_legacy_llm_api_keys_work_as_both_read_and_write(monkeypatch, tmp_path):
+    """Legacy LLM_API_KEYS should function as both read and write keys.
+
+    This ensures backward compatibility: a single LLM_API_KEYS value
+    grants full access (read + write), matching the documented legacy behavior.
+    """
+    client, data_dir = build_client(
+        monkeypatch,
+        tmp_path,
+        api_keys="legacy-all-access-key",
+        extra_env={
+            "LLM_READ_API_KEYS": "",
+            "LLM_WRITE_API_KEYS": "",
+        },
+    )
+
+    # Legacy key should work on read endpoints
+    images = client.get("/api/llm/images", headers=auth_header("legacy-all-access-key"))
+    assert images.status_code == 200
+
+    # Legacy key should also work on write endpoints
+    delete = client.post(
+        "/api/llm/delete",
+        json={"rel_path": "sample.png"},
+        headers=auth_header("legacy-all-access-key"),
+    )
+    assert delete.status_code == 200
+    assert delete.get_json()["deleted"] is True
+    assert not (data_dir / "sample.png").exists()
+
+
+def test_explicit_read_keys_only_rejects_write(monkeypatch, tmp_path):
+    """When only LLM_READ_API_KEYS is set, write endpoints should be rejected."""
+    client, data_dir = build_client(
+        monkeypatch,
+        tmp_path,
+        api_keys=None,
+        extra_env={
+            "LLM_READ_API_KEYS": "read-only-key",
+            "LLM_WRITE_API_KEYS": "",
+        },
+    )
+
+    # Read should work
+    images = client.get("/api/llm/images", headers=auth_header("read-only-key"))
+    assert images.status_code == 200
+
+    # Write should be rejected (no write keys configured)
+    delete = client.post(
+        "/api/llm/delete",
+        json={"rel_path": "sample.png"},
+        headers=auth_header("read-only-key"),
+    )
+    assert delete.status_code == 403
+    assert "Write API keys are not configured" in delete.get_json()["error"]
+
+
+def test_mixed_keys_respect_scope_boundaries(monkeypatch, tmp_path):
+    """When both explicit read and write keys are set, legacy fallback is bypassed."""
+    client, data_dir = build_client(
+        monkeypatch,
+        tmp_path,
+        api_keys=None,
+        extra_env={
+            "LLM_API_KEYS": "legacy-key",  # should be ignored when explicit keys exist
+            "LLM_READ_API_KEYS": "explicit-read",
+            "LLM_WRITE_API_KEYS": "explicit-write",
+        },
+    )
+
+    # Explicit read key works on read endpoints
+    images = client.get("/api/llm/images", headers=auth_header("explicit-read"))
+    assert images.status_code == 200
+
+    # Explicit write key works on read endpoints (write implies read)
+    images_w = client.get("/api/llm/images", headers=auth_header("explicit-write"))
+    assert images_w.status_code == 200
+
+    # Write key works on write endpoints
+    delete_w = client.post(
+        "/api/llm/delete",
+        json={"rel_path": "sample.png"},
+        headers=auth_header("explicit-write"),
+    )
+    assert delete_w.status_code == 200
+    assert not (data_dir / "sample.png").exists()
+
+    # Legacy key should NOT work when explicit read+write keys are configured
+    images_legacy = client.get("/api/llm/images", headers=auth_header("legacy-key"))
+    assert images_legacy.status_code == 401
+
+    # Read-only key should NOT work on write endpoints
+    delete_read = client.post(
+        "/api/llm/delete",
+        json={"rel_path": "copy.png"},
+        headers=auth_header("explicit-read"),
+    )
+    assert delete_read.status_code == 401
+
+
+def test_write_only_key_can_access_read_endpoints(monkeypatch, tmp_path):
+    """When only LLM_WRITE_API_KEYS is set (no explicit read keys),
+    write keys should be accepted on read endpoints since write implies read."""
+    client, _ = build_client(
+        monkeypatch,
+        tmp_path,
+        api_keys=None,
+        extra_env={
+            "LLM_READ_API_KEYS": "",
+            "LLM_WRITE_API_KEYS": "write-only-key",
+        },
+    )
+
+    # Write key should work on read endpoints (write implies read)
+    images = client.get("/api/llm/images", headers=auth_header("write-only-key"))
+    assert images.status_code == 200

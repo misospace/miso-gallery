@@ -86,7 +86,9 @@ docker run -d \
 | `AUTH_TYPE` | No | `local` | Auth method: `local`, `oidc`, or `none` |
 | `ADMIN_PASSWORD` | If local | - | Password for local auth (plaintext or Werkzeug hash: `pbkdf2:` / `scrypt:`) |
 | `SECRET_KEY` | Yes | - | Flask secret for sessions. Generate with: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
-| `LLM_API_KEYS` | No | - | Comma-separated Bearer tokens for the LLM API (`Authorization: Bearer <token>`) |
+| `LLM_READ_API_KEYS` | No | - | Comma-separated Bearer tokens with **read scope** (list, view, thumbnails). Write-scoped keys are also accepted here. |
+| `LLM_WRITE_API_KEYS` | No | - | Comma-separated Bearer tokens with **write scope** (delete, dedup, bulk operations, task execution). |
+| `LLM_API_KEYS` | No | — | Legacy single var; functions as both read and write. Deprecated in favour of `LLM_READ_API_KEYS` / `LLM_WRITE_API_KEYS`. |
 | `OIDC_ISSUER` | If OIDC | - | OIDC provider URL (e.g., https://authentik.example.com) |
 | `OIDC_CLIENT_ID` | If OIDC | - | OIDC client ID |
 | `OIDC_CLIENT_SECRET` | If OIDC | - | OIDC client secret |
@@ -188,7 +190,13 @@ This allows sharing images while protecting the gallery UI.
 
 Miso Gallery includes a JSON API intended for LLM agents and other machine-to-machine clients. The primary purpose is to let an external LLM client inspect and manage gallery state: list/search media, read metadata, tag, delete, bulk-delete, and deduplicate images.
 
-Enable the API by setting one or more comma-separated API keys. Prefer separate read and write keys for new deployments; `LLM_API_KEYS` remains supported as a legacy all-purpose key.
+Enable the API by configuring one or more API keys. The desired model:
+
+- **Read keys** (`LLM_READ_API_KEYS`) grant access to list, view, and thumbnail endpoints.
+- **Write keys** (`LLM_WRITE_API_KEYS`) grant access to delete, dedup, bulk operations, and task execution. A write key also works on read endpoints (write implies read).
+- **Legacy keys** (`LLM_API_KEYS`) function as both read and write — supported for backward compatibility but deprecated.
+
+Prefer separate read and write keys for new deployments; `LLM_API_KEYS` remains supported as a legacy all-purpose key. When explicit `LLM_READ_API_KEYS` or `LLM_WRITE_API_KEYS` are set, the legacy `LLM_API_KEYS` value is ignored.
 
 ```bash
 docker run -d --name miso-gallery \

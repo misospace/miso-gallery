@@ -215,11 +215,18 @@ If OIDC login is broken:
 
 ### API Key Rotation
 
-Miso Gallery supports separate read and write API keys:
+Miso Gallery supports separate read and write API keys. The desired model:
 
-- `LLM_READ_API_KEYS` — comma-separated keys with read scope (list, view, thumbnails)
-- `LLM_WRITE_API_KEYS` — comma-separated keys with write scope (delete, dedup, bulk operations)
-- `LLM_API_KEYS` — legacy single var (both read and write); deprecated but still supported
+| Variable | Scope | Endpoints |
+|---|---|---|
+| `LLM_READ_API_KEYS` | Read only | List, view, thumbnails, search |
+| `LLM_WRITE_API_KEYS` | Write (implies read) | Delete, dedup, bulk operations, task execution + all read endpoints |
+| `LLM_API_KEYS` | Both (legacy) | All endpoints; deprecated in favour of explicit keys |
+
+**Key rules:**
+- A write key is accepted on both read and write endpoints.
+- A read-only key is rejected from write endpoints.
+- When explicit `LLM_READ_API_KEYS` or `LLM_WRITE_API_KEYS` are set, the legacy `LLM_API_KEYS` value is ignored.
 
 **To rotate keys:**
 

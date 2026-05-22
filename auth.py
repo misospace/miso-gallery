@@ -103,10 +103,12 @@ def _keys_for_scope(scope: Literal["read", "write"]) -> list[str]:
         if LLM_WRITE_API_KEYS:
             return LLM_WRITE_API_KEYS
         return _LLM_LEGACY_KEYS
-    # Read scope: explicit read keys, then legacy
-    if LLM_READ_API_KEYS:
-        return LLM_READ_API_KEYS
-    return _LLM_LEGACY_KEYS
+    # Read scope: explicit read keys, write keys (write implies read), then legacy
+    keys = list(LLM_READ_API_KEYS)
+    keys.extend(LLM_WRITE_API_KEYS)
+    if not keys:
+        keys = list(_LLM_LEGACY_KEYS)
+    return keys
 
 
 def verify_api_key_scope(token: str, scope: Literal["read", "write"]) -> bool:
