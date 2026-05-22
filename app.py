@@ -125,14 +125,18 @@ _FOLDER_COVER_CACHE: dict[str, tuple[float, str | None]] = {}
 # Bounded pagination defaults for gallery endpoints
 GALLERY_PAGE_DEFAULT = 50
 GALLERY_PAGE_MAX = 500
+import os
+GALLERY_SCAN_LIMIT = int(os.environ.get("GALLERY_SCAN_LIMIT", "5000"))
 
 
 def _paginate(items, page=1, per_page=GALLERY_PAGE_DEFAULT):
-    """Return (paginated_items, total_count, page, per_page)."""
+    """Return (paginated_items, total_count, page, per_page, has_more)."""
     total = len(items)
     start = (page - 1) * per_page
     end = start + per_page
-    return items[start:end], total, page, per_page
+    paginated = items[start:end]
+    has_more = end < total
+    return paginated, total, page, per_page, has_more
 
 
 def _parse_pagination(args):
@@ -1059,10 +1063,11 @@ def media_metadata(path: Path) -> dict[str, object]:
 
 
 def iter_gallery_media(limit: int | None = None) -> list[Path]:
-    """Iterate gallery media files, optionally bounded by limit."""
+    """Iterate gallery media files, bounded by scan limit."""
+    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
     media: list[Path] = []
     for item in DATA_FOLDER.rglob("*"):
-        if limit is not None and len(media) >= limit:
+        if len(media) >= effective_limit:
             break
         try:
             if is_media_file(item) and not is_excluded_gallery_path(item):
@@ -1073,10 +1078,11 @@ def iter_gallery_media(limit: int | None = None) -> list[Path]:
 
 
 def iter_gallery_folders(limit: int | None = None) -> list[Path]:
-    """Iterate gallery folders, optionally bounded by limit."""
+    """Iterate gallery folders, bounded by scan limit."""
+    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
     folders: list[Path] = []
     for item in DATA_FOLDER.rglob("*"):
-        if limit is not None and len(folders) >= limit:
+        if len(folders) >= effective_limit:
             break
         try:
             if item.is_dir() and not is_excluded_gallery_path(item):
@@ -1776,8 +1782,12 @@ def llm_images():
         if query and query not in rel_path.lower() and query not in item.name.lower():
             continue
         filtered.append(media_metadata(item))
-    paginated, total, pg, pp = _paginate(filtered, page=page, per_page=per_page)
-    return {"images": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp}
+    paginated, total, pg, pp, has_more = _paginate(filtered, page=page, per_page=per_page)
+    # If scan hit the limit, there may be more unscanned items matching the query
+    scan_limited = len(all_media) >= GALLERY_SCAN_LIMIT
+    if scan_limited and not has_more:
+        has_more = True
+    return {"images": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
 
 
 @app.route("/api/llm/image/<path:relpath>")
@@ -1798,8 +1808,12 @@ def llm_image(relpath: str):
 def llm_recent():
     page, per_page = _parse_pagination(request.args)
     all_media = sorted(iter_gallery_media(), key=lambda p: p.stat().st_mtime, reverse=True)
-    paginated, total, pg, pp = _paginate(all_media, page=page, per_page=per_page)
-    return {"images": [media_metadata(item) for item in paginated], "count": len(paginated), "total": total, "page": pg, "per_page": pp}
+    paginated, total, pg, pp, has_more = _paginate(all_media, page=page, per_page=per_page)
+    # If scan hit the limit, there may be more recent items beyond the scan window
+    scan_limited = len(all_media) >= GALLERY_SCAN_LIMIT
+    if scan_limited and not has_more:
+        has_more = True
+    return {"images": [media_metadata(item) for item in paginated], "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
 
 
 @app.route("/api/llm/folders")
@@ -1812,8 +1826,11 @@ def llm_folders():
         rel_path = folder.relative_to(DATA_FOLDER).as_posix()
         parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
         all_folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
-    paginated, total, pg, pp = _paginate(all_folders, page=page, per_page=per_page)
-    return {"folders": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp}
+    paginated, total, pg, pp, has_more = _paginate(all_folders, page=page, per_page=per_page)
+    scan_limited = len(all_folders) - 1 >= GALLERY_SCAN_LIMIT  # -1 for root entry
+    if scan_limited and not has_more:
+        has_more = True
+    return {"folders": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
 
 
 @app.route("/api/llm/tags", methods=["POST"])
