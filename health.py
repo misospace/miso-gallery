@@ -83,9 +83,8 @@ def update_unhealthy_signal(health: dict[str, Any]) -> None:
         pass
 
 
-def get_storage_health() -> dict[str, Any]:
-    """Get comprehensive storage health status."""
-    health: dict[str, Any] = {
+def _new_health_payload() -> dict[str, Any]:
+    return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "checks": {
@@ -93,6 +92,56 @@ def get_storage_health() -> dict[str, Any]:
             "thumbnail_cache": {},
         },
     }
+
+
+def get_storage_read_health() -> dict[str, Any]:
+    """Get read-only storage health status without write probes or signal updates."""
+    health: dict[str, Any] = _new_health_payload()
+
+    read_ok, read_msg = check_storage_read(DATA_FOLDER)
+    health["checks"]["data_folder"]["read"] = {
+        "ok": read_ok,
+        "message": read_msg,
+    }
+
+    thumb_read_ok, thumb_read_msg = check_storage_read(THUMBNAIL_CACHE_DIR)
+    health["checks"]["thumbnail_cache"]["read"] = {
+        "ok": thumb_read_ok,
+        "message": thumb_read_msg,
+    }
+
+    if not (read_ok and thumb_read_ok):
+        health["status"] = "unhealthy"
+
+    return health
+
+
+def get_storage_write_health() -> dict[str, Any]:
+    """Get write-probe storage health status."""
+    health: dict[str, Any] = _new_health_payload()
+
+    write_ok, write_msg = check_storage_write(DATA_FOLDER)
+    health["checks"]["data_folder"]["write"] = {
+        "ok": write_ok,
+        "message": write_msg,
+    }
+
+    thumb_write_ok, thumb_write_msg = check_storage_write(THUMBNAIL_CACHE_DIR)
+    health["checks"]["thumbnail_cache"]["write"] = {
+        "ok": thumb_write_ok,
+        "message": thumb_write_msg,
+    }
+
+    if not (write_ok and thumb_write_ok):
+        health["status"] = "unhealthy"
+
+    update_unhealthy_signal(health)
+    return health
+
+
+def get_storage_health() -> dict[str, Any]:
+    """Get comprehensive storage health status."""
+    health: dict[str, Any] = _new_health_payload()
 
     read_ok, read_msg = check_storage_read(DATA_FOLDER)
     health["checks"]["data_folder"]["read"] = {
@@ -136,7 +185,7 @@ def storage_health() -> tuple[Any, int]:
 @health_bp.route("/health/storage/read")
 def storage_health_read() -> tuple[Any, int]:
     """Return read-only storage health status."""
-    health = get_storage_health()
+    health = get_storage_read_health()
     status_code = 200 if health["status"] == "healthy" else 503
     return jsonify({
         "status": health["status"],
@@ -151,7 +200,7 @@ def storage_health_read() -> tuple[Any, int]:
 @health_bp.route("/health/storage/write")
 def storage_health_write() -> tuple[Any, int]:
     """Return write-capable storage health status."""
-    health = get_storage_health()
+    health = get_storage_write_health()
     status_code = 200 if health["status"] == "healthy" else 503
     return jsonify({
         "status": health["status"],
