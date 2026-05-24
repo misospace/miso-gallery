@@ -30,12 +30,10 @@ jobs:
         run: pip install -r requirements.txt pip-audit
 
       - name: Audit requirements.txt
-        run: pip-audit -r requirements.txt --format=spdx --output-file=${{ runner.temp }}/pip-audit-reqs.json
-        continue-on-error: true
+        run: pip-audit -r requirements.txt --format=json > ${{ runner.temp }}/pip-audit-reqs.json
 
       - name: Audit installed environment
-        run: pip-audit --format=spdx --output-file=${{ runner.temp }}/pip-audit-env.json
-        continue-on-error: true
+        run: pip-audit --format=json > ${{ runner.temp }}/pip-audit-env.json
 
       - name: Upload audit results
         if: always()

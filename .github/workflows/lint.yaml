@@ -38,8 +38,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install flake8
+          pip install -r requirements.txt
+          pip install ruff pytest
 
-      - name: Run flake8
-        run: |
-          flake8 app.py --count --select=E9,F63,F7,F82 --show-source --statistics
+      - name: Run Ruff (all Python files)
+        run: ruff check . --select=E,F,W,B,SIM,I --ignore=E501 --statistics
+
+      - name: Run unit tests
+        run: python -m pytest -q
+        env:
+          SECRET_KEY: test-secret-ci-gateway

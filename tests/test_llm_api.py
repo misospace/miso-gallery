@@ -1,4 +1,4 @@
-from conftest import build_client, auth_header
+from conftest import auth_header, build_client
 
 
 def test_llm_api_requires_configured_valid_bearer_token(monkeypatch, tmp_path):

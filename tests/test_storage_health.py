@@ -5,7 +5,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import health
+import health  # noqa: E402
 
 
 def test_unhealthy_creates_signal_file(monkeypatch, tmp_path):

@@ -13,15 +13,10 @@ Covers:
 
 from __future__ import annotations
 
-import json
-import os
 import re
 import time
-from pathlib import Path
 
-import pytest
-
-from conftest import build_client, auth_header
+from conftest import build_client
 
 
 class TestMoveToTrashSingleFile:
@@ -29,7 +24,7 @@ class TestMoveToTrashSingleFile:
 
     def test_single_file_to_trash(self, monkeypatch, tmp_path):
         client, data_dir = build_client(monkeypatch, tmp_path)
-        from trash import move_to_trash, list_trash
+        from trash import list_trash, move_to_trash
 
         item = data_dir / "cats" / "cat.jpg"
         assert item.exists() and item.is_file()
@@ -47,7 +42,7 @@ class TestMoveToTrashDirectory:
     """Verify directory move to trash (the bug fix)."""
 
     def test_single_folder_to_trash(self, monkeypatch, tmp_path):
-        from trash import move_to_trash, list_trash
+        from trash import list_trash, move_to_trash
 
         client, data_dir = build_client(monkeypatch, tmp_path)
         folder = data_dir / "cats"
@@ -63,7 +58,7 @@ class TestMoveToTrashDirectory:
         assert trash_items[0]["size"] > 0
 
     def test_nested_folder_to_trash(self, monkeypatch, tmp_path):
-        from trash import move_to_trash, list_trash
+        from trash import list_trash, move_to_trash
 
         client, data_dir = build_client(monkeypatch, tmp_path)
         nested = data_dir / "photos" / "vacation" / "beach"
@@ -81,7 +76,7 @@ class TestMoveToTrashDirectory:
         assert trash_items[0]["original"] == "photos/vacation/beach"
 
     def test_empty_folder_to_trash(self, monkeypatch, tmp_path):
-        from trash import move_to_trash, list_trash
+        from trash import list_trash, move_to_trash
 
         client, data_dir = build_client(monkeypatch, tmp_path)
         empty_folder = data_dir / "empty_dir"
@@ -109,7 +104,7 @@ class TestBulkDelete:
     """Verify bulk delete handles both files and folders correctly."""
 
     def test_bulk_delete_mixed_files_and_folders(self, monkeypatch, tmp_path):
-        from trash import move_to_trash, list_trash
+        from trash import list_trash, move_to_trash
 
         client, data_dir = build_client(monkeypatch, tmp_path)
         (data_dir / "photo.jpg").write_bytes(b"\xff\xd8\xff\xe0fake_jpeg")
@@ -122,9 +117,7 @@ class TestBulkDelete:
 
         for rel in ["photo.jpg", "folder_a", "folder_b"]:
             path = data_dir / rel
-            if path.is_file():
-                move_to_trash(path, data_dir)
-            elif path.is_dir():
+            if path.is_file() or path.is_dir():
                 move_to_trash(path, data_dir)
 
         trash_items = list_trash(data_dir)
@@ -198,7 +191,7 @@ class TestBulkDelete:
             login_resp.data.decode(),
         )
         assert csrf_match
-        auth_resp = client.post(
+        _ = client.post(
             "/auth",
             data={"password": "pass123", "next": "/", "csrf_token": csrf_match.group(1)},
             follow_redirects=False,
@@ -232,7 +225,7 @@ class TestTrashRestore:
     """Verify restore from trash works for both files and directories."""
 
     def test_restore_file_from_trash(self, monkeypatch, tmp_path):
-        from trash import move_to_trash, restore_from_trash, list_trash
+        from trash import list_trash, move_to_trash, restore_from_trash
 
         client, data_dir = build_client(monkeypatch, tmp_path)
         item = data_dir / "sample.png"
@@ -250,7 +243,7 @@ class TestTrashRestore:
         assert item.read_bytes() == original_content
 
     def test_restore_folder_from_trash(self, monkeypatch, tmp_path):
-        from trash import move_to_trash, restore_from_trash, list_trash
+        from trash import list_trash, move_to_trash, restore_from_trash
 
         client, data_dir = build_client(monkeypatch, tmp_path)
         folder = data_dir / "restore_test"
@@ -282,7 +275,7 @@ class TestTrashListIncludesDirs:
     """Verify trash listing correctly shows directories with sizes."""
 
     def test_list_trash_shows_directory_size(self, monkeypatch, tmp_path):
-        from trash import move_to_trash, list_trash
+        from trash import list_trash, move_to_trash
 
         client, data_dir = build_client(monkeypatch, tmp_path)
         folder = data_dir / "listed_folder"
@@ -302,12 +295,12 @@ class TestConflictingNames:
     """Verify handling of name collisions in trash."""
 
     def test_trash_handles_name_collision(self, monkeypatch, tmp_path):
-        from trash import move_to_trash, list_trash
+        from trash import list_trash, move_to_trash
 
         client, data_dir = build_client(monkeypatch, tmp_path)
 
-        for i in range(2):
-            folder = data_dir / f"collision_test"
+        for _ in range(2):
+            folder = data_dir / "collision_test"
             folder.mkdir()
             (folder / "file.jpg").write_bytes(b"fakesize")
             move_to_trash(folder, data_dir)

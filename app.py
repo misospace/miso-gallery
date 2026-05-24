@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import html
+import contextlib
 import hashlib
+import html
 import json
 import os
 import secrets
@@ -29,14 +30,27 @@ from auth import (
     is_auth_enabled,
     is_oidc_configured,
     oauth,
-    require_api_key,
     require_api_key_with_scope,
     require_auth,
     resolved_auth_mode,
     verify_local_password,
 )
-from security import add_security_headers, csrf_token, is_safe_redirect_url, rate_limit, sanitize_path, validate_csrf
-from trash import empty_trash, list_trash, move_to_trash, purge_old_trash, restore_from_trash
+from health import health, storage_health, storage_health_read, storage_health_write
+from security import (
+    add_security_headers,
+    csrf_token,
+    is_safe_redirect_url,
+    rate_limit,
+    sanitize_path,
+    validate_csrf,
+)
+from trash import (
+    empty_trash,
+    list_trash,
+    move_to_trash,
+    purge_old_trash,
+    restore_from_trash,
+)
 
 DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
 THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
@@ -125,7 +139,6 @@ _FOLDER_COVER_CACHE: dict[str, tuple[float, str | None]] = {}
 # Bounded pagination defaults for gallery endpoints
 GALLERY_PAGE_DEFAULT = 50
 GALLERY_PAGE_MAX = 500
-import os
 GALLERY_SCAN_LIMIT = int(os.environ.get("GALLERY_SCAN_LIMIT", "5000"))
 
 
@@ -929,10 +942,8 @@ def remove_thumbnail_cache_for(rel_path: str) -> None:
     safe_name = sanitize_rel_path(rel_path).replace("/", "__")
     for cached_file in THUMBNAIL_CACHE_DIR.iterdir():
         if cached_file.name.startswith(f"{safe_name}."):
-            try:
+            with contextlib.suppress(OSError):
                 cached_file.unlink()
-            except OSError:
-                pass
 
 
 def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
@@ -1488,10 +1499,9 @@ def bulk_delete():
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         file_path = source_file_path(safe_rel_path)
-        if file_path.exists() and file_path.is_file():
-            if move_to_trash(file_path, DATA_FOLDER):
-                moved_files += 1
-                remove_thumbnail_cache_for(safe_rel_path)
+        if file_path.exists() and file_path.is_file() and move_to_trash(file_path, DATA_FOLDER):
+            moved_files += 1
+            remove_thumbnail_cache_for(safe_rel_path)
 
     # Delete selected folders
     for rel_path in selected_folders:
@@ -1499,10 +1509,9 @@ def bulk_delete():
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
-        if folder_path.exists() and folder_path.is_dir():
-            if move_to_trash(folder_path, DATA_FOLDER):
-                moved_folders += 1
-                remove_thumbnail_cache_for(safe_rel_path)
+        if folder_path.exists() and folder_path.is_dir() and move_to_trash(folder_path, DATA_FOLDER):
+            moved_folders += 1
+            remove_thumbnail_cache_for(safe_rel_path)
 
     outcome = "success" if (moved_files or moved_folders) else "noop"
     log_security_event(
@@ -2046,8 +2055,6 @@ def oidc_callback():
         return redirect(url_for("login", error="oidc_failed", next=next_url))
 
 
-# Health routes
-from health import health, storage_health, storage_health_read, storage_health_write
 
 app.add_url_rule("/health", "health", health, methods=["GET"])
 app.add_url_rule("/health/storage", "storage_health", storage_health, methods=["GET"])

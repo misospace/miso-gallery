@@ -218,9 +218,7 @@ def rate_limit(max_requests: int = 30, window: int = 60):
 
 def sanitize_path(path: str) -> bool:
     path = str(path or "").replace("\x00", "")
-    if ".." in path or path.startswith("/"):
-        return False
-    return True
+    return not (".." in path or path.startswith("/"))
 
 
 SECURITY_HEADERS = {
