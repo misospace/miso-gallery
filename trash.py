@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import shutil
 import time
@@ -85,10 +86,8 @@ def _dir_size(path: Path) -> int:
     total = 0
     for item in path.rglob("*"):
         if item.is_file():
-            try:
+            with contextlib.suppress(OSError):
                 total += item.stat().st_size
-            except OSError:
-                pass
     return total
 
 
@@ -105,10 +104,7 @@ def list_trash(data_folder: Path) -> list[dict]:
                 meta = json.loads(meta_file.read_text())
             except Exception:
                 meta = {}
-        if item.is_dir():
-            size = _dir_size(item)
-        else:
-            size = item.stat().st_size
+        size = _dir_size(item) if item.is_dir() else item.stat().st_size
         out.append(
             {
                 "name": item.name,

@@ -7,9 +7,9 @@ import secrets
 from functools import wraps
 from typing import Literal
 
+from authlib.integrations.flask_client import OAuth
 from flask import jsonify, redirect, request, session, url_for
 from werkzeug.security import check_password_hash
-from authlib.integrations.flask_client import OAuth
 
 AuthMode = Literal["none", "local", "oidc"]
 

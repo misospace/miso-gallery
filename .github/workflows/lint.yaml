@@ -39,4 +39,4 @@ jobs:
         run: pip install ruff
 
       - name: Run Ruff (all Python files)
-        run: ruff check . --statistics
+        run: ruff check . --select=E,F,W,B,SIM,I --ignore=E501 --statistics
