@@ -318,9 +318,9 @@ Tasks can also be disabled per-task by unsetting the `WEBHOOK_TASK_*` variable.
 
 ### Publishing a New Release
 
-1. Bump `APP_VERSION` in `app.py` (line ~110):
+1. Bump `APP_VERSION` in `app.py` (line 133):
    ```python
-   APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.x").strip() or "0.1.x"
+   APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.17").strip() or "0.1.17"
    ```
 
 2. Run the Manual Release workflow from the GitHub Actions tab, or tag and push:
