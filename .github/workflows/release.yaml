@@ -31,7 +31,7 @@ jobs:
           set -euo pipefail
           TAG="${{ github.event.release.tag_name }}"
           TAG="${TAG#v}"
-          VERSION=$(grep 'APP_VERSION' app.py | grep -oP 'or "\K[^"]+')
+          VERSION=$(grep '^APP_VERSION = ' app.py | head -1 | grep -oP 'or "\K[^"]+' | head -1)
           if [ "$VERSION" != "$TAG" ]; then
             echo "ERROR: APP_VERSION ($VERSION) does not match release tag ($TAG)"
             echo "The APP_VERSION constant in app.py must be bumped to $TAG before releasing."
