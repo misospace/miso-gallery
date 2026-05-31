@@ -1943,7 +1943,9 @@ def llm_dedup():
                     remove_thumbnail_cache_for(str(rel_path))
                     removed.append(str(rel_path))
     log_security_event("llm_dedup", "success", groups=len(groups), removed=len(removed), dry_run=not remove)
-    return {"duplicate_groups": groups, "group_count": len(groups), "dry_run": not remove, "removed": removed}
+    if remove:
+        return {"duplicate_groups": groups, "group_count": len(groups), "dry_run": False, "removed": removed, "deleted_count": len(removed)}
+    return {"duplicate_groups": groups, "group_count": len(groups), "dry_run": True, "skipped_count": 0, "deleted_count": 0}
 
 
 @app.route("/api/llm/task/run", methods=["POST"])

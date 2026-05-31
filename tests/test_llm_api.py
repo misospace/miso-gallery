@@ -62,7 +62,9 @@ def test_llm_dedup_dry_run_and_remove(monkeypatch, tmp_path):
     dry_payload = dry_run.get_json()
     assert dry_payload["dry_run"] is True
     assert dry_payload["group_count"] == 1
-    assert dry_payload["removed"] == []
+    assert "removed" not in dry_payload
+    assert "deleted_count" in dry_payload
+    assert "skipped_count" in dry_payload
 
     remove = client.post("/api/llm/dedup", json={"remove": True}, headers=auth_header())
     assert remove.status_code == 200
