@@ -42,8 +42,63 @@ Default agent for `misospace/miso-gallery`. Role: Senior Software Engineer speci
 - Release automation must keep `app.py` version aligned with release tag
 
 ### Release Process
-- Tags use plain semver (e.g., `0.4.6`, no `v` prefix)
-- Version in `app.py` is source of truth for in-app version
+miso-gallery uses GitHub Actions for release automation. The `Manual Release` workflow (`manual-release.yml`) handles the full release pipeline.
+
+#### Steps (preferred: GitHub Actions Manual Release)
+
+1. Go to **Actions → Manual Release → Run workflow**
+2. Enter the version (e.g. `0.4.12`; `v` prefix is accepted and normalized)
+3. The workflow handles: version bump → commit → tag → release creation with auto-generated notes
+4. The `Build` workflow triggers on the published release and builds/publishes the Docker image
+
+#### Steps (CLI — for when Actions is unavailable)
+
+```bash
+# Ensure main is up-to-date
+git checkout main
+git pull --ff-only --tags origin main
+
+# Update version in app.py (in-app version source)
+# Update APP_VERSION in the source to match the release version
+
+# Validate
+npm run lint
+npm run typecheck
+npm run test:ci
+npm run build
+
+# Commit
+git add .
+git commit -m "chore(release): bump version to <version>"
+git push origin HEAD:main
+
+git tag <version>
+git push origin <version>
+
+# Create release
+gh release create <version> \
+  --repo joryirving/miso-gallery \
+  --title "<version>" \
+  --generate-notes
+```
+
+The tag push triggers the `Build` workflow: multi-arch Docker image build + push to GHCR.
+
+#### Version source of truth
+
+- `app.py` (`APP_VERSION`) is canonical for the in-app version
+- Tags use plain semver (e.g. `0.2.5`, no `v` prefix)
+- Release automation must keep `app.py` version aligned with the release tag
+
+#### Validation gates
+
+Before pushing a release:
+- `npm run lint`
+- `npm run typecheck`
+- `npm run test:ci`
+- `npm run build`
+- `APP_VERSION` in `app.py` matches the release version
+
 
 ## Guidelines
 
