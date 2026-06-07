@@ -1295,6 +1295,9 @@ def service_worker():
 @app.route("/images/<path:filename>")
 def images(filename: str):
     rel_path = sanitize_rel_path(filename)
+    media_path = source_file_path(rel_path)
+    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
+        return "Not found", 404
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
 
@@ -1446,6 +1449,9 @@ def thumb(filename: str):
 @app.route("/view/<path:filename>")
 def view(filename: str):
     rel_path = sanitize_rel_path(filename)
+    media_path = source_file_path(rel_path)
+    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
+        return "Not found", 404
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
 
