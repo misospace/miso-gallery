@@ -9,6 +9,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from functools import wraps
+from ipaddress import ip_address, ip_network
 from threading import Lock
 from typing import Any
 
@@ -162,18 +163,88 @@ def _build_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
 PRIMARY_LIMITER = _build_primary_limiter()
 
 
+def _is_trusted_source(source_addr: str | None) -> bool:
+    """Check if the source address is a trusted proxy.
+
+    Trusted sources are configured via the TRUSTED_PROXIES environment
+    variable (comma-separated IPv4/IPv6 addresses or CIDR ranges).
+
+    When TRUST_PROXY is set to "true" or "1", all sources are trusted
+    (legacy/compatibility mode — not recommended for production).
+
+    Returns True when:
+      - TRUST_PROXY is enabled (legacy mode), or
+      - source_addr matches a configured TRUSTED_PROXIES entry.
+    """
+    trust_all = os.environ.get("TRUST_PROXY", "").strip().lower()
+    if trust_all in ("true", "1"):
+        return True
+
+    trusted_raw = os.environ.get("TRUSTED_PROXIES", "").strip()
+    if not trusted_raw:
+        return False
+
+    if not source_addr:
+        return False
+
+    try:
+        addr = ip_address(source_addr)
+    except ValueError:
+        return False
+
+    for entry in trusted_raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        try:
+            if "/" in entry:
+                if addr in ip_network(entry, strict=False):
+                    return True
+            else:
+                if addr == ip_address(entry):
+                    return True
+        except ValueError:
+            continue
+
+    return False
+
+
 def _client_ip() -> str:
-    forwarded = request.headers.get("X-Forwarded-For", "")
-    if forwarded:
-        first = forwarded.split(",", 1)[0].strip()
-        if first:
-            return first
+    """Return the client IP for rate-limiting.
 
-    cf_ip = request.headers.get("CF-Connecting-IP", "").strip()
-    if cf_ip:
-        return cf_ip
+    By default, uses request.remote_addr directly — X-Forwarded-For and
+    CF-Connecting-IP are ignored unless the source is a configured trusted
+    proxy (TRUSTED_PROXIES) or TRUST_PROXY is enabled.
 
-    return request.remote_addr or "unknown"
+    When TRUST_PROXY=true, forwarding headers are honoured (legacy mode).
+    When TRUSTED_PROXIES is set, only requests from those IPs will have
+    their forwarding headers trusted.
+
+    Reverse-proxy deployment note:
+      - If a reverse proxy terminates TLS and forwards the real client IP
+        via X-Forwarded-For, add the proxy's address to TRUSTED_PROXIES.
+        Example: TRUSTED_PROXIES=10.0.0.1,172.16.0.0/12
+      - When behind a trusted proxy, ensure the proxy strips or overwrites
+        X-Forwarded-For from untrusted sources to prevent spoofing.
+      - Cloudflare users: set TRUSTED_PROXIES to Cloudflare's IP ranges
+        (https://www.cloudflare.com/ips/) and enable TRUST_PROXY=true, or
+        use CF-Connecting-IP which Cloudflare signs via their API.
+    """
+    source = request.remote_addr
+
+    # Only honour forwarding headers from trusted sources
+    if _is_trusted_source(source):
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            first = forwarded.split(",", 1)[0].strip()
+            if first:
+                return first
+
+        cf_ip = request.headers.get("CF-Connecting-IP", "").strip()
+        if cf_ip:
+            return cf_ip
+
+    return source or "unknown"
 
 
 def _effective_config(endpoint: str, default_max_requests: int, default_window: int) -> RateLimitConfig:
