@@ -9,8 +9,8 @@ import secrets
 import time
 from dataclasses import dataclass
 from functools import wraps
-from threading import Lock
 from ipaddress import ip_address, ip_network
+from threading import Lock
 from typing import Any
 
 from flask import jsonify, request, session
