@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import secrets
 from functools import wraps
@@ -20,6 +21,21 @@ LLM_WRITE_API_KEYS = [key.strip() for key in os.environ.get("LLM_WRITE_API_KEYS"
 
 # Legacy single var — use LLM_READ_API_KEYS / LLM_WRITE_API_KEYS instead
 _LLM_LEGACY_KEYS = [key.strip() for key in os.environ.get("LLM_API_KEYS", "").split(",") if key.strip()]
+
+# OIDC Authorization Configuration
+OIDC_ALLOWED_DOMAINS = [
+    d.strip().lower() for d in os.environ.get("OIDC_ALLOWED_DOMAINS", "").split(",") if d.strip()
+]
+OIDC_ALLOWED_GROUPS = [
+    g.strip().lower() for g in os.environ.get("OIDC_ALLOWED_GROUPS", "").split(",") if g.strip()
+]
+OIDC_REQUIRED_CLAIMS: dict[str, str] = {}
+_oidc_required_claims_raw = os.environ.get("OIDC_REQUIRED_CLAIMS", "").strip()
+if _oidc_required_claims_raw:
+    try:
+        OIDC_REQUIRED_CLAIMS = json.loads(_oidc_required_claims_raw)
+    except (json.JSONDecodeError, ValueError):
+        OIDC_REQUIRED_CLAIMS = {}
 
 # OIDC Configuration
 OIDC_ENABLED = os.environ.get("OIDC_ENABLED", "").strip().lower() == "true"
@@ -119,6 +135,39 @@ def verify_api_key_scope(token: str, scope: Literal["read", "write"]) -> bool:
     return any(secrets.compare_digest(token, configured) for configured in keys)
 
 
+# API key identification helpers for audit logging.
+
+_API_KEY_HINT_CHARS = 4  # show first/last N chars as a stable hint
+
+
+def _api_key_hint(key: str) -> str:
+    """Return a short stable hint derived from an API key for audit logging.
+
+    Shows first 4 and last 4 characters (or less if the key is shorter).
+    Does NOT reveal the full key.
+    """
+    if not key or len(key) < 8:
+        return key[:2] + "..." if key else ""
+    return f"{key[:_API_KEY_HINT_CHARS]}...{key[-_API_KEY_HINT_CHARS:]}"
+
+
+def _find_matching_key(
+    token: str, scope: Literal["read", "write"]
+) -> tuple[bool, str | None]:
+    """Verify a bearer token and return (success, key_hint_or_none).
+
+    Uses constant-time comparison to prevent timing attacks.
+    Returns the hint for the first matching key found.
+    """
+    keys = _keys_for_scope(scope)
+    if not token or not keys:
+        return False, None
+    for configured in keys:
+        if secrets.compare_digest(token, configured):
+            return True, _api_key_hint(configured)
+    return False, None
+
+
 # Backward-compat: verify_api_key checks read scope
 def verify_api_key(token: str) -> bool:
     return verify_api_key_scope(token, "read")
@@ -172,7 +221,10 @@ def require_api_key_with_scope(scope: Literal["read", "write"]):
     def decorator(view_fn):
         @wraps(view_fn)
         def wrapper(*args, **kwargs):
-            if verify_api_key_scope(_bearer_token(), scope):
+            # Verify API key and store hint in session for audit logging
+            matched, key_hint = _find_matching_key(_bearer_token(), scope)
+            if matched:
+                session["api_key_hint"] = key_hint
                 return view_fn(*args, **kwargs)
             if is_authenticated():
                 return jsonify({"error": "Browser sessions are not accepted on LLM API endpoints"}), 403
@@ -184,6 +236,52 @@ def require_api_key_with_scope(scope: Literal["read", "write"]):
 
         return wrapper
     return decorator
+
+
+def verify_oidc_authorization(user_info: dict) -> tuple[bool, str | None]:
+    """Check OIDC user info against authorization allowlists/claims.
+
+    Returns (allowed, reason). If allowed is False, reason explains why.
+    All checks are optional — if no authorization config is set, all users pass.
+
+    Checks performed (all must pass):
+      1. Domain allowlist: if OIDC_ALLOWED_DOMAINS is set, email domain must match
+      2. Group allowlist: if OIDC_ALLOWED_GROUPS is set, user groups must intersect
+      3. Required claims: if OIDC_REQUIRED_CLAIMS is set, all key=value pairs must match
+    """
+    # Check domain allowlist
+    if OIDC_ALLOWED_DOMAINS:
+        email = (user_info.get("email") or "").lower()
+        if not email:
+            return False, "OIDC authorization failed: no email in user info"
+        user_domain = email.rsplit("@", 1)[-1] if "@" in email else ""
+        if user_domain not in OIDC_ALLOWED_DOMAINS:
+            return (
+                False,
+                f"OIDC authorization failed: domain '{user_domain}' not in allowed domains",
+            )
+
+    # Check group allowlist
+    if OIDC_ALLOWED_GROUPS:
+        groups = [g.lower() for g in user_info.get("groups", [])]
+        if not any(g in OIDC_ALLOWED_GROUPS for g in groups):
+            return (
+                False,
+                f"OIDC authorization failed: no matching group in {OIDC_ALLOWED_GROUPS}",
+            )
+
+    # Check required claims
+    if OIDC_REQUIRED_CLAIMS:
+        for claim_key, expected_value in OIDC_REQUIRED_CLAIMS.items():
+            actual = str(user_info.get(claim_key, ""))
+            if actual != expected_value:
+                return (
+                    False,
+                    f"OIDC authorization failed: claim '{claim_key}' mismatch "
+                    f"(expected '{expected_value}', got '{actual}')",
+                )
+
+    return True, None
 
 
 def get_oidc_label() -> str:
