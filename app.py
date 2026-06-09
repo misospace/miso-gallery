@@ -134,6 +134,7 @@ APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.17").strip() or "0.1.17"
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
 AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
 FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 _FOLDER_COVER_CACHE: dict[str, tuple[float, str | None]] = {}
 
 # Bounded pagination defaults for gallery endpoints
@@ -167,6 +168,12 @@ def _parse_pagination(args):
 
 def _webhook_enabled() -> bool:
     return os.environ.get("WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+def _verify_webhook_secret(token: str) -> bool:
+    """Verify Bearer token matches WEBHOOK_SECRET if configured."""
+    if not WEBHOOK_SECRET:
+        return False
+    return secrets.compare_digest(token, WEBHOOK_SECRET)
 
 
 def _task_env_key(task_name: str) -> str:
@@ -1777,6 +1784,14 @@ def maintenance_thumbnails_regenerate():
 @require_auth
 @rate_limit(max_requests=20, window=60)
 def webhook_run_task():
+    # Require WEBHOOK_SECRET as Bearer token when configured, regardless of auth mode.
+    # This prevents unauthenticated command execution when AUTH_TYPE=none.
+    if WEBHOOK_SECRET:
+        auth_header = request.headers.get("Authorization", "")
+        scheme, _, token = auth_header.partition(" ")
+        if scheme.lower() != "bearer" or not _verify_webhook_secret(token):
+            return {"error": "Webhook secret required"}, 401
+
     if is_auth_enabled() and not validate_csrf(request.headers.get("X-CSRF-Token")):
         return {"error": "Invalid CSRF token"}, 403
 
