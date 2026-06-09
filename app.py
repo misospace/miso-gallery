@@ -25,7 +25,6 @@ from flask import (
 from PIL import Image, UnidentifiedImageError
 
 from auth import (
-    _find_matching_key,
     configure_oauth,
     get_oidc_label,
     is_auth_enabled,
