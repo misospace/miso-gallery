@@ -25,6 +25,7 @@ from flask import (
 from PIL import Image, UnidentifiedImageError
 
 from auth import (
+    _find_matching_key,
     configure_oauth,
     get_oidc_label,
     is_auth_enabled,
@@ -34,8 +35,8 @@ from auth import (
     require_auth,
     resolved_auth_mode,
     verify_local_password,
-    verify_oidc_authorization,
-)
+) 
+from auth import verify_oidc_authorization
 from health import health, storage_health, storage_health_read, storage_health_write
 from security import (
     add_security_headers,
@@ -1304,9 +1305,6 @@ def service_worker():
 @app.route("/images/<path:filename>")
 def images(filename: str):
     rel_path = sanitize_rel_path(filename)
-    media_path = source_file_path(rel_path)
-    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
-        return "Not found", 404
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
 
@@ -1458,9 +1456,6 @@ def thumb(filename: str):
 @app.route("/view/<path:filename>")
 def view(filename: str):
     rel_path = sanitize_rel_path(filename)
-    media_path = source_file_path(rel_path)
-    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
-        return "Not found", 404
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
 
