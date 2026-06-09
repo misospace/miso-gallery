@@ -34,8 +34,8 @@ from auth import (
     require_auth,
     resolved_auth_mode,
     verify_local_password,
-) 
-from auth import verify_oidc_authorization
+    verify_oidc_authorization,
+)
 from health import health, storage_health, storage_health_read, storage_health_write
 from security import (
     add_security_headers,
