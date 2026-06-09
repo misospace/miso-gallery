@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import json
 import os
 import secrets
@@ -11,6 +13,8 @@ from typing import Literal
 from authlib.integrations.flask_client import OAuth
 from flask import jsonify, redirect, request, session, url_for
 from werkzeug.security import check_password_hash
+
+logger = logging.getLogger(__name__)
 
 AuthMode = Literal["none", "local", "oidc"]
 
@@ -34,7 +38,11 @@ _oidc_required_claims_raw = os.environ.get("OIDC_REQUIRED_CLAIMS", "").strip()
 if _oidc_required_claims_raw:
     try:
         OIDC_REQUIRED_CLAIMS = json.loads(_oidc_required_claims_raw)
-    except (json.JSONDecodeError, ValueError):
+    except (json.JSONDecodeError, ValueError) as exc:
+        logger.warning(
+            "OIDC_REQUIRED_CLAIMS has invalid JSON (%s); authorization claim checks will be disabled",
+            exc,
+        )
         OIDC_REQUIRED_CLAIMS = {}
 
 # OIDC Configuration

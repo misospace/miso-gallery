@@ -1,6 +1,13 @@
+import importlib
 import re
+import sys
+from pathlib import Path
 
 from conftest import build_client
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def _extract_csrf(html: str) -> str:
@@ -149,3 +156,229 @@ def test_bulk_toolbar_buttons_reflect_selection_state(monkeypatch, tmp_path):
     assert "if (selectAllBtn) { selectAllBtn.disabled = totalCount === 0 || selectedCount === totalCount; }" in body
     assert "if (deselectAllBtn) { deselectAllBtn.disabled = selectedCount === 0; }" in body
     assert ".toolbar button:disabled { opacity:0.5; cursor:not-allowed; }" in body
+
+
+# ---------------------------------------------------------------------------
+# verify_oidc_authorization tests
+# ---------------------------------------------------------------------------
+
+def _reload_auth(monkeypatch, extra_env: dict | None = None):
+    """Force-reload the auth module so env var changes take effect."""
+    if extra_env:
+        for k, v in extra_env.items():
+            monkeypatch.setenv(k, str(v))
+    sys.modules.pop("auth", None)
+    import auth  # noqa: F401
+
+
+def _user_info(email="alice@example.com", groups=None, claims=None):
+    """Build a minimal OIDC user_info dict."""
+    info: dict = {"email": email}
+    if groups is not None:
+        info["groups"] = groups
+    if claims:
+        info.update(claims)
+    return info
+
+
+def test_oidc_auth_no_config_allows_all(monkeypatch, tmp_path):
+    """With no authorization config set, all users pass."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "",
+        "OIDC_ALLOWED_GROUPS": "",
+        "OIDC_REQUIRED_CLAIMS": "",
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(_user_info())
+    assert allowed is True
+    assert reason is None
+
+
+def test_oidc_auth_domain_allowlist_pass(monkeypatch, tmp_path):
+    """User email domain matches the allowlist → allowed."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "example.com,corp.io",
+        "OIDC_ALLOWED_GROUPS": "",
+        "OIDC_REQUIRED_CLAIMS": "",
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(_user_info(email="alice@example.com"))
+    assert allowed is True
+    assert reason is None
+
+    # Case-insensitive domain check
+    allowed2, _ = auth.verify_oidc_authorization(_user_info(email="BOB@EXAMPLE.COM"))
+    assert allowed2 is True
+
+
+def test_oidc_auth_domain_allowlist_fail(monkeypatch, tmp_path):
+    """User email domain NOT in allowlist → denied."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "example.com",
+        "OIDC_ALLOWED_GROUPS": "",
+        "OIDC_REQUIRED_CLAIMS": "",
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(_user_info(email="bob@evil.com"))
+    assert allowed is False
+    assert "domain 'evil.com' not in allowed domains" in reason
+
+
+def test_oidc_auth_domain_allowlist_no_email(monkeypatch, tmp_path):
+    """User has no email → denied."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "example.com",
+        "OIDC_ALLOWED_GROUPS": "",
+        "OIDC_REQUIRED_CLAIMS": "",
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization({"sub": "abc123"})
+    assert allowed is False
+    assert "no email in user info" in reason
+
+
+def test_oidc_auth_group_allowlist_pass(monkeypatch, tmp_path):
+    """User belongs to an allowed group → allowed."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "",
+        "OIDC_ALLOWED_GROUPS": "admins,developers",
+        "OIDC_REQUIRED_CLAIMS": "",
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(
+        _user_info(groups=["users", "developers"])
+    )
+    assert allowed is True
+    assert reason is None
+
+
+def test_oidc_auth_group_allowlist_fail(monkeypatch, tmp_path):
+    """User belongs to no allowed group → denied."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "",
+        "OIDC_ALLOWED_GROUPS": "admins,developers",
+        "OIDC_REQUIRED_CLAIMS": "",
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(
+        _user_info(groups=["users", "guests"])
+    )
+    assert allowed is False
+    assert "no matching group" in reason
+
+
+def test_oidc_auth_group_allowlist_no_groups(monkeypatch, tmp_path):
+    """User has no groups field → denied."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "",
+        "OIDC_ALLOWED_GROUPS": "admins",
+        "OIDC_REQUIRED_CLAIMS": "",
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(_user_info())
+    assert allowed is False
+    assert "no matching group" in reason
+
+
+def test_oidc_auth_required_claims_pass(monkeypatch, tmp_path):
+    """All required claims match → allowed."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "",
+        "OIDC_ALLOWED_GROUPS": "",
+        "OIDC_REQUIRED_CLAIMS": '{"department": "engineering", "role": "engineer"}',
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(
+        _user_info(claims={"department": "engineering", "role": "engineer"})
+    )
+    assert allowed is True
+    assert reason is None
+
+
+def test_oidc_auth_required_claims_fail(monkeypatch, tmp_path):
+    """One required claim mismatch → denied."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "",
+        "OIDC_ALLOWED_GROUPS": "",
+        "OIDC_REQUIRED_CLAIMS": '{"department": "engineering"}',
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(
+        _user_info(claims={"department": "marketing"})
+    )
+    assert allowed is False
+    assert "claim 'department' mismatch" in reason
+
+
+def test_oidc_auth_required_claims_missing(monkeypatch, tmp_path):
+    """Required claim not present in user info → denied."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "",
+        "OIDC_ALLOWED_GROUPS": "",
+        "OIDC_REQUIRED_CLAIMS": '{"department": "engineering"}',
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(_user_info())
+    assert allowed is False
+    assert "claim 'department' mismatch" in reason
+
+
+def test_oidc_auth_combined_domain_and_group_fail_on_domain(monkeypatch, tmp_path):
+    """When both domain and group are configured, domain check runs first."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "example.com",
+        "OIDC_ALLOWED_GROUPS": "admins",
+        "OIDC_REQUIRED_CLAIMS": "",
+    })
+    import auth
+    # Wrong domain → denied even though group matches
+    allowed, reason = auth.verify_oidc_authorization(
+        _user_info(email="bob@evil.com", groups=["admins"])
+    )
+    assert allowed is False
+    assert "domain 'evil.com' not in allowed domains" in reason
+
+
+def test_oidc_auth_combined_domain_and_group_fail_on_group(monkeypatch, tmp_path):
+    """Domain passes but group fails → denied on group check."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "example.com",
+        "OIDC_ALLOWED_GROUPS": "admins",
+        "OIDC_REQUIRED_CLAIMS": "",
+    })
+    import auth
+    allowed, reason = auth.verify_oidc_authorization(
+        _user_info(email="alice@example.com", groups=["users"])
+    )
+    assert allowed is False
+    assert "no matching group" in reason
+
+
+def test_oidc_auth_malformed_json_warns(monkeypatch, tmp_path, caplog):
+    """Malformed OIDC_REQUIRED_CLAIMS JSON logs a warning instead of crashing."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "",
+        "OIDC_ALLOWED_GROUPS": "",
+        "OIDC_REQUIRED_CLAIMS": "{not valid json!!!",
+    })
+    # Re-import auth to trigger the parsing path
+    sys.modules.pop("auth", None)
+    import auth  # noqa: F401
+
+    assert auth.OIDC_REQUIRED_CLAIMS == {}
+    assert any("OIDC_REQUIRED_CLAIMS has invalid JSON" in r.message for r in caplog.records)
+
+
+def test_oidc_auth_malformed_json_allows_all(monkeypatch, tmp_path):
+    """When OIDC_REQUIRED_CLAIMS is malformed, it defaults to {} and all users pass."""
+    _reload_auth(monkeypatch, extra_env={
+        "OIDC_ALLOWED_DOMAINS": "",
+        "OIDC_ALLOWED_GROUPS": "",
+        "OIDC_REQUIRED_CLAIMS": "{{{{",
+    })
+    sys.modules.pop("auth", None)
+    import auth  # noqa: F401
+
+    allowed, reason = auth.verify_oidc_authorization(_user_info())
+    assert allowed is True
+    assert reason is None
