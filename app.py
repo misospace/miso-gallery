@@ -25,7 +25,6 @@ from flask import (
 from PIL import Image, UnidentifiedImageError
 
 from auth import (
-    _find_matching_key,
     configure_oauth,
     get_oidc_label,
     is_auth_enabled,
@@ -35,8 +34,8 @@ from auth import (
     require_auth,
     resolved_auth_mode,
     verify_local_password,
-) 
-from auth import verify_oidc_authorization
+    verify_oidc_authorization,
+)
 from health import health, storage_health, storage_health_read, storage_health_write
 from security import (
     add_security_headers,
@@ -1030,10 +1029,8 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
     cover_rel: str | None = None
     # Bound the scan to prevent unbounded subtree traversal on cache misses.
     candidates = []
-    count = 0
-    for item in folder_path.rglob("*"):
-        count += 1
-        if count > GALLERY_SCAN_LIMIT:
+    for count, item in enumerate(folder_path.rglob("*")):
+        if count >= GALLERY_SCAN_LIMIT:
             break
         candidates.append(item)
     candidates.sort(key=lambda p: p.as_posix().lower())
