@@ -34,6 +34,7 @@ from auth import (
     require_auth,
     resolved_auth_mode,
     verify_local_password,
+    verify_oidc_authorization,
 )
 from health import health, storage_health, storage_health_read, storage_health_write
 from security import (
@@ -111,6 +112,7 @@ def log_security_event(event: str, outcome: str, *, request_id: str = "", **fiel
             "user_id": session.get("user_id"),
             "user_name": session.get("user_name"),
             "auth_method": session.get("auth_method") or ("local" if session.get("authenticated") else None),
+            "api_key_hint": session.get("api_key_hint"),
             "request_id": request_id,
         }
         payload.update(fields)
@@ -1701,6 +1703,7 @@ def login():
     error_map = {
         "invalid": "Invalid password. Please try again.",
         "oidc_failed": "OIDC login failed. Please try again.",
+        "oidc_denied": "Your account does not meet the OIDC authorization requirements.",
         "oidc_disabled": "OIDC is not configured.",
         "local_disabled": "Password login is disabled.",
     }
@@ -2052,12 +2055,25 @@ def oidc_callback():
             resp = oauth.oidc.get("userinfo")
             user_info = resp.json()
 
+        # Extract stable subject ID (always log this for audit trails)
+        oidc_sub = user_info.get("sub")
+
         # Extract user identifier (prefer email, fallback to sub)
         user_id = user_info.get("email") or user_info.get("sub")
         user_name = user_info.get("name") or user_info.get("preferred_username") or user_id
 
         if not user_id:
             return "Could not identify user from OIDC response", 400
+
+        # Check OIDC authorization (domain/group/claim allowlists)
+        allowed, reason = verify_oidc_authorization(user_info)
+        if not allowed:
+            log_security_event(
+                "login", "denied", auth_method="oidc", reason=reason,
+                oidc_sub=oidc_sub,
+            )
+            next_url = session.pop("oidc_next_url", None) or "/"
+            return redirect(url_for("login", error="oidc_denied", next=next_url))
 
         # Set session as permanent and authenticated
         session.permanent = True
@@ -2066,7 +2082,7 @@ def oidc_callback():
         session["user_name"] = user_name
         session["auth_method"] = "oidc"
 
-        log_security_event("login", "success", auth_method="oidc")
+        log_security_event("login", "success", auth_method="oidc", oidc_sub=oidc_sub)
 
         # Redirect to the stored next URL or index
         next_url = session.pop("oidc_next_url", None) or url_for("index")
