@@ -215,8 +215,13 @@ def storage_health_write() -> tuple[Any, int]:
 
 @health_bp.route("/health")
 def health() -> tuple[Any, int]:
-    """Return root health endpoint with version and storage status."""
-    storage_health_data = get_storage_health()
+    """Return root health endpoint with version and read-only storage status.
+
+    Root /health is intentionally read-only to avoid write probes mutating
+    storage during ordinary health checks (e.g. on NFS or during load).
+    Write-capable probes are available on /health/storage/write.
+    """
+    storage_health_data = get_storage_read_health()
     app_version = os.environ.get("APP_VERSION") or "v0.1.x"
 
     health_data = {

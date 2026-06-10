@@ -1028,7 +1028,15 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
         return None
 
     cover_rel: str | None = None
-    candidates = sorted(folder_path.rglob("*"), key=lambda p: p.as_posix().lower())
+    # Bound the scan to prevent unbounded subtree traversal on cache misses.
+    candidates = []
+    count = 0
+    for item in folder_path.rglob("*"):
+        count += 1
+        if count > GALLERY_SCAN_LIMIT:
+            break
+        candidates.append(item)
+    candidates.sort(key=lambda p: p.as_posix().lower())
     for candidate in candidates:
         if not candidate.is_file() or candidate.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
@@ -1590,7 +1598,12 @@ def recent_view():
         rel_parts = path.relative_to(DATA_FOLDER).parts
         return any(part in excluded_dirs for part in rel_parts)
 
+    scan_count = 0
     for item in DATA_FOLDER.rglob("*"):
+        # Bound the scan to prevent blocking on large galleries/NFS.
+        scan_count += 1
+        if scan_count > GALLERY_SCAN_LIMIT:
+            break
         try:
             if not item.is_file() or not is_image(item):
                 continue
