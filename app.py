@@ -114,6 +114,7 @@ def log_security_event(event: str, outcome: str, *, request_id: str = "", **fiel
             "user_name": session.get("user_name"),
             "auth_method": session.get("auth_method") or ("local" if session.get("authenticated") else None),
             "api_key_hint": session.get("api_key_hint"),
+            "api_key_class": session.get("api_key_class"),
             "request_id": request_id,
         }
         payload.update(fields)

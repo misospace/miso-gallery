@@ -381,3 +381,117 @@ def test_oidc_auth_malformed_json_allows_all(monkeypatch, tmp_path):
     allowed, reason = auth.verify_oidc_authorization(_user_info())
     assert allowed is True
     assert reason is None
+
+
+# ---------------------------------------------------------------------------
+# API key identification and key class tests (issue #201)
+# ---------------------------------------------------------------------------
+
+def _reload_api_keys(monkeypatch, *, read_keys: str = "", write_keys: str = ""):
+    """Set API keys and force-reload the auth module."""
+    monkeypatch.setenv("LLM_READ_API_KEYS", read_keys)
+    monkeypatch.setenv("LLM_WRITE_API_KEYS", write_keys)
+    # Also clear legacy to avoid interference
+    monkeypatch.setenv("LLM_API_KEYS", "")
+    sys.modules.pop("auth", None)
+    import auth  # noqa: F401
+
+
+def test_find_matching_key_returns_class_read(monkeypatch, tmp_path):
+    """_find_matching_key returns 'read' as the scope class for read keys."""
+    _reload_api_keys(monkeypatch, read_keys="read-key-1234", write_keys="")
+    import auth
+    matched, hint, key_class = auth._find_matching_key("read-key-1234", "read")
+    assert matched is True
+    assert hint is not None
+    assert len(hint) < len("read-key-1234")  # hint is obfuscated
+    assert key_class == "read"
+
+
+def test_find_matching_key_returns_class_write(monkeypatch, tmp_path):
+    """_find_matching_key returns 'write' as the scope class for write keys."""
+    _reload_api_keys(monkeypatch, read_keys="read-key-1234", write_keys="write-key-5678")
+    import auth
+    matched, hint, key_class = auth._find_matching_key("write-key-5678", "write")
+    assert matched is True
+    assert hint is not None
+    assert len(hint) < len("write-key-5678")  # hint is obfuscated
+    assert key_class == "write"
+
+
+def test_find_matching_key_fails_returns_none_class(monkeypatch, tmp_path):
+    """_find_matching_key returns (False, None, None) for wrong token."""
+    _reload_api_keys(monkeypatch, read_keys="read-key-1234", write_keys="")
+    import auth
+    matched, hint, key_class = auth._find_matching_key("wrong-token", "read")
+    assert matched is False
+    assert hint is None
+    assert key_class is None
+
+
+def test_find_matching_key_empty_token_returns_none(monkeypatch, tmp_path):
+    """_find_matching_key returns (False, None, None) for empty token."""
+    _reload_api_keys(monkeypatch, read_keys="read-key-1234", write_keys="")
+    import auth
+    matched, hint, key_class = auth._find_matching_key("", "read")
+    assert matched is False
+    assert hint is None
+    assert key_class is None
+
+
+def test_api_key_hint_short_cuts_for_keys_under_8_chars(monkeypatch, tmp_path):
+    """Keys shorter than 8 chars show first 2 + '...'."""
+    _reload_api_keys(monkeypatch, read_keys="short", write_keys="")
+    import auth
+    hint = auth._api_key_hint("short")
+    assert hint == "sh..."
+
+
+def test_api_key_hint_full_format(monkeypatch, tmp_path):
+    """Keys 8+ chars show first 4 and last 4."""
+    _reload_api_keys(monkeypatch, read_keys="read-key-1234", write_keys="")
+    import auth
+    hint = auth._api_key_hint("read-key-1234")
+    assert hint == "read...1234"
+
+
+def test_api_key_hint_empty_key(monkeypatch, tmp_path):
+    """Empty key returns empty string."""
+    _reload_api_keys(monkeypatch, read_keys="", write_keys="")
+    import auth
+    hint = auth._api_key_hint("")
+    assert hint == ""
+
+
+def test_api_key_hint_none_key(monkeypatch, tmp_path):
+    """None key returns empty string."""
+    _reload_api_keys(monkeypatch, read_keys="", write_keys="")
+    import auth
+    hint = auth._api_key_hint(None)  # type: ignore[arg-type]
+    assert hint == ""
+
+
+def test_find_matching_key_legacy_fallback_returns_class(monkeypatch, tmp_path):
+    """Legacy LLM_API_KEYS are used when no read/write keys configured."""
+    monkeypatch.setenv("LLM_READ_API_KEYS", "")
+    monkeypatch.setenv("LLM_WRITE_API_KEYS", "")
+    monkeypatch.setenv("LLM_API_KEYS", "legacy-key-99")
+    sys.modules.pop("auth", None)
+    import auth  # noqa: F401
+
+    matched, hint, key_class = auth._find_matching_key("legacy-key-99", "read")
+    assert matched is True
+    assert key_class == "read"
+
+
+def test_find_matching_key_write_falls_back_to_legacy(monkeypatch, tmp_path):
+    """When no write keys set but legacy exists, write scope matches legacy."""
+    monkeypatch.setenv("LLM_READ_API_KEYS", "")
+    monkeypatch.setenv("LLM_WRITE_API_KEYS", "")
+    monkeypatch.setenv("LLM_API_KEYS", "legacy-key-99")
+    sys.modules.pop("auth", None)
+    import auth  # noqa: F401
+
+    matched, hint, key_class = auth._find_matching_key("legacy-key-99", "write")
+    assert matched is True
+    assert key_class == "write"
