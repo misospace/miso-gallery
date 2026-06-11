@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 
-from conftest import build_client, TEST_SECRET
+from conftest import TEST_SECRET, build_client
 
 
 def setup_function():
@@ -85,7 +85,7 @@ def test_xff_single_ip_hits_rate_limit(monkeypatch, tmp_path):
 
     xff = "192.168.1.100"
     # Send 5 requests (the login rate limit is 5/300s)
-    for i in range(5):
+    for _i in range(5):
         resp = _auth_post(client, headers={"X-Forwarded-For": xff})
         assert resp.status_code == 302
 
@@ -102,7 +102,7 @@ def test_xff_empty_uses_remote_addr(monkeypatch, tmp_path):
     _seed_csrf(client)
 
     # No XFF header — should use the test client's remote_addr (127.0.0.1)
-    for i in range(5):
+    for _i in range(5):
         resp = _auth_post(client)
 
     # 6th request without XFF should be rate-limited (same remote_addr)
@@ -121,7 +121,7 @@ def test_xff_multiple_hops_uses_first(monkeypatch, tmp_path):
     _seed_csrf(client)
 
     # Send 5 requests with multi-hop XFF — all share the same remote_addr
-    for i in range(5):
+    for _i in range(5):
         xff = "10.1.2.3, 10.9.9.9, 10.8.8.8"
         resp = _auth_post(client, headers={"X-Forwarded-For": xff})
         assert resp.status_code == 302
