@@ -16,7 +16,7 @@ from flask import (
     abort,
     make_response,
     redirect,
-    render_template_string,
+    render_template,
     request,
     send_from_directory,
     session,
@@ -53,6 +53,12 @@ from trash import (
     purge_old_trash,
     restore_from_trash,
 )
+
+# Load service worker from external file (extracted from app.py)
+SERVICE_WORKER_PATH = os.path.join(os.path.dirname(__file__), "templates", "service-worker.js")
+with open(SERVICE_WORKER_PATH, "r") as _f:
+    SERVICE_WORKER_TEMPLATE = _f.read()
+
 
 DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
 THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
@@ -205,726 +211,6 @@ def _render_task_command(template: str, params: dict[str, object]) -> str:
     return rendered
 
 
-SERVICE_WORKER_TEMPLATE = """
-const CACHE_VERSION = "miso-gallery-v1";
-const CORE_ASSETS = [
-  "/",
-  "/recent",
-  "/trash",
-  "/manifest.webmanifest",
-  "/assets/icon-192.png",
-  "/assets/icon-512.png"
-];
-
-self.addEventListener("install", (event) => {
-  event.waitUntil(
-    caches.open(CACHE_VERSION).then((cache) => cache.addAll(CORE_ASSETS)).catch(() => undefined)
-  );
-  self.skipWaiting();
-});
-
-self.addEventListener("activate", (event) => {
-  event.waitUntil(
-    caches.keys().then((keys) =>
-      Promise.all(keys.filter((key) => key !== CACHE_VERSION).map((key) => caches.delete(key)))
-    )
-  );
-  self.clients.claim();
-});
-
-self.addEventListener("fetch", (event) => {
-  const { request } = event;
-  if (request.method !== "GET") return;
-
-  const requestUrl = new URL(request.url);
-  if (requestUrl.origin !== self.location.origin) return;
-
-  if (request.destination === "image") {
-    event.respondWith(
-      caches.match(request).then((cached) => {
-        if (cached) return cached;
-        return fetch(request).then((response) => {
-          if (response && response.status === 200) {
-            const copy = response.clone();
-            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
-          }
-          return response;
-        });
-      })
-    );
-    return;
-  }
-
-  if (request.mode === "navigate") {
-    event.respondWith(
-      fetch(request)
-        .then((response) => {
-          if (response && response.status === 200) {
-            const copy = response.clone();
-            caches.open(CACHE_VERSION).then((cache) => cache.put(request, copy));
-          }
-          return response;
-        })
-        .catch(() => caches.match(request).then((cached) => cached || caches.match("/")))
-    );
-  }
-});
-"""
-
-HTML_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="{{ theme_color }}">
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="apple-touch-icon" href="/assets/icon-192.png">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Miso Gallery">
-  <meta name="mobile-web-app-capable" content="yes">
-  <title>Miso Gallery</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background:#0d0d0d; color:#e0e0e0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; min-height:100vh; }
-    header { background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%); padding:20px 30px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; gap:12px; flex-wrap:wrap; }
-    h1 { font-size:1.5rem; background:linear-gradient(90deg,#f5a623,#f76c1c); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
-    .header-actions { display:flex; align-items:center; gap:10px; margin-left:auto; }
-    .breadcrumb { color:#888; font-size:0.9rem; }
-    .breadcrumb a { color:#f5a623; text-decoration:none; }
-    .refresh-btn { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:8px; padding:8px 12px; font-size:0.9rem; cursor:pointer; }
-    .nav-toggle { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:10px; padding:10px 12px; font-size:1rem; cursor:pointer; line-height:1; }
-    .drawer-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); opacity:0; pointer-events:none; transition:opacity .2s ease; z-index:999; }
-    .drawer-overlay.open { opacity:1; pointer-events:auto; }
-    .drawer { position:fixed; top:0; left:0; height:100vh; width:300px; max-width:85vw; background:#121217; border-right:1px solid #2f2f2f; transform:translateX(-105%); transition:transform .2s ease; z-index:1000; padding:16px; display:flex; flex-direction:column; gap:14px; }
-    .drawer.open { transform:translateX(0); }
-    .drawer-header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
-    .drawer-brand { font-weight:700; color:#f5a623; }
-    .drawer-close { background:transparent; border:1px solid #333; color:#ddd; border-radius:10px; padding:8px 10px; cursor:pointer; }
-    .drawer-path { color:#9aa1a8; font-size:.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .drawer-links { display:flex; flex-direction:column; gap:6px; }
-    .drawer-links a { display:block; padding:10px 10px; border-radius:10px; text-decoration:none; color:#e0e0e0; border:1px solid transparent; }
-    .drawer-links a:hover { background:#1b1b26; border-color:#2c2c3a; }
-    .drawer-links a.current { border-color:rgba(245,166,35,.35); background:rgba(245,166,35,.08); }
-    .drawer-divider { height:1px; background:#2a2a2a; margin:6px 0; }
-    .container { padding:20px; }
-    .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:15px; }
-    .filter-summary { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:-4px 0 15px; color:#cfcfcf; }
-    .filter-chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:rgba(245,166,35,.12); border:1px solid rgba(245,166,35,.35); color:#f6c36d; font-size:.92rem; }
-    .clear-filter-link { color:#f5a623; text-decoration:none; font-size:.92rem; }
-    .clear-filter-link:hover { text-decoration:underline; }
-    .bulk-feedback { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:-4px 0 15px; padding:10px 12px; border-radius:8px; border:1px solid #2f3a2f; background:#152015; color:#cfe8cf; }
-    .bulk-feedback.info { border-color:#3b3b3b; background:#171717; color:#d6d6d6; }
-    .bulk-feedback strong { color:#f5a623; }
-    .toolbar button { background:#2a2a2a; color:#f0f0f0; border:1px solid #444; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
-    .toolbar .danger { background:#a52834; border-color:#dc3545; }
-    .toolbar button:disabled { opacity:0.5; cursor:not-allowed; }
-    .toolbar .danger:disabled { opacity:0.5; cursor:not-allowed; }
-    .selection-actions { display:none; align-items:center; gap:10px; padding:10px 12px; margin:-4px 0 15px; background:#171717; border:1px solid #343434; border-radius:8px; }
-    .selection-actions.active { display:flex; flex-wrap:wrap; }
-    .selection-count { color:#f5a623; font-weight:600; }
-    .selection-actions .ghost-btn { background:transparent; color:#c9c9c9; border:1px solid #4a4a4a; }
-    .selection-hint { flex-basis:100%; color:#9a9a9a; font-size:.8rem; }
-    .selection-hint code { color:#f6c36d; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
-    .folder-card,.image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; position:relative; content-visibility:auto; contain-intrinsic-size:260px 320px; }
-    .folder-card:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
-    .folder-card { border:1px dashed #444; }
-    .folder-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
-    .folder { display:block; padding:30px; text-align:center; text-decoration:none; position:relative; min-height:180px; }
-    .folder-icon { font-size:3rem; margin-bottom:10px; }
-    .folder-preview { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
-    .folder-name { color:#f5a623; font-weight:500; position:relative; z-index:1; text-shadow:0 2px 8px rgba(0,0,0,.7); background:rgba(0,0,0,.3); display:inline-block; padding:4px 8px; border-radius:6px; }
-    .image-card { position:relative; border:1px solid transparent; }
-    .image-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
-    .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
-    .image-info { padding:10px; font-size:.8rem; color:#888; }
-    .image-meta-row { display:flex; flex-wrap:wrap; gap:6px 10px; margin-top:6px; color:#777; font-size:.75rem; }
-    .image-meta-pill { display:inline-flex; align-items:center; gap:4px; }
-    .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .image-details { margin:0 10px 10px; border:1px solid #323232; border-radius:8px; background:#151515; }
-    .image-details summary { cursor:pointer; list-style:none; padding:8px 10px; color:#d6d6d6; font-size:.78rem; font-weight:600; }
-    .image-details summary::-webkit-details-marker { display:none; }
-    .image-details summary::after { content:'▾'; float:right; color:#888; }
-    .image-details[open] summary::after { content:'▴'; }
-    .image-details-body { padding:0 10px 10px; display:grid; gap:6px; font-size:.75rem; color:#a9a9a9; }
-    .image-details-row { display:flex; justify-content:space-between; gap:12px; }
-    .image-details-label { color:#7c7c7c; }
-    .image-details-value { text-align:right; word-break:break-word; }
-    .delete-btn { position:absolute; top:10px; right:10px; background:rgba(220,53,69,.9); color:white; border:none; padding:8px 12px; border-radius:5px; cursor:pointer; font-size:.8rem; opacity:0; transition:opacity .2s; }
-    .image-card:hover .delete-btn { opacity:1; }
-    .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
-    .thumb-preview-btn:hover { background:#f5a623; }
-    .tag-btn { position:absolute; bottom:10px; left:10px; background:rgba(52,152,219,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
-    .tag-btn:hover { background:#3498db; }
-    .image-card:hover .tag-btn { opacity:1; }
-    .image-card:hover .thumb-preview-btn { opacity:1; }
-    .selector { position:absolute; top:10px; left:10px; z-index:2; transform:scale(1.2); cursor:pointer; }
-    .empty { text-align:center; padding:50px; color:#666; }
-    .stats { color:#666; font-size:.85rem; margin-top:20px; text-align:center; }
-    @media (max-width: 640px) {
-      .toolbar,
-      .selection-actions {
-        flex-direction:column;
-        align-items:stretch;
-      }
-      .toolbar button,
-      .selection-actions button {
-        width:100%;
-      }
-      .selection-count,
-      .selection-hint {
-        width:100%;
-      }
-    }
-  </style>
-</head>
-<body>
-  <header>
-    <button type="button" id="navToggleBtn" class="nav-toggle" aria-label="Open menu" aria-expanded="false">☰</button>
-    <h1>🍲 Miso Gallery</h1>
-    <div class="header-actions">
-      {% if parent_url %}
-      <a class="refresh-btn" href="{{ parent_url }}" title="Go up one level">← Back</a>
-      {% endif %}
-      <div class="breadcrumb">{{ breadcrumb|safe }}</div>
-      <a class="refresh-btn" href="/trash" title="Open trash bin">🗑️ Trash</a>
-      <a class="refresh-btn" href="/recent" title="Recent uploads">📅 Recent</a>
-      <button type="button" id="installPwaBtn" class="refresh-btn" title="Install app" hidden>⬇ Install</button>
-      <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
-    </div>
-  </header>
-
-  <div id="drawerOverlay" class="drawer-overlay"></div>
-  <nav id="drawer" class="drawer" aria-label="Navigation">
-    <div class="drawer-header">
-      <div class="drawer-brand">🍲 Miso Gallery</div>
-      <button type="button" id="drawerCloseBtn" class="drawer-close" aria-label="Close menu">✕</button>
-    </div>
-    <div class="drawer-path">Path: {{ current_subpath if current_subpath else '/' }}</div>
-    <div class="drawer-links">
-      <a href="/">🏠 Home</a>
-      {% for crumb in nav_crumbs %}
-        <a href="{{ crumb.url }}" class="{% if crumb.is_current %}current{% endif %}">📁 {{ crumb.name }}</a>
-      {% endfor %}
-      <div class="drawer-divider"></div>
-      <a href="/recent">📅 Recent</a>
-      <a href="/trash">🗑️ Trash</a>
-      <a href="/settings">⚙️ Settings</a>
-      <a href="/about">ℹ️ About ({{ app_version }})</a>
-      <a href="/logout">🚪 Logout</a>
-    </div>
-  </nav>
-
-  <div class="container">
-    <form method="GET" action="{{ url_for('index', subpath=current_subpath) }}" style="margin-bottom:15px;">
-      <input id="categorySearch" type="text" name="q" placeholder="Filter categories..." value="{{ search_query }}" autocomplete="off" spellcheck="false" aria-label="Filter categories by name" style="padding:6px 10px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#e0e0e0; min-width: 240px;">
-      <button type="submit" class="refresh-btn" style="margin-left:5px;">🔍 Apply filter</button>
-      {% if category_filter_active %}
-      <a href="{{ url_for('index', subpath=current_subpath) }}" class="refresh-btn" style="margin-left:5px; text-decoration:none; display:inline-flex; align-items:center;">✕ Clear</a>
-      {% endif %}
-    </form>
-    {% if category_filter_active %}
-    <div class="filter-summary" role="status" aria-live="polite">
-      <span>Active filter:</span>
-      <span class="filter-chip">Category name contains “{{ search_query }}”</span>
-      <a href="{{ url_for('index', subpath=current_subpath) }}" class="clear-filter-link">Clear filter</a>
-    </div>
-    {% endif %}
-    {% if bulk_feedback %}
-    <div class="bulk-feedback {{ bulk_feedback.kind }}" role="status" aria-live="polite">
-      <strong>Bulk action:</strong>
-      <span>{{ bulk_feedback.message }}</span>
-    </div>
-    {% endif %}
-    {% if items %}
-    <form id="bulkDeleteForm" method="POST" action="/bulk-delete">
-      <input type="hidden" name="csrf_token" value="{{ csrf }}">
-      <input type="hidden" name="current_subpath" value="{{ current_subpath }}">
-      <div class="toolbar">
-        <button type="button" id="selectAllBtn">Select all</button>
-        <button type="button" id="deselectAllBtn">Deselect all</button>
-      </div>
-      <div id="selectionActions" class="selection-actions" aria-live="polite">
-        <span id="selectionCount" class="selection-count">0 selected</span>
-        <button type="button" id="clearSelectionBtn" class="ghost-btn">Clear selection</button>
-        <button type="button" id="bulkDownloadBtn" class="ghost-btn" disabled title="Bulk download is not available yet. Open items individually to download.">Download selected (unavailable)</button>
-        <button type="submit" id="bulkDeleteBtn" class="danger" disabled onclick="return confirmBulkDelete()">Delete selected (0)</button>
-        <div class="selection-hint">Bulk download is not available yet. Use each item’s direct view/thumb actions for now.</div>
-      </div>
-      <div class="grid">
-        {% for item in items %}
-          {% if item.is_dir %}
-            <div class="folder-card" data-folder-card>
-              <input class="selector" type="checkbox" name="folders" value="{{ item.rel_path }}" onchange="syncSelectionState()">
-              <a href="{{ item.url }}" class="folder">
-                {% if item.cover_thumb_url %}
-                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy" decoding="async" fetchpriority="low">
-                {% else %}
-                  <div class="folder-icon">📁</div>
-                {% endif %}
-                <div class="folder-name">{{ item.name }}</div>
-              </a>
-            </div>
-          {% else %}
-            <div class="image-card" data-image-card>
-              <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
-              {% if item.media_type == "video" %}
-                <video src="{{ item.thumb_url }}" controls preload="metadata" muted playsinline loading="lazy" alt="{{ item.name }}"></video>
-              {% else %}
-                <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low"></a>
-              {% endif %}
-              <div class="image-info">
-                <div class="image-name">{{ item.name }}</div>
-                <div class="image-meta-row">
-                  <span class="image-meta-pill">📦 {{ item.size }}</span>
-                  <span class="image-meta-pill">🕒 {{ item.modified }}</span>
-                </div>
-              </div>
-              <details class="image-details">
-                <summary>Details</summary>
-                <div class="image-details-body">
-                  <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
-                  <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
-                  <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
-                  <div class="image-details-row"><span class="image-details-label">Modified</span><span class="image-details-value">{{ item.modified }}</span></div>
-                </div>
-              </details>
-              <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete ' + {{ item.name | tojson }} + '?')">🗑️</button>
-              <a href="{{ item.thumb_url }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
-              <button type="button" class="tag-btn" onclick="openTagEditor({{ item.rel_path | tojson }}, {{ item.name | tojson }})">🏷️ Tag</button>
-            </div>
-          {% endif %}
-        {% endfor %}
-      </div>
-    </form>
-    {% else %}
-      <div class="empty">No images in this folder</div>
-    {% endif %}
-    <div class="stats">{{ stats.folders }} folders • {{ stats.images }} images</div>
-  </div>
-  <script>
-    let deferredInstallPrompt = null;
-    const installBtn = document.getElementById('installPwaBtn');
-
-    if ('serviceWorker' in navigator) {
-      window.addEventListener('load', () => {
-        navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
-      });
-    }
-
-    window.addEventListener('beforeinstallprompt', (event) => {
-      event.preventDefault();
-      deferredInstallPrompt = event;
-      if (installBtn) installBtn.hidden = false;
-    });
-
-    installBtn?.addEventListener('click', async () => {
-      if (!deferredInstallPrompt) return;
-      deferredInstallPrompt.prompt();
-      const result = await deferredInstallPrompt.userChoice.catch(() => null);
-      deferredInstallPrompt = null;
-      if (result?.outcome === 'dismissed') {
-        installBtn.hidden = false;
-        return;
-      }
-      installBtn.hidden = true;
-    });
-
-    window.addEventListener('appinstalled', () => {
-      deferredInstallPrompt = null;
-      if (installBtn) installBtn.hidden = true;
-    });
-
-    const drawer = document.getElementById('drawer');
-    const drawerOverlay = document.getElementById('drawerOverlay');
-    const navToggleBtn = document.getElementById('navToggleBtn');
-    const drawerCloseBtn = document.getElementById('drawerCloseBtn');
-
-    function setDrawerOpen(open) {
-      drawer?.classList.toggle('open', open);
-      drawerOverlay?.classList.toggle('open', open);
-      navToggleBtn?.setAttribute('aria-expanded', open ? 'true' : 'false');
-    }
-
-    navToggleBtn?.addEventListener('click', () => setDrawerOpen(true));
-    drawerCloseBtn?.addEventListener('click', () => setDrawerOpen(false));
-    drawerOverlay?.addEventListener('click', () => setDrawerOpen(false));
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setDrawerOpen(false); });
-
-    document.getElementById('refreshBtn')?.addEventListener('click', () => window.location.reload());
-
-    // Category search (Issue #51)
-    const categorySearchInput = document.getElementById('categorySearch');
-    function applyCategorySearchFilter() {
-      if (!categorySearchInput) return;
-      const query = (categorySearchInput.value || '').trim().toLowerCase();
-      const folderCards = Array.from(document.querySelectorAll('[data-folder-card]'));
-      if (!folderCards.length) return;
-      folderCards.forEach((card) => {
-        const name = (card.querySelector('.folder-name')?.textContent || '').toLowerCase();
-        card.style.display = !query || name.includes(query) ? '' : 'none';
-      });
-    }
-    categorySearchInput?.addEventListener('input', applyCategorySearchFilter);
-    applyCategorySearchFilter();
-
-    function getSelectors() { return Array.from(document.querySelectorAll('input.selector[name="filenames"], input.selector[name="folders"]')); }
-    function syncSelectionState() {
-      const selectors = getSelectors();
-      const selectedCount = selectors.filter(s => s.checked).length;
-      const totalCount = selectors.length;
-      const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
-      const selectionActions = document.getElementById('selectionActions');
-      const selectionCount = document.getElementById('selectionCount');
-      const clearSelectionBtn = document.getElementById('clearSelectionBtn');
-      const selectAllBtn = document.getElementById('selectAllBtn');
-      const deselectAllBtn = document.getElementById('deselectAllBtn');
-      selectors.forEach((selector) => {
-        const card = selector.closest('[data-image-card]') || selector.closest('[data-folder-card]');
-        card?.classList.toggle('selected', selector.checked);
-      });
-      if (bulkDeleteBtn) { bulkDeleteBtn.disabled = selectedCount === 0; bulkDeleteBtn.textContent = `Delete selected (${selectedCount})`; }
-      if (selectionCount) { selectionCount.textContent = `${selectedCount} selected`; }
-      if (selectionActions) { selectionActions.classList.toggle('active', selectedCount > 0); }
-      if (clearSelectionBtn) { clearSelectionBtn.disabled = selectedCount === 0; }
-      if (selectAllBtn) { selectAllBtn.disabled = totalCount === 0 || selectedCount === totalCount; }
-      if (deselectAllBtn) { deselectAllBtn.disabled = selectedCount === 0; }
-    }
-    function setAllSelections(checked) { getSelectors().forEach((selector) => selector.checked = checked); syncSelectionState(); }
-    function confirmBulkDelete() { const c = getSelectors().filter(s => s.checked).length; return c > 0 && confirm(`Delete ${c} selected image(s)?`); }
-    document.getElementById('selectAllBtn')?.addEventListener('click', () => setAllSelections(true));
-    document.getElementById('deselectAllBtn')?.addEventListener('click', () => setAllSelections(false));
-    document.getElementById('clearSelectionBtn')?.addEventListener('click', () => setAllSelections(false));
-    syncSelectionState();
-    function openTagEditor(relPath, imageName) {
-      const tag = prompt('Enter a tag for "' + imageName + '":', '');
-      if (tag && tag.trim()) {
-        fetch('/tag', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-          body: 'rel_path=' + encodeURIComponent(relPath) + '&tag=' + encodeURIComponent(tag.trim()) + '&csrf_token={{ csrf }}'
-        }).then(response => {
-          if (response.ok) {
-            alert('Tag added successfully');
-          } else {
-            response.json().then(err => alert('Error: ' + (err.error || 'Unknown error')));
-          }
-        }).catch(err => alert('Error: ' + err.message));
-      }
-    }
-  </script>
-</body>
-</html>
-"""
-
-LOGIN_TEMPLATE = """
-<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>Login - Miso Gallery</title>
-<style>
- body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;display:flex;justify-content:center;align-items:center;height:100vh;margin:0}
- .card{background:#1a1a1a;padding:32px;border-radius:10px;min-width:320px;max-width:420px;border:1px solid #2f2f2f}
- input,button{width:100%;padding:10px;margin-top:10px;border-radius:6px;border:1px solid #333;background:#111;color:#eee}
- button{cursor:pointer;background:linear-gradient(135deg,#f5a623,#f76c1c);border:none}
- button.oidc-btn{background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%);border:1px solid #4b4b75;color:#f5a623}
- button.oidc-btn:hover{background:linear-gradient(135deg,#3f3f5f 0%,#344367 100%)}
- .muted{color:#999;font-size:.9rem;margin-top:8px;text-align:center}
- .divider{display:flex;align-items:center;text-align:center;color:#666;margin:20px 0}
- .divider::before,.divider::after{content:'';flex:1;border-bottom:1px solid #333}
- .divider::before{margin-right:10px}
- .divider::after{margin-left:10px}
- h2{margin-bottom:4px;text-align:center}
- .subtitle{color:#9aa1a8;font-size:.92rem;text-align:center;margin-bottom:8px}
- .alert{margin-top:10px;padding:10px;border-radius:6px;font-size:.9rem;border:1px solid #4a2a2a;background:#2a1515;color:#ffb4b4}
- .note{margin-top:10px;color:#777;font-size:.82rem;text-align:center}
-</style></head>
-<body><div class="card">
-  <h2>🍲 Miso Gallery</h2>
-  <p class="subtitle">Sign in to view and manage your gallery.</p>
-
-  {% if error %}
-  <div class="alert">{{ error }}</div>
-  {% endif %}
-
-  {% if oidc_enabled %}
-  <form method="GET" action="/auth/oidc">
-    <input type="hidden" name="next" value="{{ next_url }}">
-    <button type="submit" class="oidc-btn">Continue with {{ oidc_label }}</button>
-  </form>
-  {% endif %}
-
-  {% if local_enabled %}
-  {% if oidc_enabled %}<div class="divider">or</div>{% endif %}
-  <form method="POST" action="/auth">
-    <input type="hidden" name="csrf_token" value="{{ csrf }}">
-    <input type="hidden" name="next" value="{{ next_url }}">
-    <input type="password" name="password" placeholder="Password" autocomplete="current-password" required>
-    <button type="submit">Login with Password</button>
-  </form>
-  {% endif %}
-
-  {% if not oidc_enabled and not local_enabled %}
-  <p class="muted">No authentication method is configured.</p>
-  {% endif %}
-
-  <p class="note">Need access? Ask your administrator.</p>
-</div>
-<script>
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
-    });
-  }
-</script>
-</body></html>
-"""
-
-TRASH_TEMPLATE = """
-<!DOCTYPE html>
-<html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><meta name=\"theme-color\" content=\"{{ theme_color }}\"><link rel=\"manifest\" href=\"/manifest.webmanifest\"><link rel=\"apple-touch-icon\" href=\"/assets/icon-192.png\"><meta name=\"apple-mobile-web-app-capable\" content=\"yes\"><meta name=\"apple-mobile-web-app-status-bar-style\" content=\"black-translucent\"><meta name=\"apple-mobile-web-app-title\" content=\"Miso Gallery\"><meta name=\"mobile-web-app-capable\" content=\"yes\"><title>Trash - Miso Gallery</title>
-<style>
- body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
- .wrap{max-width:1000px;margin:0 auto;padding:24px}
- a{color:#f5a623;text-decoration:none}
- table{width:100%;border-collapse:collapse;margin-top:16px}
- th,td{padding:10px;border-bottom:1px solid #333;text-align:left}
- button{padding:8px 12px;border-radius:6px;border:1px solid #444;background:#222;color:#eee;cursor:pointer}
- .danger{background:#8b1e2b;border-color:#b91c1c}
-</style></head>
-<body><div class=\"wrap\">
-  <h2>🗑️ Trash</h2>
-  <p><a href=\"/\">← Back to Gallery</a></p>
-  <form method=\"POST\" action=\"/trash/empty\" onsubmit=\"return confirm('Permanently delete all trashed items?')\">
-    <input type=\"hidden\" name=\"csrf_token\" value=\"{{ csrf }}\">
-    <button class=\"danger\" type=\"submit\">Empty Trash</button>
-  </form>
-  <table>
-    <thead><tr><th>File</th><th>Original Path</th><th>Deleted At</th><th>Size</th><th>Action</th></tr></thead>
-    <tbody>
-    {% for item in items %}
-      <tr>
-        <td>{{ item.name }}</td>
-        <td>{{ item.original }}</td>
-        <td>{{ item.deleted_at }}</td>
-        <td>{{ item.size }}</td>
-        <td>
-          <form method=\"POST\" action=\"/trash/restore/{{ item.name }}\" style=\"display:inline\">
-            <input type=\"hidden\" name=\"csrf_token\" value=\"{{ csrf }}\">
-            <button type=\"submit\">Restore</button>
-          </form>
-        </td>
-      </tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
-<script>
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
-    });
-  }
-</script>
-</body></html>
-"""
-
-RECENT_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="{{ theme_color }}">
-  <link rel="manifest" href="/manifest.webmanifest">
-  <link rel="apple-touch-icon" href="/assets/icon-192.png">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-  <meta name="apple-mobile-web-app-title" content="Miso Gallery">
-  <meta name="mobile-web-app-capable" content="yes">
-  <title>Recent - Miso Gallery</title>
-  <style>
-    * { box-sizing: border-box; margin: 0; padding: 0; }
-    body { background:#0d0d0d; color:#e0e0e0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; min-height:100vh; }
-    header { background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%); padding:20px 30px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; gap:12px; flex-wrap:wrap; }
-    h1 { font-size:1.5rem; background:linear-gradient(90deg,#f5a623,#f76c1c); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
-    .header-actions { display:flex; align-items:center; gap:10px; margin-left:auto; }
-    .refresh-btn { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:8px; padding:8px 12px; font-size:0.9rem; cursor:pointer; text-decoration:none; }
-    .container { padding:20px; }
-    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
-    .image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; content-visibility:auto; contain-intrinsic-size:260px 320px; }
-    .image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
-    .image-card-link { display:block; }
-    .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
-    .image-info { padding:10px; font-size:.8rem; color:#888; }
-    .image-meta-row { display:flex; flex-wrap:wrap; gap:6px 10px; margin-top:6px; color:#777; font-size:.75rem; }
-    .image-meta-pill { display:inline-flex; align-items:center; gap:4px; }
-    .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    .image-date { color:#666; font-size:.75rem; margin-top:4px; }
-    .image-details { margin:0 10px 10px; border:1px solid #323232; border-radius:8px; background:#151515; }
-    .image-details summary { cursor:pointer; list-style:none; padding:8px 10px; color:#d6d6d6; font-size:.78rem; font-weight:600; }
-    .image-details summary::-webkit-details-marker { display:none; }
-    .image-details summary::after { content:'▾'; float:right; color:#888; }
-    .image-details[open] summary::after { content:'▴'; }
-    .image-details-body { padding:0 10px 10px; display:grid; gap:6px; font-size:.75rem; color:#a9a9a9; }
-    .image-details-row { display:flex; justify-content:space-between; gap:12px; }
-    .image-details-label { color:#7c7c7c; }
-    .image-details-value { text-align:right; word-break:break-word; }
-    .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
-    .thumb-preview-btn:hover { background:#f5a623; }
-    .folder-nav-btn { position:absolute; bottom:10px; left:10px; background:rgba(59,130,246,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
-    .folder-nav-btn:hover { background:#3b82f6; }
-    .image-card:hover .folder-nav-btn, .image-card:hover .thumb-preview-btn { opacity:1; }
-    .empty { text-align:center; padding:50px; color:#666; }
-  </style>
-</head>
-<body>
-<header>
-  <h1>🍲 Recent</h1>
-  <div class="header-actions">
-    <button type="button" id="refreshRecentBtn" class="refresh-btn" title="Refresh recent images">↻ Refresh</button>
-    <button type="button" id="installPwaBtn" class="refresh-btn" hidden>⬇ Install</button>
-    <a href="/" class="refresh-btn">← Gallery</a>
-  </div>
-</header>
-<div class="container">
-  <h2 style="margin-bottom:20px;font-size:1.2rem;color:#888;">Recently Added ({{ items|length }})</h2>
-  {% if items %}
-    <div class="grid">
-    {% for item in items %}
-      <div class="image-card" style="position:relative;">
-        <a href="{{ item.url }}" class="image-card-link" target="_blank">
-          <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low">
-          <div class="image-info">
-            <div class="image-name">{{ item.name }}</div>
-            <div class="image-meta-row">
-              <span class="image-meta-pill">📦 {{ item.size }}</span>
-              <span class="image-meta-pill">🕒 {{ item.added }}</span>
-            </div>
-          </div>
-        </a>
-        <details class="image-details">
-          <summary>Details</summary>
-          <div class="image-details-body">
-            <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
-            <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
-            <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
-            <div class="image-details-row"><span class="image-details-label">Added</span><span class="image-details-value">{{ item.added }}</span></div>
-          </div>
-        </details>
-        {% if item.folder_url %}
-        <a href="{{ item.folder_url }}" class="folder-nav-btn" title="Go to folder">📁 Folder</a>
-        {% endif %}
-        <a href="{{ item.thumb }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
-      </div>
-    {% endfor %}
-    </div>
-  {% else %}
-    <div class="empty">No recent images found</div>
-  {% endif %}
-</div>
-<script>
-  let deferredInstallPrompt = null;
-  const installBtn = document.getElementById('installPwaBtn');
-  const refreshBtn = document.getElementById('refreshRecentBtn');
-
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
-    });
-  }
-
-  window.addEventListener('beforeinstallprompt', (event) => {
-    event.preventDefault();
-    deferredInstallPrompt = event;
-    if (installBtn) installBtn.hidden = false;
-  });
-
-  refreshBtn?.addEventListener('click', () => {
-    window.location.reload();
-  });
-
-  installBtn?.addEventListener('click', async () => {
-    if (!deferredInstallPrompt) return;
-    deferredInstallPrompt.prompt();
-    const result = await deferredInstallPrompt.userChoice.catch(() => null);
-    deferredInstallPrompt = null;
-    if (result?.outcome === 'dismissed') {
-      installBtn.hidden = false;
-      return;
-    }
-    installBtn.hidden = true;
-  });
-
-  window.addEventListener('appinstalled', () => {
-    deferredInstallPrompt = null;
-    if (installBtn) installBtn.hidden = true;
-  });
-</script>
-</body>
-</html>
-"""
-
-ABOUT_TEMPLATE = """
-<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>About - Miso Gallery</title>
-<style>
- body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
- .wrap{max-width:900px;margin:0 auto;padding:24px}
- a{color:#f5a623;text-decoration:none}
- .card{background:#141414;border:1px solid #2f2f2f;border-radius:12px;padding:18px;margin-top:14px}
- .row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #242424}
- .row:last-child{border-bottom:none}
- .k{color:#9aa1a8}
-</style></head>
-<body><div class="wrap">
-  <h2>ℹ️ About</h2>
-  <p><a href="/">← Back to Gallery</a></p>
-  <div class="card">
-    <div class="row"><div class="k">Version</div><div>{{ app_version }}</div></div>
-    <div class="row"><div class="k">Auth enabled</div><div>{{ auth_enabled }}</div></div>
-    <div class="row"><div class="k">Auth mode</div><div>{{ auth_mode }}</div></div>
-    <div class="row"><div class="k">OIDC configured</div><div>{{ oidc_configured }}</div></div>
-  </div>
-</div></body></html>
-"""
-
-SETTINGS_TEMPLATE = """
-<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>Settings - Miso Gallery</title>
-<style>
- body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
- .wrap{max-width:900px;margin:0 auto;padding:24px}
- a{color:#f5a623;text-decoration:none}
- .card{background:#141414;border:1px solid #2f2f2f;border-radius:12px;padding:18px;margin-top:14px}
- .row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #242424}
- .row:last-child{border-bottom:none}
- .k{color:#9aa1a8}
- .note{color:#888;margin-top:10px;font-size:.9rem}
- .btn{margin-top:12px;padding:10px 14px;border-radius:8px;border:1px solid #4b4b75;background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%);color:#f5a623;cursor:pointer}
- .ok{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #245f3d;background:#10271b;color:#9de2b4}
-</style></head>
-<body><div class="wrap">
-  <h2>⚙️ Settings</h2>
-  <p><a href="/">← Back to Gallery</a></p>
-  <div class="card">
-    <div class="row"><div class="k">Data folder</div><div>{{ data_folder }}</div></div>
-    <div class="row"><div class="k">Thumbnail cache</div><div>{{ thumb_cache }}</div></div>
-    <div class="row"><div class="k">Rate limiting</div><div>enabled</div></div>
-  </div>
-
-  <form method="POST" action="/maintenance/thumbnails/regenerate">
-    <input type="hidden" name="csrf_token" value="{{ csrf }}">
-    <button class="btn" type="submit">🧰 Run thumbnail integrity check</button>
-  </form>
-
-  {% if maintenance_result %}
-    <div class="ok">Checked: {{ maintenance_result.checked }} • Regenerated: {{ maintenance_result.regenerated }} • Failed: {{ maintenance_result.failed }}</div>
-  {% endif %}
-
-  <p class="note">This page intentionally avoids showing secrets or raw environment variables.</p>
-</div></body></html>
-"""
 
 
 def ensure_thumbnail_cache_dir() -> None:
@@ -968,8 +254,9 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
     """Check thumbnails and regenerate missing/invalid entries on demand.
 
     Args:
-        limit: Maximum files to scan. None means no limit.
+        limit: Maximum files to scan. Defaults to GALLERY_SCAN_LIMIT.
     """
+    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
 
     ensure_thumbnail_cache_dir()
     excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
@@ -987,7 +274,7 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
 
         rel_posix = rel_path.as_posix()
         stats["checked"] += 1
-        if limit is not None and stats["checked"] > limit:
+        if stats["checked"] > effective_limit:
             break
 
         cached_name = thumbnail_filename(rel_posix, item)
@@ -1097,6 +384,45 @@ def media_metadata(path: Path) -> dict[str, object]:
     }
 
 
+
+def iter_gallery_items(
+    kind: str = "media",
+    limit: int | None = None,
+) -> list[Path]:
+    """Centralized bounded iterator for gallery filesystem scans.
+
+    Replaces duplicated rglob patterns across iter_gallery_media,
+    iter_gallery_folders, folder_cover_rel_path, and recent_view.
+
+    Args:
+        kind: "media" (files only), "folders" (dirs only), or "all" (both).
+        limit: Maximum items to return. Defaults to GALLERY_SCAN_LIMIT.
+
+    Returns:
+        Sorted list of Path objects within the bound.
+    """
+    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
+    results: list[Path] = []
+    for item in DATA_FOLDER.rglob("*"):
+        if len(results) >= effective_limit:
+            break
+        try:
+            # Skip symlinks to prevent filesystem traversal outside the data root.
+            if item.is_symlink():
+                continue
+            if kind == "media" and not (item.is_file() and is_media_file(item)):
+                continue
+            if kind == "folders" and not item.is_dir():
+                continue
+            # "all" accepts everything
+            if is_excluded_gallery_path(item):
+                continue
+            results.append(item)
+        except (OSError, PermissionError):
+            continue
+    return sorted(results, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+
+
 def iter_gallery_media(limit: int | None = None) -> list[Path]:
     """Iterate gallery media files, bounded by scan limit."""
     effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
@@ -1135,7 +461,14 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def find_duplicate_media() -> list[dict[str, object]]:
+def find_duplicate_media(limit: int | None = None) -> list[dict[str, object]]:
+    """Find duplicate media files by size then SHA-256 hash.
+
+    Args:
+        limit: Maximum number of duplicate groups to return. Defaults to GALLERY_SCAN_LIMIT.
+               Applied only to the final output (hash phase is bounded by iter_gallery_media).
+    """
+    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
     by_size: dict[int, list[Path]] = {}
     for item in iter_gallery_media():
         try:
@@ -1156,6 +489,8 @@ def find_duplicate_media() -> list[dict[str, object]]:
         for digest, matches in by_hash.items():
             if len(matches) < 2:
                 continue
+            if len(groups) >= effective_limit:
+                return groups
             matches = sorted(matches, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
             groups.append(
                 {
@@ -1426,8 +761,7 @@ def index(subpath: str = ""):
             "message": "No selected items were moved to trash.",
         }
 
-    return render_template_string(
-        HTML_TEMPLATE,
+    return render_template("index.html",
         items=items,
         breadcrumb=breadcrumb,
         parent_url=parent_url,
@@ -1683,7 +1017,7 @@ def recent_view():
     for img in images:
         del img["mtime"]
 
-    return render_template_string(RECENT_TEMPLATE, items=images, theme_color=PWA_THEME_COLOR)
+    return render_template("recent.html", items=images, theme_color=PWA_THEME_COLOR)
 
 
 @app.route("/trash")
@@ -1691,7 +1025,7 @@ def recent_view():
 @rate_limit(max_requests=30, window=60)
 def trash_view():
     items = list_trash(DATA_FOLDER)
-    return render_template_string(TRASH_TEMPLATE, items=items, csrf=csrf_token(), theme_color=PWA_THEME_COLOR)
+    return render_template("trash.html", items=items, csrf=csrf_token(), theme_color=PWA_THEME_COLOR)
 
 
 @app.route("/trash/restore/<path:item_name>", methods=["POST"])
@@ -1750,8 +1084,7 @@ def login():
     }
     error = error_map.get(error_code)
 
-    return render_template_string(
-        LOGIN_TEMPLATE,
+    return render_template("login.html",
         csrf=csrf_token(),
         oidc_enabled=is_oidc_configured(),
         local_enabled=bool(os.environ.get("ADMIN_PASSWORD")),
@@ -2047,8 +1380,7 @@ def settings_view():
         except ValueError:
             maintenance_result = None
 
-    return render_template_string(
-        SETTINGS_TEMPLATE,
+    return render_template("settings.html",
         theme_color=PWA_THEME_COLOR,
         data_folder=str(DATA_FOLDER),
         thumb_cache=str(THUMBNAIL_CACHE_DIR),
@@ -2060,8 +1392,7 @@ def settings_view():
 @app.route("/about")
 @require_auth
 def about_view():
-    return render_template_string(
-        ABOUT_TEMPLATE,
+    return render_template("about.html",
         theme_color=PWA_THEME_COLOR,
         app_version=APP_VERSION,
         auth_enabled=is_auth_enabled(),

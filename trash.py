@@ -82,10 +82,14 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
             i += 1
 
         try:
-            # Use shutil.copytree to handle the move, then remove source
-            # rename() can fail cross-device; copytree + rmtree is safer
-            shutil.copytree(file_path, dest)
-            shutil.rmtree(file_path)
+            # Prefer atomic rename (same filesystem) for immediate move.
+            # Fall back to copytree+rmtree only when cross-device rename fails.
+            try:
+                file_path.rename(dest)
+            except OSError:
+                # Cross-device or other OS-level failure; use copy-based move
+                shutil.copytree(file_path, dest)
+                shutil.rmtree(file_path)
             meta = {
                 "original": rel,
                 "deleted_at": datetime.utcnow().isoformat(),

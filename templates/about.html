@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>About - Miso Gallery</title>
+<style>
+ body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
+ .wrap{max-width:900px;margin:0 auto;padding:24px}
+ a{color:#f5a623;text-decoration:none}
+ .card{background:#141414;border:1px solid #2f2f2f;border-radius:12px;padding:18px;margin-top:14px}
+ .row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #242424}
+ .row:last-child{border-bottom:none}
+ .k{color:#9aa1a8}
+</style></head>
+<body><div class="wrap">
+  <h2>ℹ️ About</h2>
+  <p><a href="/">← Back to Gallery</a></p>
+  <div class="card">
+    <div class="row"><div class="k">Version</div><div>{{ app_version }}</div></div>
+    <div class="row"><div class="k">Auth enabled</div><div>{{ auth_enabled }}</div></div>
+    <div class="row"><div class="k">Auth mode</div><div>{{ auth_mode }}</div></div>
+    <div class="row"><div class="k">OIDC configured</div><div>{{ oidc_configured }}</div></div>
+  </div>
+</div></body></html>
