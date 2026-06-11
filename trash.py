@@ -32,7 +32,6 @@ def dir_size(path: Path) -> int:
     return total
 
 
-
 def trash_dir(data_folder: Path) -> Path:
     path = data_folder / TRASH_DIR_NAME
     path.mkdir(parents=True, exist_ok=True)

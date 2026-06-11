@@ -373,4 +373,4 @@ docker history ghcr.io/misospace/miso-gallery:0.1.x
 
 ---
 
-*Last updated: 2026-05-18. Expanded from audit #139 recommendations.*
+*Last updated: 2026-06-11. Updated for PR #221 AI reviewer state refresh. Expanded from audit #139 recommendations.*

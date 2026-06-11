@@ -160,19 +160,21 @@ def _api_key_hint(key: str) -> str:
 
 def _find_matching_key(
     token: str, scope: Literal["read", "write"]
-) -> tuple[bool, str | None]:
-    """Verify a bearer token and return (success, key_hint_or_none).
+) -> tuple[bool, str | None, str | None]:
+    """Verify a bearer token and return (success, key_hint_or_none, scope_class_or_none).
 
     Uses constant-time comparison to prevent timing attacks.
-    Returns the hint for the first matching key found.
+    Returns the hint for the first matching key found, along with the scope class
+    ("read" or "write") so that audit logs can identify which key *class* was used
+    without logging secrets.
     """
     keys = _keys_for_scope(scope)
     if not token or not keys:
-        return False, None
+        return False, None, None
     for configured in keys:
         if secrets.compare_digest(token, configured):
-            return True, _api_key_hint(configured)
-    return False, None
+            return True, _api_key_hint(configured), scope
+    return False, None, None
 
 
 # Backward-compat: verify_api_key checks read scope
@@ -228,10 +230,11 @@ def require_api_key_with_scope(scope: Literal["read", "write"]):
     def decorator(view_fn):
         @wraps(view_fn)
         def wrapper(*args, **kwargs):
-            # Verify API key and store hint in session for audit logging
-            matched, key_hint = _find_matching_key(_bearer_token(), scope)
+            # Verify API key and store hint + scope class in session for audit logging
+            matched, key_hint, key_class = _find_matching_key(_bearer_token(), scope)
             if matched:
                 session["api_key_hint"] = key_hint
+                session["api_key_class"] = key_class
                 return view_fn(*args, **kwargs)
             if is_authenticated():
                 return jsonify({"error": "Browser sessions are not accepted on LLM API endpoints"}), 403

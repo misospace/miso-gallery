@@ -114,6 +114,7 @@ def log_security_event(event: str, outcome: str, *, request_id: str = "", **fiel
             "user_name": session.get("user_name"),
             "auth_method": session.get("auth_method") or ("local" if session.get("authenticated") else None),
             "api_key_hint": session.get("api_key_hint"),
+            "api_key_class": session.get("api_key_class"),  # key class identifier for audit logs
             "request_id": request_id,
         }
         payload.update(fields)
@@ -1529,6 +1530,8 @@ def bulk_delete():
         if not sanitize_path(rel_path):
             # sanitize_path() rejects paths containing ".." or starting with "/" (security.py:sanitize_path)
             # sanitize_rel_path() further normalizes and double-checks (app.py:sanitize_rel_path)
+
+
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
