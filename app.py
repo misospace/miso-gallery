@@ -1121,6 +1121,9 @@ def iter_gallery_items(
         if len(results) >= effective_limit:
             break
         try:
+            # Skip symlinks to prevent filesystem traversal outside the data root.
+            if item.is_symlink():
+                continue
             if kind == "media" and not (item.is_file() and is_media_file(item)):
                 continue
             if kind == "folders" and not item.is_dir():
