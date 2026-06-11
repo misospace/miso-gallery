@@ -1027,7 +1027,13 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
         return None
 
     cover_rel: str | None = None
-    candidates = sorted(folder_path.rglob("*"), key=lambda p: p.as_posix().lower())
+    # Bound the scan to prevent unbounded subtree traversal on cache misses.
+    candidates = []
+    for count, item in enumerate(folder_path.rglob("*")):
+        if count >= GALLERY_SCAN_LIMIT:
+            break
+        candidates.append(item)
+    candidates.sort(key=lambda p: p.as_posix().lower())
     for candidate in candidates:
         if not candidate.is_file() or candidate.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
@@ -1304,9 +1310,6 @@ def service_worker():
 @app.route("/images/<path:filename>")
 def images(filename: str):
     rel_path = sanitize_rel_path(filename)
-    media_path = source_file_path(rel_path)
-    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
-        return "Not found", 404
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
 
@@ -1458,9 +1461,6 @@ def thumb(filename: str):
 @app.route("/view/<path:filename>")
 def view(filename: str):
     rel_path = sanitize_rel_path(filename)
-    media_path = source_file_path(rel_path)
-    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
-        return "Not found", 404
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
 
@@ -1595,7 +1595,12 @@ def recent_view():
         rel_parts = path.relative_to(DATA_FOLDER).parts
         return any(part in excluded_dirs for part in rel_parts)
 
+    scan_count = 0
     for item in DATA_FOLDER.rglob("*"):
+        # Bound the scan to prevent blocking on large galleries/NFS.
+        scan_count += 1
+        if scan_count > GALLERY_SCAN_LIMIT:
+            break
         try:
             if not item.is_file() or not is_image(item):
                 continue
