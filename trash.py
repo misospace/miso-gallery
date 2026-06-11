@@ -25,6 +25,8 @@ def dir_size(path: Path) -> int:
             if entry.is_file():
                 with contextlib.suppress(OSError):
                     total += entry.stat().st_size
+                # Intentionally suppress OSError (e.g., permission denied) for
+                # individual files during size estimation; we only need an estimate.
     except OSError:
         pass
     return total
