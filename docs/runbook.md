@@ -55,7 +55,7 @@ Miso Gallery exposes several health endpoints for probing service status and sto
 GET /health
 ```
 
-**Expected response (healthy):**
+**Expected response (healthy):** (read-only; write probes are NOT performed — use `/health/storage/write` for write-capable checks)
 ```json
 {
   "status": "healthy",
@@ -63,14 +63,8 @@ GET /health
   "timestamp": "2026-05-18T09:00:00+00:00",
   "storage": {
     "status": "healthy",
-    "data_folder": {
-      "read": {"ok": true, "message": "Read access OK"},
-      "write": {"ok": true, "message": "Write access OK"}
-    },
-    "thumbnail_cache": {
-      "read": {"ok": true, "message": "Read access OK"},
-      "write": {"ok": true, "message": "Write access OK"}
-    }
+    "data_folder": {"read": {"ok": true, "message": "Read access OK"}},
+    "thumbnail_cache": {"read": {"ok": true, "message": "Read access OK"}}
   }
 }
 ```
