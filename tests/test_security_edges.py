@@ -1,7 +1,7 @@
 """Regression tests for security edges in miso-gallery.
 
 Covers:
-- Spoofed X-Forwarded-For header bypassing rate limits (issue #205)
+- Spoofed X-Forwarded-For rate-limit bypass (now fixed — XFF ignored by default)
 - Public non-media access (no auth leaks on public endpoints)
 - Webhook auth-disabled behavior
 - Symlink/mount boundary path traversal
@@ -10,14 +10,14 @@ Covers:
 from __future__ import annotations
 
 import re
-import sys
-from pathlib import Path
-
-ROOT = Path(__file__).resolve().parents[1]
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 from conftest import build_client, TEST_SECRET
+
+
+def setup_function():
+    """Reset the in-memory rate limiter before each test to avoid cross-test pollution."""
+    from security import FALLBACK_LIMITER
+    FALLBACK_LIMITER.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -51,32 +51,31 @@ def _extract_csrf(html: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# 1. Spoofed X-Forwarded-For rate-limit bypass
+# 1. Spoofed X-Forwarded-For rate-limit bypass (now fixed)
 # ---------------------------------------------------------------------------
 
-def test_xff_rotation_bypasses_rate_limit(monkeypatch, tmp_path):
-    """Regression: rotating XFF headers should allow bypassing per-IP rate limits.
+def test_xff_no_longer_bypasses_rate_limit(monkeypatch, tmp_path):
+    """Regression: XFF rotation should NO LONGER bypass rate limits.
 
-    The current _client_ip() implementation in security.py returns the first
-    value from X-Forwarded-For without any trusted-proxy boundary.  This means
-    a client can rotate XFF values to stay under the per-IP rate-limit cap.
-
-    This test verifies the *current* (vulnerable) behaviour so that a future fix
-    can invert this expectation.
+    After the trusted-proxy fix, _client_ip() returns request.remote_addr
+    by default — X-Forwarded-For is ignored unless the source is a trusted
+    proxy.  All requests from the test client share remote_addr=127.0.0.1,
+    so they all hit the same rate-limit key regardless of XFF values.
     """
     client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
     _seed_csrf(client)
 
     # The /auth endpoint is rate-limited at 5 requests / 300s.
-    # Send 5 requests with different XFF headers — each should succeed because
-    # the limiter sees a different IP per request.
+    # Even with different XFF headers, all requests share the same remote_addr
+    # so the 6th request should be rate-limited.
     for i in range(5):
         resp = _auth_post(client, headers={"X-Forwarded-For": f"10.0.{i}.1"})
         assert resp.status_code == 302
 
-    # A 6th request with a *new* XFF should also succeed — proving bypass.
+    # A 6th request with a *different* XFF should now be rate-limited —
+    # proving that XFF rotation no longer bypasses the limit.
     resp = _auth_post(client, headers={"X-Forwarded-For": "10.99.0.1"})
-    assert resp.status_code == 302
+    assert resp.status_code == 429
 
 
 def test_xff_single_ip_hits_rate_limit(monkeypatch, tmp_path):
@@ -111,18 +110,24 @@ def test_xff_empty_uses_remote_addr(monkeypatch, tmp_path):
     assert resp.status_code == 429
 
 
-def test_xff_multiple_hops_returns_first(monkeypatch, tmp_path):
-    """X-Forwarded-For with multiple comma-separated IPs should use the first."""
+def test_xff_multiple_hops_uses_first(monkeypatch, tmp_path):
+    """X-Forwarded-For with multiple comma-separated IPs uses the first — but only from trusted proxies.
+
+    From untrusted sources, _client_ip() ignores XFF entirely and falls back
+    to remote_addr.  All requests share remote_addr=127.0.0.1, so they hit
+    the same rate-limit key regardless of XFF content.
+    """
     client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
     _seed_csrf(client)
 
-    # Send 5 requests with multi-hop XFF — all share the same first IP
+    # Send 5 requests with multi-hop XFF — all share the same remote_addr
     for i in range(5):
         xff = "10.1.2.3, 10.9.9.9, 10.8.8.8"
         resp = _auth_post(client, headers={"X-Forwarded-For": xff})
         assert resp.status_code == 302
 
-    # 6th request with same first-hop IP should be rate-limited
+    # 6th request with different XFF content should still be rate-limited
+    # because XFF is ignored from untrusted sources.
     resp = _auth_post(
         client,
         headers={"X-Forwarded-For": "10.1.2.3, 10.9.9.8, 10.8.8.7"},
@@ -286,18 +291,26 @@ def test_thumb_route_rejects_path_traversal(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# 5. CF-Connecting-IP fallback
+# 5. CF-Connecting-IP fallback (now also ignores untrusted headers)
 # ---------------------------------------------------------------------------
 
-def test_cf_connecting_ip_used_when_no_xff(monkeypatch, tmp_path):
-    """When XFF is absent but CF-Connecting-IP is present, use it as client IP."""
+def test_cf_connecting_ip_ignored_from_untrusted_source(monkeypatch, tmp_path):
+    """CF-Connecting-IP is ignored when the source is not a trusted proxy.
+
+    After the trusted-proxy fix, _client_ip() only honours CF-Connecting-IP
+    when the request comes from a configured trusted proxy.  From untrusted
+    sources (like our test client), it falls back to remote_addr.
+    """
     client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
     _seed_csrf(client)
 
+    # Send 5 requests with different CF-Connecting-IP values — they should
+    # all share the same rate-limit key (remote_addr=127.0.0.1).
     for i in range(5):
         resp = _auth_post(client, headers={"CF-Connecting-IP": f"172.16.{i}.1"})
         assert resp.status_code == 302
 
-    # 6th request with a new CF-Connecting-IP should bypass rate limit
+    # 6th request with a new CF-Connecting-IP should be rate-limited —
+    # proving the header is ignored from untrusted sources.
     resp = _auth_post(client, headers={"CF-Connecting-IP": "172.16.99.1"})
-    assert resp.status_code == 302  # not 429
+    assert resp.status_code == 429
