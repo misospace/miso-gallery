@@ -10,16 +10,21 @@ from pathlib import Path
 TRASH_DIR_NAME = ".trash"
 META_SUFFIX = ".meta.json"
 
+
 def dir_size(path: Path) -> int:
-    """Estimate total size of a directory tree in bytes."""
+    """Estimate total size of a directory tree in bytes.
+
+    Skips symlinks to prevent information disclosure and DoS via symlink
+    cycles or external filesystem traversal.
+    """
     total = 0
     try:
-        for entry in path.rglob('*'):
+        for entry in path.rglob("*"):
+            if entry.is_symlink():
+                continue
             if entry.is_file():
-                try:
+                with contextlib.suppress(OSError):
                     total += entry.stat().st_size
-                except OSError:
-                    pass
     except OSError:
         pass
     return total
