@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="{{ theme_color }}">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Miso Gallery">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Miso Gallery</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background:#0d0d0d; color:#e0e0e0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; min-height:100vh; }
+    header { background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%); padding:20px 30px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; gap:12px; flex-wrap:wrap; }
+    h1 { font-size:1.5rem; background:linear-gradient(90deg,#f5a623,#f76c1c); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+    .header-actions { display:flex; align-items:center; gap:10px; margin-left:auto; }
+    .breadcrumb { color:#888; font-size:0.9rem; }
+    .breadcrumb a { color:#f5a623; text-decoration:none; }
+    .refresh-btn { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:8px; padding:8px 12px; font-size:0.9rem; cursor:pointer; }
+    .nav-toggle { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:10px; padding:10px 12px; font-size:1rem; cursor:pointer; line-height:1; }
+    .drawer-overlay { position:fixed; inset:0; background:rgba(0,0,0,.55); opacity:0; pointer-events:none; transition:opacity .2s ease; z-index:999; }
+    .drawer-overlay.open { opacity:1; pointer-events:auto; }
+    .drawer { position:fixed; top:0; left:0; height:100vh; width:300px; max-width:85vw; background:#121217; border-right:1px solid #2f2f2f; transform:translateX(-105%); transition:transform .2s ease; z-index:1000; padding:16px; display:flex; flex-direction:column; gap:14px; }
+    .drawer.open { transform:translateX(0); }
+    .drawer-header { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+    .drawer-brand { font-weight:700; color:#f5a623; }
+    .drawer-close { background:transparent; border:1px solid #333; color:#ddd; border-radius:10px; padding:8px 10px; cursor:pointer; }
+    .drawer-path { color:#9aa1a8; font-size:.9rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .drawer-links { display:flex; flex-direction:column; gap:6px; }
+    .drawer-links a { display:block; padding:10px 10px; border-radius:10px; text-decoration:none; color:#e0e0e0; border:1px solid transparent; }
+    .drawer-links a:hover { background:#1b1b26; border-color:#2c2c3a; }
+    .drawer-links a.current { border-color:rgba(245,166,35,.35); background:rgba(245,166,35,.08); }
+    .drawer-divider { height:1px; background:#2a2a2a; margin:6px 0; }
+    .container { padding:20px; }
+    .toolbar { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:15px; }
+    .filter-summary { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:-4px 0 15px; color:#cfcfcf; }
+    .filter-chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:rgba(245,166,35,.12); border:1px solid rgba(245,166,35,.35); color:#f6c36d; font-size:.92rem; }
+    .clear-filter-link { color:#f5a623; text-decoration:none; font-size:.92rem; }
+    .clear-filter-link:hover { text-decoration:underline; }
+    .bulk-feedback { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:-4px 0 15px; padding:10px 12px; border-radius:8px; border:1px solid #2f3a2f; background:#152015; color:#cfe8cf; }
+    .bulk-feedback.info { border-color:#3b3b3b; background:#171717; color:#d6d6d6; }
+    .bulk-feedback strong { color:#f5a623; }
+    .toolbar button { background:#2a2a2a; color:#f0f0f0; border:1px solid #444; border-radius:6px; padding:8px 12px; cursor:pointer; font-size:0.85rem; }
+    .toolbar .danger { background:#a52834; border-color:#dc3545; }
+    .toolbar button:disabled { opacity:0.5; cursor:not-allowed; }
+    .toolbar .danger:disabled { opacity:0.5; cursor:not-allowed; }
+    .selection-actions { display:none; align-items:center; gap:10px; padding:10px 12px; margin:-4px 0 15px; background:#171717; border:1px solid #343434; border-radius:8px; }
+    .selection-actions.active { display:flex; flex-wrap:wrap; }
+    .selection-count { color:#f5a623; font-weight:600; }
+    .selection-actions .ghost-btn { background:transparent; color:#c9c9c9; border:1px solid #4a4a4a; }
+    .selection-hint { flex-basis:100%; color:#9a9a9a; font-size:.8rem; }
+    .selection-hint code { color:#f6c36d; font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
+    .folder-card,.image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; position:relative; content-visibility:auto; contain-intrinsic-size:260px 320px; }
+    .folder-card:hover,.image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
+    .folder-card { border:1px dashed #444; }
+    .folder-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
+    .folder { display:block; padding:30px; text-align:center; text-decoration:none; position:relative; min-height:180px; }
+    .folder-icon { font-size:3rem; margin-bottom:10px; }
+    .folder-preview { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; }
+    .folder-name { color:#f5a623; font-weight:500; position:relative; z-index:1; text-shadow:0 2px 8px rgba(0,0,0,.7); background:rgba(0,0,0,.3); display:inline-block; padding:4px 8px; border-radius:6px; }
+    .image-card { position:relative; border:1px solid transparent; }
+    .image-card.selected { border-color:#f5a623; box-shadow:0 0 0 2px rgba(245,166,35,.3); }
+    .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
+    .image-info { padding:10px; font-size:.8rem; color:#888; }
+    .image-meta-row { display:flex; flex-wrap:wrap; gap:6px 10px; margin-top:6px; color:#777; font-size:.75rem; }
+    .image-meta-pill { display:inline-flex; align-items:center; gap:4px; }
+    .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .image-details { margin:0 10px 10px; border:1px solid #323232; border-radius:8px; background:#151515; }
+    .image-details summary { cursor:pointer; list-style:none; padding:8px 10px; color:#d6d6d6; font-size:.78rem; font-weight:600; }
+    .image-details summary::-webkit-details-marker { display:none; }
+    .image-details summary::after { content:'▾'; float:right; color:#888; }
+    .image-details[open] summary::after { content:'▴'; }
+    .image-details-body { padding:0 10px 10px; display:grid; gap:6px; font-size:.75rem; color:#a9a9a9; }
+    .image-details-row { display:flex; justify-content:space-between; gap:12px; }
+    .image-details-label { color:#7c7c7c; }
+    .image-details-value { text-align:right; word-break:break-word; }
+    .delete-btn { position:absolute; top:10px; right:10px; background:rgba(220,53,69,.9); color:white; border:none; padding:8px 12px; border-radius:5px; cursor:pointer; font-size:.8rem; opacity:0; transition:opacity .2s; }
+    .image-card:hover .delete-btn { opacity:1; }
+    .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .thumb-preview-btn:hover { background:#f5a623; }
+    .tag-btn { position:absolute; bottom:10px; left:10px; background:rgba(52,152,219,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .tag-btn:hover { background:#3498db; }
+    .image-card:hover .tag-btn { opacity:1; }
+    .image-card:hover .thumb-preview-btn { opacity:1; }
+    .selector { position:absolute; top:10px; left:10px; z-index:2; transform:scale(1.2); cursor:pointer; }
+    .empty { text-align:center; padding:50px; color:#666; }
+    .stats { color:#666; font-size:.85rem; margin-top:20px; text-align:center; }
+    @media (max-width: 640px) {
+      .toolbar,
+      .selection-actions {
+        flex-direction:column;
+        align-items:stretch;
+      }
+      .toolbar button,
+      .selection-actions button {
+        width:100%;
+      }
+      .selection-count,
+      .selection-hint {
+        width:100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <button type="button" id="navToggleBtn" class="nav-toggle" aria-label="Open menu" aria-expanded="false">☰</button>
+    <h1>🍲 Miso Gallery</h1>
+    <div class="header-actions">
+      {% if parent_url %}
+      <a class="refresh-btn" href="{{ parent_url }}" title="Go up one level">← Back</a>
+      {% endif %}
+      <div class="breadcrumb">{{ breadcrumb|safe }}</div>
+      <a class="refresh-btn" href="/trash" title="Open trash bin">🗑️ Trash</a>
+      <a class="refresh-btn" href="/recent" title="Recent uploads">📅 Recent</a>
+      <button type="button" id="installPwaBtn" class="refresh-btn" title="Install app" hidden>⬇ Install</button>
+      <button type="button" id="refreshBtn" class="refresh-btn" title="Refresh current folder">↻ Refresh</button>
+    </div>
+  </header>
+
+  <div id="drawerOverlay" class="drawer-overlay"></div>
+  <nav id="drawer" class="drawer" aria-label="Navigation">
+    <div class="drawer-header">
+      <div class="drawer-brand">🍲 Miso Gallery</div>
+      <button type="button" id="drawerCloseBtn" class="drawer-close" aria-label="Close menu">✕</button>
+    </div>
+    <div class="drawer-path">Path: {{ current_subpath if current_subpath else '/' }}</div>
+    <div class="drawer-links">
+      <a href="/">🏠 Home</a>
+      {% for crumb in nav_crumbs %}
+        <a href="{{ crumb.url }}" class="{% if crumb.is_current %}current{% endif %}">📁 {{ crumb.name }}</a>
+      {% endfor %}
+      <div class="drawer-divider"></div>
+      <a href="/recent">📅 Recent</a>
+      <a href="/trash">🗑️ Trash</a>
+      <a href="/settings">⚙️ Settings</a>
+      <a href="/about">ℹ️ About ({{ app_version }})</a>
+      <a href="/logout">🚪 Logout</a>
+    </div>
+  </nav>
+
+  <div class="container">
+    <form method="GET" action="{{ url_for('index', subpath=current_subpath) }}" style="margin-bottom:15px;">
+      <input id="categorySearch" type="text" name="q" placeholder="Filter categories..." value="{{ search_query }}" autocomplete="off" spellcheck="false" aria-label="Filter categories by name" style="padding:6px 10px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#e0e0e0; min-width: 240px;">
+      <button type="submit" class="refresh-btn" style="margin-left:5px;">🔍 Apply filter</button>
+      {% if category_filter_active %}
+      <a href="{{ url_for('index', subpath=current_subpath) }}" class="refresh-btn" style="margin-left:5px; text-decoration:none; display:inline-flex; align-items:center;">✕ Clear</a>
+      {% endif %}
+    </form>
+    {% if category_filter_active %}
+    <div class="filter-summary" role="status" aria-live="polite">
+      <span>Active filter:</span>
+      <span class="filter-chip">Category name contains “{{ search_query }}”</span>
+      <a href="{{ url_for('index', subpath=current_subpath) }}" class="clear-filter-link">Clear filter</a>
+    </div>
+    {% endif %}
+    {% if bulk_feedback %}
+    <div class="bulk-feedback {{ bulk_feedback.kind }}" role="status" aria-live="polite">
+      <strong>Bulk action:</strong>
+      <span>{{ bulk_feedback.message }}</span>
+    </div>
+    {% endif %}
+    {% if items %}
+    <form id="bulkDeleteForm" method="POST" action="/bulk-delete">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <input type="hidden" name="current_subpath" value="{{ current_subpath }}">
+      <div class="toolbar">
+        <button type="button" id="selectAllBtn">Select all</button>
+        <button type="button" id="deselectAllBtn">Deselect all</button>
+      </div>
+      <div id="selectionActions" class="selection-actions" aria-live="polite">
+        <span id="selectionCount" class="selection-count">0 selected</span>
+        <button type="button" id="clearSelectionBtn" class="ghost-btn">Clear selection</button>
+        <button type="button" id="bulkDownloadBtn" class="ghost-btn" disabled title="Bulk download is not available yet. Open items individually to download.">Download selected (unavailable)</button>
+        <button type="submit" id="bulkDeleteBtn" class="danger" disabled onclick="return confirmBulkDelete()">Delete selected (0)</button>
+        <div class="selection-hint">Bulk download is not available yet. Use each item’s direct view/thumb actions for now.</div>
+      </div>
+      <div class="grid">
+        {% for item in items %}
+          {% if item.is_dir %}
+            <div class="folder-card" data-folder-card>
+              <input class="selector" type="checkbox" name="folders" value="{{ item.rel_path }}" onchange="syncSelectionState()">
+              <a href="{{ item.url }}" class="folder">
+                {% if item.cover_thumb_url %}
+                  <img class="folder-preview" src="{{ item.cover_thumb_url }}" alt="{{ item.name }} folder preview" loading="lazy" decoding="async" fetchpriority="low">
+                {% else %}
+                  <div class="folder-icon">📁</div>
+                {% endif %}
+                <div class="folder-name">{{ item.name }}</div>
+              </a>
+            </div>
+          {% else %}
+            <div class="image-card" data-image-card>
+              <input class="selector" type="checkbox" name="filenames" value="{{ item.rel_path }}" onchange="syncSelectionState()">
+              {% if item.media_type == "video" %}
+                <video src="{{ item.thumb_url }}" controls preload="metadata" muted playsinline loading="lazy" alt="{{ item.name }}"></video>
+              {% else %}
+                <a href="{{ item.view_url }}" target="_blank"><img src="{{ item.thumb_url }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low"></a>
+              {% endif %}
+              <div class="image-info">
+                <div class="image-name">{{ item.name }}</div>
+                <div class="image-meta-row">
+                  <span class="image-meta-pill">📦 {{ item.size }}</span>
+                  <span class="image-meta-pill">🕒 {{ item.modified }}</span>
+                </div>
+              </div>
+              <details class="image-details">
+                <summary>Details</summary>
+                <div class="image-details-body">
+                  <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
+                  <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
+                  <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
+                  <div class="image-details-row"><span class="image-details-label">Modified</span><span class="image-details-value">{{ item.modified }}</span></div>
+                </div>
+              </details>
+              <button type="submit" class="delete-btn" formaction="{{ item.delete_url }}" formmethod="POST" onclick="return confirm('Delete ' + {{ item.name | tojson }} + '?')">🗑️</button>
+              <a href="{{ item.thumb_url }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
+              <button type="button" class="tag-btn" onclick="openTagEditor({{ item.rel_path | tojson }}, {{ item.name | tojson }})">🏷️ Tag</button>
+            </div>
+          {% endif %}
+        {% endfor %}
+      </div>
+    </form>
+    {% else %}
+      <div class="empty">No images in this folder</div>
+    {% endif %}
+    <div class="stats">{{ stats.folders }} folders • {{ stats.images }} images</div>
+  </div>
+  <script>
+    let deferredInstallPrompt = null;
+    const installBtn = document.getElementById('installPwaBtn');
+
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+      });
+    }
+
+    window.addEventListener('beforeinstallprompt', (event) => {
+      event.preventDefault();
+      deferredInstallPrompt = event;
+      if (installBtn) installBtn.hidden = false;
+    });
+
+    installBtn?.addEventListener('click', async () => {
+      if (!deferredInstallPrompt) return;
+      deferredInstallPrompt.prompt();
+      const result = await deferredInstallPrompt.userChoice.catch(() => null);
+      deferredInstallPrompt = null;
+      if (result?.outcome === 'dismissed') {
+        installBtn.hidden = false;
+        return;
+      }
+      installBtn.hidden = true;
+    });
+
+    window.addEventListener('appinstalled', () => {
+      deferredInstallPrompt = null;
+      if (installBtn) installBtn.hidden = true;
+    });
+
+    const drawer = document.getElementById('drawer');
+    const drawerOverlay = document.getElementById('drawerOverlay');
+    const navToggleBtn = document.getElementById('navToggleBtn');
+    const drawerCloseBtn = document.getElementById('drawerCloseBtn');
+
+    function setDrawerOpen(open) {
+      drawer?.classList.toggle('open', open);
+      drawerOverlay?.classList.toggle('open', open);
+      navToggleBtn?.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    navToggleBtn?.addEventListener('click', () => setDrawerOpen(true));
+    drawerCloseBtn?.addEventListener('click', () => setDrawerOpen(false));
+    drawerOverlay?.addEventListener('click', () => setDrawerOpen(false));
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setDrawerOpen(false); });
+
+    document.getElementById('refreshBtn')?.addEventListener('click', () => window.location.reload());
+
+    // Category search (Issue #51)
+    const categorySearchInput = document.getElementById('categorySearch');
+    function applyCategorySearchFilter() {
+      if (!categorySearchInput) return;
+      const query = (categorySearchInput.value || '').trim().toLowerCase();
+      const folderCards = Array.from(document.querySelectorAll('[data-folder-card]'));
+      if (!folderCards.length) return;
+      folderCards.forEach((card) => {
+        const name = (card.querySelector('.folder-name')?.textContent || '').toLowerCase();
+        card.style.display = !query || name.includes(query) ? '' : 'none';
+      });
+    }
+    categorySearchInput?.addEventListener('input', applyCategorySearchFilter);
+    applyCategorySearchFilter();
+
+    function getSelectors() { return Array.from(document.querySelectorAll('input.selector[name="filenames"], input.selector[name="folders"]')); }
+    function syncSelectionState() {
+      const selectors = getSelectors();
+      const selectedCount = selectors.filter(s => s.checked).length;
+      const totalCount = selectors.length;
+      const bulkDeleteBtn = document.getElementById('bulkDeleteBtn');
+      const selectionActions = document.getElementById('selectionActions');
+      const selectionCount = document.getElementById('selectionCount');
+      const clearSelectionBtn = document.getElementById('clearSelectionBtn');
+      const selectAllBtn = document.getElementById('selectAllBtn');
+      const deselectAllBtn = document.getElementById('deselectAllBtn');
+      selectors.forEach((selector) => {
+        const card = selector.closest('[data-image-card]') || selector.closest('[data-folder-card]');
+        card?.classList.toggle('selected', selector.checked);
+      });
+      if (bulkDeleteBtn) { bulkDeleteBtn.disabled = selectedCount === 0; bulkDeleteBtn.textContent = `Delete selected (${selectedCount})`; }
+      if (selectionCount) { selectionCount.textContent = `${selectedCount} selected`; }
+      if (selectionActions) { selectionActions.classList.toggle('active', selectedCount > 0); }
+      if (clearSelectionBtn) { clearSelectionBtn.disabled = selectedCount === 0; }
+      if (selectAllBtn) { selectAllBtn.disabled = totalCount === 0 || selectedCount === totalCount; }
+      if (deselectAllBtn) { deselectAllBtn.disabled = selectedCount === 0; }
+    }
+    function setAllSelections(checked) { getSelectors().forEach((selector) => selector.checked = checked); syncSelectionState(); }
+    function confirmBulkDelete() { const c = getSelectors().filter(s => s.checked).length; return c > 0 && confirm(`Delete ${c} selected image(s)?`); }
+    document.getElementById('selectAllBtn')?.addEventListener('click', () => setAllSelections(true));
+    document.getElementById('deselectAllBtn')?.addEventListener('click', () => setAllSelections(false));
+    document.getElementById('clearSelectionBtn')?.addEventListener('click', () => setAllSelections(false));
+    syncSelectionState();
+    function openTagEditor(relPath, imageName) {
+      const tag = prompt('Enter a tag for "' + imageName + '":', '');
+      if (tag && tag.trim()) {
+        fetch('/tag', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: 'rel_path=' + encodeURIComponent(relPath) + '&tag=' + encodeURIComponent(tag.trim()) + '&csrf_token={{ csrf }}'
+        }).then(response => {
+          if (response.ok) {
+            alert('Tag added successfully');
+          } else {
+            response.json().then(err => alert('Error: ' + (err.error || 'Unknown error')));
+          }
+        }).catch(err => alert('Error: ' + err.message));
+      }
+    }
+  </script>
+</body>
+</html>
