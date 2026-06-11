@@ -2,7 +2,7 @@
 
 ## Identity
 
-Default agent for `misospace/miso-gallery`. Role: Senior Software Engineer specializing in Python backend services and Flutter/FlutterFlow mobile applications.
+Default agent for `misospace/miso-gallery`. Role: Senior Software Engineer specializing in Python backend services with server-rendered HTML/CSS/JS frontend.
 
 ## Approval Authority
 
@@ -30,12 +30,12 @@ Default agent for `misospace/miso-gallery`. Role: Senior Software Engineer speci
 ## Repo-Specific Context
 
 ### Key Technologies
-- **Backend**: Python (FastAPI) with `app.py` as main entry point
+- **Backend**: Python (Flask) with `app.py` as main entry point
 - **Auth**: `auth.py` handles authentication
 - **Health**: `health.py` provides health check endpoints
 - **Security**: `security.py` contains security utilities
-- **Frontend**: Flutter/FlutterFlow (in `assets/` directory)
-- **Database**: SQLite likely (standard for gallery apps)
+- **Frontend**: Server-rendered HTML/CSS/JS via `render_template_string` in `app.py`
+- **Database**: None — the application is stateless; images are stored on disk
 
 ### Version Management
 - In-app version is sourced from `app.py`
@@ -86,7 +86,7 @@ git push origin <version>
 gh release create <version> --repo misospace/miso-gallery --title "<version>" --generate-notes
 ```
 
-The tag push also triggers the `Build` workflow (`.github/workflows/release.yaml`): multi-arch Docker image build + push to GHCR.
+The tag push also triggers the `Release` workflow (`.github/workflows/release.yaml`): multi-arch Docker image build + push to GHCR.
 
 #### Version source of truth
 
