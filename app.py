@@ -1529,6 +1529,7 @@ def bulk_delete():
         if not sanitize_path(rel_path):
             # sanitize_path() rejects paths containing ".." or starting with "/" (security.py:sanitize_path)
             # sanitize_rel_path() further normalizes and double-checks (app.py:sanitize_rel_path)
+
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
