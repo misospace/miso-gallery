@@ -30,30 +30,6 @@ def dir_size(path: Path) -> int:
     except OSError:
         pass
     return total
-
-
-
-def dir_size(path: Path) -> int:
-    """Estimate total size of a directory tree in bytes.
-
-    Skips symlinks to prevent information disclosure and DoS via symlink
-    cycles or external filesystem traversal.
-    """
-    total = 0
-    try:
-        for entry in path.rglob("*"):
-            if entry.is_symlink():
-                continue
-            if entry.is_file():
-                with contextlib.suppress(OSError):
-                    total += entry.stat().st_size
-                # Intentionally suppress OSError (e.g., permission denied) for
-                # individual files during size estimation; we only need an estimate.
-    except OSError:
-        pass
-    return total
-
-
 def trash_dir(data_folder: Path) -> Path:
     path = data_folder / TRASH_DIR_NAME
     path.mkdir(parents=True, exist_ok=True)
