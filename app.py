@@ -254,8 +254,9 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
     """Check thumbnails and regenerate missing/invalid entries on demand.
 
     Args:
-        limit: Maximum files to scan. None means no limit.
+        limit: Maximum files to scan. Defaults to GALLERY_SCAN_LIMIT.
     """
+    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
 
     ensure_thumbnail_cache_dir()
     excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
@@ -273,7 +274,7 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
 
         rel_posix = rel_path.as_posix()
         stats["checked"] += 1
-        if limit is not None and stats["checked"] > limit:
+        if stats["checked"] > effective_limit:
             break
 
         cached_name = thumbnail_filename(rel_posix, item)
@@ -383,6 +384,45 @@ def media_metadata(path: Path) -> dict[str, object]:
     }
 
 
+
+def iter_gallery_items(
+    kind: str = "media",
+    limit: int | None = None,
+) -> list[Path]:
+    """Centralized bounded iterator for gallery filesystem scans.
+
+    Replaces duplicated rglob patterns across iter_gallery_media,
+    iter_gallery_folders, folder_cover_rel_path, and recent_view.
+
+    Args:
+        kind: "media" (files only), "folders" (dirs only), or "all" (both).
+        limit: Maximum items to return. Defaults to GALLERY_SCAN_LIMIT.
+
+    Returns:
+        Sorted list of Path objects within the bound.
+    """
+    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
+    results: list[Path] = []
+    for item in DATA_FOLDER.rglob("*"):
+        if len(results) >= effective_limit:
+            break
+        try:
+            # Skip symlinks to prevent filesystem traversal outside the data root.
+            if item.is_symlink():
+                continue
+            if kind == "media" and not (item.is_file() and is_media_file(item)):
+                continue
+            if kind == "folders" and not item.is_dir():
+                continue
+            # "all" accepts everything
+            if is_excluded_gallery_path(item):
+                continue
+            results.append(item)
+        except (OSError, PermissionError):
+            continue
+    return sorted(results, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+
+
 def iter_gallery_media(limit: int | None = None) -> list[Path]:
     """Iterate gallery media files, bounded by scan limit."""
     effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
@@ -421,7 +461,14 @@ def file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def find_duplicate_media() -> list[dict[str, object]]:
+def find_duplicate_media(limit: int | None = None) -> list[dict[str, object]]:
+    """Find duplicate media files by size then SHA-256 hash.
+
+    Args:
+        limit: Maximum number of duplicate groups to return. Defaults to GALLERY_SCAN_LIMIT.
+               Applied only to the final output (hash phase is bounded by iter_gallery_media).
+    """
+    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
     by_size: dict[int, list[Path]] = {}
     for item in iter_gallery_media():
         try:
@@ -442,6 +489,8 @@ def find_duplicate_media() -> list[dict[str, object]]:
         for digest, matches in by_hash.items():
             if len(matches) < 2:
                 continue
+            if len(groups) >= effective_limit:
+                return groups
             matches = sorted(matches, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
             groups.append(
                 {
