@@ -1527,6 +1527,8 @@ def bulk_delete():
     # Guard: preflight folder size estimation (issue #199)
     for rel_path in selected_folders:
         if not sanitize_path(rel_path):
+            # sanitize_path() rejects paths containing ".." or starting with "/" (security.py:sanitize_path)
+            # sanitize_rel_path() further normalizes and double-checks (app.py:sanitize_rel_path)
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
