@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="{{ theme_color }}">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="apple-touch-icon" href="/assets/icon-192.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Miso Gallery">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>Recent - Miso Gallery</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background:#0d0d0d; color:#e0e0e0; font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; min-height:100vh; }
+    header { background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%); padding:20px 30px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #333; gap:12px; flex-wrap:wrap; }
+    h1 { font-size:1.5rem; background:linear-gradient(90deg,#f5a623,#f76c1c); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
+    .header-actions { display:flex; align-items:center; gap:10px; margin-left:auto; }
+    .refresh-btn { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:8px; padding:8px 12px; font-size:0.9rem; cursor:pointer; text-decoration:none; }
+    .container { padding:20px; }
+    .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(200px,1fr)); gap:15px; }
+    .image-card { background:#1a1a1a; border-radius:10px; overflow:hidden; transition:transform .2s, box-shadow .2s; content-visibility:auto; contain-intrinsic-size:260px 320px; }
+    .image-card:hover { transform:translateY(-3px); box-shadow:0 8px 25px rgba(245,166,35,.15); }
+    .image-card-link { display:block; }
+    .image-card img { width:100%; height:180px; object-fit:cover; display:block; }
+    .image-info { padding:10px; font-size:.8rem; color:#888; }
+    .image-meta-row { display:flex; flex-wrap:wrap; gap:6px 10px; margin-top:6px; color:#777; font-size:.75rem; }
+    .image-meta-pill { display:inline-flex; align-items:center; gap:4px; }
+    .image-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    .image-date { color:#666; font-size:.75rem; margin-top:4px; }
+    .image-details { margin:0 10px 10px; border:1px solid #323232; border-radius:8px; background:#151515; }
+    .image-details summary { cursor:pointer; list-style:none; padding:8px 10px; color:#d6d6d6; font-size:.78rem; font-weight:600; }
+    .image-details summary::-webkit-details-marker { display:none; }
+    .image-details summary::after { content:'▾'; float:right; color:#888; }
+    .image-details[open] summary::after { content:'▴'; }
+    .image-details-body { padding:0 10px 10px; display:grid; gap:6px; font-size:.75rem; color:#a9a9a9; }
+    .image-details-row { display:flex; justify-content:space-between; gap:12px; }
+    .image-details-label { color:#7c7c7c; }
+    .image-details-value { text-align:right; word-break:break-word; }
+    .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .thumb-preview-btn:hover { background:#f5a623; }
+    .folder-nav-btn { position:absolute; bottom:10px; left:10px; background:rgba(59,130,246,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
+    .folder-nav-btn:hover { background:#3b82f6; }
+    .image-card:hover .folder-nav-btn, .image-card:hover .thumb-preview-btn { opacity:1; }
+    .empty { text-align:center; padding:50px; color:#666; }
+  </style>
+</head>
+<body>
+<header>
+  <h1>🍲 Recent</h1>
+  <div class="header-actions">
+    <button type="button" id="refreshRecentBtn" class="refresh-btn" title="Refresh recent images">↻ Refresh</button>
+    <button type="button" id="installPwaBtn" class="refresh-btn" hidden>⬇ Install</button>
+    <a href="/" class="refresh-btn">← Gallery</a>
+  </div>
+</header>
+<div class="container">
+  <h2 style="margin-bottom:20px;font-size:1.2rem;color:#888;">Recently Added ({{ items|length }})</h2>
+  {% if items %}
+    <div class="grid">
+    {% for item in items %}
+      <div class="image-card" style="position:relative;">
+        <a href="{{ item.url }}" class="image-card-link" target="_blank">
+          <img src="{{ item.thumb }}" alt="{{ item.name }}" loading="lazy" decoding="async" fetchpriority="low">
+          <div class="image-info">
+            <div class="image-name">{{ item.name }}</div>
+            <div class="image-meta-row">
+              <span class="image-meta-pill">📦 {{ item.size }}</span>
+              <span class="image-meta-pill">🕒 {{ item.added }}</span>
+            </div>
+          </div>
+        </a>
+        <details class="image-details">
+          <summary>Details</summary>
+          <div class="image-details-body">
+            <div class="image-details-row"><span class="image-details-label">Filename</span><span class="image-details-value">{{ item.name }}</span></div>
+            <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
+            <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
+            <div class="image-details-row"><span class="image-details-label">Added</span><span class="image-details-value">{{ item.added }}</span></div>
+          </div>
+        </details>
+        {% if item.folder_url %}
+        <a href="{{ item.folder_url }}" class="folder-nav-btn" title="Go to folder">📁 Folder</a>
+        {% endif %}
+        <a href="{{ item.thumb }}" target="_blank" class="thumb-preview-btn" title="View thumbnail only">🖼️ Thumb</a>
+      </div>
+    {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty">No recent images found</div>
+  {% endif %}
+</div>
+<script>
+  let deferredInstallPrompt = null;
+  const installBtn = document.getElementById('installPwaBtn');
+  const refreshBtn = document.getElementById('refreshRecentBtn');
+
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+    });
+  }
+
+  window.addEventListener('beforeinstallprompt', (event) => {
+    event.preventDefault();
+    deferredInstallPrompt = event;
+    if (installBtn) installBtn.hidden = false;
+  });
+
+  refreshBtn?.addEventListener('click', () => {
+    window.location.reload();
+  });
+
+  installBtn?.addEventListener('click', async () => {
+    if (!deferredInstallPrompt) return;
+    deferredInstallPrompt.prompt();
+    const result = await deferredInstallPrompt.userChoice.catch(() => null);
+    deferredInstallPrompt = null;
+    if (result?.outcome === 'dismissed') {
+      installBtn.hidden = false;
+      return;
+    }
+    installBtn.hidden = true;
+  });
+
+  window.addEventListener('appinstalled', () => {
+    deferredInstallPrompt = null;
+    if (installBtn) installBtn.hidden = true;
+  });
+</script>
+</body>
+</html>

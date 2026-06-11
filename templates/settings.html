@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="theme-color" content="{{ theme_color }}"><link rel="manifest" href="/manifest.webmanifest"><link rel="apple-touch-icon" href="/assets/icon-192.png"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"><meta name="apple-mobile-web-app-title" content="Miso Gallery"><meta name="mobile-web-app-capable" content="yes"><title>Settings - Miso Gallery</title>
+<style>
+ body{background:#0d0d0d;color:#e0e0e0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;margin:0}
+ .wrap{max-width:900px;margin:0 auto;padding:24px}
+ a{color:#f5a623;text-decoration:none}
+ .card{background:#141414;border:1px solid #2f2f2f;border-radius:12px;padding:18px;margin-top:14px}
+ .row{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-bottom:1px solid #242424}
+ .row:last-child{border-bottom:none}
+ .k{color:#9aa1a8}
+ .note{color:#888;margin-top:10px;font-size:.9rem}
+ .btn{margin-top:12px;padding:10px 14px;border-radius:8px;border:1px solid #4b4b75;background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%);color:#f5a623;cursor:pointer}
+ .ok{margin-top:12px;padding:10px 12px;border-radius:8px;border:1px solid #245f3d;background:#10271b;color:#9de2b4}
+</style></head>
+<body><div class="wrap">
+  <h2>⚙️ Settings</h2>
+  <p><a href="/">← Back to Gallery</a></p>
+  <div class="card">
+    <div class="row"><div class="k">Data folder</div><div>{{ data_folder }}</div></div>
+    <div class="row"><div class="k">Thumbnail cache</div><div>{{ thumb_cache }}</div></div>
+    <div class="row"><div class="k">Rate limiting</div><div>enabled</div></div>
+  </div>
+
+  <form method="POST" action="/maintenance/thumbnails/regenerate">
+    <input type="hidden" name="csrf_token" value="{{ csrf }}">
+    <button class="btn" type="submit">🧰 Run thumbnail integrity check</button>
+  </form>
+
+  {% if maintenance_result %}
+    <div class="ok">Checked: {{ maintenance_result.checked }} • Regenerated: {{ maintenance_result.regenerated }} • Failed: {{ maintenance_result.failed }}</div>
+  {% endif %}
+
+  <p class="note">This page intentionally avoids showing secrets or raw environment variables.</p>
+</div></body></html>
