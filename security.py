@@ -91,6 +91,11 @@ class InMemoryRateLimiter:
             self._storage[key] = history
             return True
 
+    def reset(self) -> None:
+        """Clear all rate-limit state (for testing)."""
+        with self._lock:
+            self._storage.clear()
+
 
 class RedisRateLimiter:
     """Redis/Dragonfly-backed limiter using a sorted-set sliding window."""
