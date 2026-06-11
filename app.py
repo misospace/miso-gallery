@@ -46,6 +46,7 @@ from security import (
     validate_csrf,
 )
 from trash import (
+    dir_size,
     empty_trash,
     list_trash,
     move_to_trash,
@@ -143,6 +144,13 @@ _FOLDER_COVER_CACHE: dict[str, tuple[float, str | None]] = {}
 GALLERY_PAGE_DEFAULT = 50
 GALLERY_PAGE_MAX = 500
 GALLERY_SCAN_LIMIT = int(os.environ.get("GALLERY_SCAN_LIMIT", "5000"))
+
+# Destructive-operation guardrails (issue #199)
+BULK_DELETE_MAX_ITEMS = int(os.environ.get("BULK_DELETE_MAX_ITEMS", "200"))
+BULK_DELETE_MAX_FOLDERS = int(os.environ.get("BULK_DELETE_MAX_FOLDERS", "50"))
+BULK_DELETE_FOLDER_SIZE_CAP = int(os.environ.get("BULK_DELETE_FOLDER_SIZE_CAP", str(10 * 1024 * 1024 * 1024)))  # 10 GB default
+LLM_BULK_DELETE_MAX_ITEMS = int(os.environ.get("LLM_BULK_DELETE_MAX_ITEMS", "500"))
+LLM_DEDUP_MAX_REMOVALS = int(os.environ.get("LLM_DEDUP_MAX_REMOVALS", "200"))
 
 
 def _paginate(items, page=1, per_page=GALLERY_PAGE_DEFAULT):
@@ -1505,6 +1513,29 @@ def bulk_delete():
     selected_files = request.form.getlist("filenames")
     selected_folders = request.form.getlist("folders")
 
+    # Guard: cap total item count (issue #199)
+    total_items = len(selected_files) + len(selected_folders)
+    if total_items > BULK_DELETE_MAX_ITEMS:
+        log_security_event("bulk_delete", "rejected", reason="exceeds_max_items", selected_files=len(selected_files), selected_folders=len(selected_folders), max_items=BULK_DELETE_MAX_ITEMS)
+        return {"error": f"Too many items. Maximum is {BULK_DELETE_MAX_ITEMS}."}, 422
+
+    # Guard: cap folder count (issue #199)
+    if len(selected_folders) > BULK_DELETE_MAX_FOLDERS:
+        log_security_event("bulk_delete", "rejected", reason="exceeds_max_folders", selected_folders=len(selected_folders), max_folders=BULK_DELETE_MAX_FOLDERS)
+        return {"error": f"Too many folders. Maximum is {BULK_DELETE_MAX_FOLDERS}."}, 422
+
+    # Guard: preflight folder size estimation (issue #199)
+    for rel_path in selected_folders:
+        if not sanitize_path(rel_path):
+            continue
+        safe_rel_path = sanitize_rel_path(rel_path)
+        folder_path = DATA_FOLDER / safe_rel_path
+        if folder_path.exists() and folder_path.is_dir():
+            size = dir_size(folder_path)
+            if size > BULK_DELETE_FOLDER_SIZE_CAP:
+                log_security_event("bulk_delete", "rejected", reason="folder_too_large", rel_path=safe_rel_path, size=size, cap=BULK_DELETE_FOLDER_SIZE_CAP)
+                return {"error": f"Folder is too large to delete ({size} bytes exceeds {BULK_DELETE_FOLDER_SIZE_CAP} byte limit)."}, 422
+
     moved_files = 0
     moved_folders = 0
 
@@ -1927,6 +1958,10 @@ def llm_bulk_delete():
     rel_paths = payload.get("rel_paths") or payload.get("images") or []
     if not isinstance(rel_paths, list):
         return {"error": "rel_paths/images must be a list"}, 400
+    # Guard: cap item count (issue #199)
+    if len(rel_paths) > LLM_BULK_DELETE_MAX_ITEMS:
+        log_security_event("llm_bulk_delete", "rejected", reason="exceeds_max_items", count=len(rel_paths), max_items=LLM_BULK_DELETE_MAX_ITEMS)
+        return {"error": f"Too many items. Maximum is {LLM_BULK_DELETE_MAX_ITEMS}."}, 422
     dry_run = bool(payload.get("dry_run", False))
     deleted = []
     skipped = []
@@ -1965,6 +2000,11 @@ def llm_dedup():
         groups = groups[:limit]
     removed = []
     if remove:
+        # Guard: cap total removal count (issue #199)
+        estimated_removals = sum(len(g["duplicates"]) for g in groups)
+        if estimated_removals > LLM_DEDUP_MAX_REMOVALS:
+            log_security_event("llm_dedup", "rejected", reason="exceeds_max_removals", estimated=estimated_removals, max_removals=LLM_DEDUP_MAX_REMOVALS)
+            return {"error": f"Too many duplicates to remove. Maximum is {LLM_DEDUP_MAX_REMOVALS}."}, 422
         for group in groups:
             for rel_path in group["duplicates"]:
                 media_path = source_file_path(str(rel_path))
