@@ -59,7 +59,7 @@ GET /health
 ```json
 {
   "status": "healthy",
-  "version": "0.1.17",
+  "version": "0.1.18",
   "timestamp": "2026-05-18T09:00:00+00:00",
   "storage": {
     "status": "healthy",
@@ -314,7 +314,7 @@ Tasks can also be disabled per-task by unsetting the `WEBHOOK_TASK_*` variable.
 
 1. Bump `APP_VERSION` in `app.py` (line 133):
    ```python
-   APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.17").strip() or "0.1.17"
+   APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.18").strip() or "0.1.18"
    ```
 
 2. Run the Manual Release workflow from the GitHub Actions tab, or tag and push:
