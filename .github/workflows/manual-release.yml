@@ -4,12 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: 'Release version (e.g. 0.4.6 or v0.4.6; will normalize to 0.4.6)'
+        description: 'Release version (for example 0.1.19 or v0.1.19)'
         required: true
         type: string
 
+concurrency:
+  group: manual-release
+  cancel-in-progress: false
+
 jobs:
-  release:
+  prepare-release:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -29,111 +33,72 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
 
-      - name: Normalize version
+      - name: Normalize and validate version
         id: version
+        env:
+          RAW_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          RAW='${{ github.event.inputs.version }}'
-          VERSION="${RAW#v}"
+          VERSION="${RAW_VERSION#v}"
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid version: $RAW"
+            echo "Invalid version: $RAW_VERSION"
+            exit 1
+          fi
+          if git rev-parse "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "Tag $VERSION already exists"
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "tag=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: Configure git
-        run: |
-          git config user.name "smurf-bot[bot]"
-          git config user.email "smurf-bot[bot]@users.noreply.github.com"
-
-      - name: Ensure app version constant matches release
+      - name: Update app version
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import os, re
-          version = os.environ['VERSION']
-          path = Path('app.py')
+          import os
+          import re
+
+          version = os.environ["VERSION"]
+          path = Path("app.py")
           text = path.read_text()
-          updated, count = re.subn(r'APP_VERSION = \(os\.environ\.get\("APP_VERSION"\) or ".*?"\)\.strip\(\) or ".*?"', f'APP_VERSION = (os.environ.get("APP_VERSION") or "{version}").strip() or "{version}"', text, count=1)
+          replacement = f'APP_VERSION = (os.environ.get("APP_VERSION") or "{version}").strip() or "{version}"'
+          updated, count = re.subn(
+              r'APP_VERSION = \(os\.environ\.get\("APP_VERSION"\) or ".*?"\)\.strip\(\) or ".*?"',
+              replacement,
+              text,
+              count=1,
+          )
           if count != 1:
-              raise SystemExit('Failed to update APP_VERSION in app.py')
+              raise SystemExit("Failed to update APP_VERSION in app.py")
           path.write_text(updated)
           PY
 
-      - name: Commit version bump to release branch
-        id: bump
-        run: |
-          git add app.py
-          if git diff --cached --quiet; then
-            echo "No version file changes to commit"
-          else
-            BRANCH="chore/bump-version-${{ steps.version.outputs.version }}"
-            git commit -m "chore(release): bump APP_VERSION to ${{ steps.version.outputs.version }}"
-            git push origin "HEAD:${BRANCH}"
-            echo "branch=${BRANCH}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Open version-bump PR and enable auto-merge
-        if: steps.bump.outputs.branch != ''
+      - name: Commit and push release branch
+        id: branch
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BRANCH: ${{ steps.bump.outputs.branch }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh pr create \
-            --base main \
-            --head "${BRANCH}" \
-            --title "chore: bump APP_VERSION to ${VERSION}" \
-            --body "Automated in-app version bump to ${VERSION} for the next release." \
-            --delete-branch
-          gh pr merge "${BRANCH}" --auto --squash --delete-branch
+          set -euo pipefail
+          BRANCH="chore/release-v${VERSION}-${GITHUB_RUN_ID}"
+          git config user.name "smurf-bot[bot]"
+          git config user.email "smurf-bot[bot]@users.noreply.github.com"
+          git add app.py
+          git commit -m "chore(release): bump version to ${VERSION}"
+          git push origin "HEAD:refs/heads/${BRANCH}"
+          echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
-      - name: Wait for version-bump PR to merge
-        if: steps.bump.outputs.branch != ''
+      - name: Open release PR and enable auto-merge
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          BRANCH: ${{ steps.bump.outputs.branch }}
-        run: |
-          for i in $(seq 1 120); do
-            STATE=$(gh pr view "${BRANCH}" --json state -q .state 2>/dev/null || echo "OPEN")
-            if [ "$STATE" = "MERGED" ]; then
-              echo "PR merged"
-              break
-            fi
-            sleep 5
-          done
-          if [ "$STATE" != "MERGED" ]; then
-            echo "ERROR: version-bump PR did not merge within 10 minutes"
-            exit 1
-          fi
-
-      - name: Ensure remote main is current
-        run: |
-          git fetch origin main --tags
-          git checkout main
-          git reset --hard origin/main
-
-      - name: Create tag
-        env:
-          TAG: ${{ steps.version.outputs.tag }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists"
-            exit 1
-          fi
-          git tag "$TAG"
-          git push origin "$TAG"
-
-      - name: Create GitHub release with generated notes
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          gh release create "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "$TAG" \
-            --generate-notes
+          PR_URL=$(gh pr create \
+            --base main \
+            --head "$BRANCH" \
+            --title "chore(release): bump version to ${VERSION}" \
+            --body "Version bump for release ${VERSION}. The release will be published after this PR passes the required checks and merges.")
+          gh pr merge "$PR_URL" --auto --squash --delete-branch
+          echo "Release PR: $PR_URL"
