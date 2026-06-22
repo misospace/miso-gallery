@@ -1,0 +1,115 @@
+name: Publish Release
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      release_pr:
+        description: 'Merged release PR number to recover or republish'
+        required: true
+        type: number
+
+concurrency:
+  group: publish-release-${{ inputs.release_pr || github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  publish-release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+      startsWith(github.event.pull_request.head.ref, 'chore/release-v') &&
+      endsWith(github.event.pull_request.user.login, '[bot]'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: read
+    steps:
+      - name: Generate bot token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ secrets.BOT_CLIENT_ID }}
+          private-key: ${{ secrets.BOT_APP_PRIVATE_KEY }}
+
+      - name: Resolve and verify release PR
+        id: release-pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ inputs.release_pr || github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          PR=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json author,headRefName,mergedAt,mergeCommit)
+          IS_BOT=$(jq -r '.author.is_bot // false' <<<"$PR")
+          HEAD_REF=$(jq -r '.headRefName' <<<"$PR")
+          MERGED_AT=$(jq -r '.mergedAt // empty' <<<"$PR")
+          MERGE_SHA=$(jq -r '.mergeCommit.oid // empty' <<<"$PR")
+          if [ -z "$MERGED_AT" ] || [ -z "$MERGE_SHA" ] || [ "$IS_BOT" != "true" ] || [[ "$HEAD_REF" != chore/release-v* ]]; then
+            echo "PR #$PR_NUMBER is not a merged bot-authored release PR"
+            exit 1
+          fi
+          FILES=$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '.files[].path')
+          if [ "$FILES" != "app.py" ]; then
+            echo "Release PR changed unexpected files:"
+            echo "$FILES"
+            exit 1
+          fi
+          echo "merge_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout merged release
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ steps.release-pr.outputs.merge_sha }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Resolve release version
+        id: release
+        run: |
+          set -euo pipefail
+          VERSION=$(python3 - <<'PY'
+          import re
+          from pathlib import Path
+
+          text = Path("app.py").read_text()
+          match = re.search(r'^APP_VERSION = \(os\.environ\.get\("APP_VERSION"\) or "([^"]+)"\)\.strip\(\) or "\1"$', text, re.MULTILINE)
+          if not match:
+              raise SystemExit("APP_VERSION is missing or inconsistent")
+          print(match.group(1))
+          PY
+          )
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "Invalid APP_VERSION: $VERSION"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Create tag at merge commit
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          MERGE_SHA: ${{ steps.release-pr.outputs.merge_sha }}
+          TAG: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if EXISTING_SHA=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" --jq .object.sha 2>/dev/null); then
+            if [ "$EXISTING_SHA" != "$MERGE_SHA" ]; then
+              echo "Tag $TAG already points to $EXISTING_SHA"
+              exit 1
+            fi
+          else
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$TAG" -f sha="$MERGE_SHA" >/dev/null
+          fi
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists"
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --title "$TAG" --generate-notes
+          fi
