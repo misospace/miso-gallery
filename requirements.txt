@@ -3,7 +3,7 @@ gunicorn==26.0.0
 Pillow==12.2.0
 Authlib==1.7.2
 requests==2.34.2
-redis==8.0.0
+redis==8.0.1
 # Pin pip to address PYSEC-2026-196 / CVE-2026-8643
 # (pip is not a runtime dependency, but ci runs pip-audit on
 # the full installed environment and flags vulnerable pip itself)
