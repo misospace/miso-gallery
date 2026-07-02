@@ -169,6 +169,37 @@ class TestFindDuplicateMediaBounded:
         # The function should not crash or hang on large galleries
 
 
+class TestIteratorUnification:
+    """iter_gallery_media and iter_gallery_folders delegate to iter_gallery_items (issue #283)."""
+
+    def test_media_wrapper_delegates_to_items(self, monkeypatch, tmp_path):
+        client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
+
+        import app as app_module
+        via_media = app_module.iter_gallery_media()
+        via_items = app_module.iter_gallery_items(kind="media")
+        assert via_media == via_items
+
+    def test_folders_wrapper_delegates_to_items(self, monkeypatch, tmp_path):
+        client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
+
+        import app as app_module
+        via_folders = app_module.iter_gallery_folders()
+        via_items = app_module.iter_gallery_items(kind="folders")
+        assert via_folders == via_items
+
+    def test_items_kind_distinguishes_media_from_folders(self, monkeypatch, tmp_path):
+        client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
+
+        import app as app_module
+        media = app_module.iter_gallery_items(kind="media")
+        folders = app_module.iter_gallery_items(kind="folders")
+        # Media must be files only, folders must be directories only.
+        assert all(p.is_file() for p in media)
+        assert all(p.is_dir() for p in folders)
+        assert set(media).isdisjoint(set(folders))
+
+
 class TestScanLimitConstant:
     """Verify GALLERY_SCAN_LIMIT is properly defined."""
 
