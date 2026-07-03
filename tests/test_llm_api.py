@@ -356,8 +356,6 @@ def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, cap
     """Regression for #280: invalid paths in bulk_delete must emit a security event log."""
     import logging
 
-    import app as app_module
-
     client, data_dir = build_client(monkeypatch, tmp_path)
 
     caplog.set_level(logging.INFO, logger="app")
