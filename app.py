@@ -1304,6 +1304,7 @@ def llm_bulk_delete():
     skipped = []
     for rel_path in rel_paths:
         if not isinstance(rel_path, str) or not sanitize_path(rel_path):
+            log_security_event("llm_bulk_delete", "denied", reason="invalid_path", rel_path=str(rel_path))
             skipped.append(str(rel_path))
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
