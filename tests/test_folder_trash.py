@@ -310,3 +310,55 @@ class TestConflictingNames:
         assert len(trash_items) == 2
         originals = {t["original"] for t in trash_items}
         assert "collision_test" in originals
+
+
+class TestDirSizeSymlinkConsistency:
+    """Verify dir_size() consistently skips symlinks (regression for #266).
+
+    Previously, _dir_size() did not skip symlinks while dir_size() did.
+    After standardization, all size calculations should use dir_size() which
+    skips symlinks for security.
+    """
+
+    def test_dir_size_skips_symlinks(self, monkeypatch, tmp_path):
+        from trash import dir_size
+
+        # Create a directory with a real file and a symlink to a large external file
+        folder = tmp_path / "test_folder"
+        folder.mkdir()
+        (folder / "real.txt").write_bytes(b"x" * 100)
+
+        # Create an external file outside the folder
+        external = tmp_path / "external_large.txt"
+        external.write_bytes(b"y" * 10000)
+
+        # Create a symlink inside the folder pointing to the external file
+        (folder / "link.txt").symlink_to(external)
+
+        # dir_size should only count the real file, not follow symlinks
+        size = dir_size(folder)
+        assert size == 100, f"Expected 100 bytes (real file only), got {size}"
+
+    def test_move_to_trash_uses_dir_size_not_private(self, monkeypatch, tmp_path):
+        """Verify move_to_trash records size using symlink-safe dir_size()."""
+        from trash import list_trash, move_to_trash
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        folder = data_dir / "symlink_test"
+        folder.mkdir()
+        (folder / "real.txt").write_bytes(b"a" * 50)
+
+        # Create external file and symlink inside the folder
+        external = data_dir / "external.txt"
+        external.write_bytes(b"b" * 5000)
+        (folder / "link.txt").symlink_to(external)
+
+        move_to_trash(folder, data_dir)
+
+        trash_items = list_trash(data_dir)
+        assert len(trash_items) == 1
+        # Size should be 50 (real file only), not 5050 (which would include symlink target)
+        assert trash_items[0]["size"] == 50, (
+            f"Expected 50 bytes (symlinks skipped), got {trash_items[0]['size']}"
+        )
