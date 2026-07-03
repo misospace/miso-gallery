@@ -359,8 +359,6 @@ def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, cap
     import app as app_module
 
     client, data_dir = build_client(monkeypatch, tmp_path)
-    (data_dir / "cats").mkdir()
-    (data_dir / "cats" / "cat.jpg").write_bytes(b"x")
 
     caplog.set_level(logging.INFO, logger="miso_gallery")
     # Patch the logger used by app.log_security_event so caplog captures it.
