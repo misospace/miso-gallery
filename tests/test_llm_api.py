@@ -349,4 +349,37 @@ def test_write_only_key_can_access_read_endpoints(monkeypatch, tmp_path):
 
     # Write key should work on read endpoints (write implies read)
     images = client.get("/api/llm/images", headers=auth_header("write-only-key"))
+
+
+def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, caplog):
+    """Regression for #280: invalid paths in bulk_delete must emit a security event log."""
+    import logging
+
+    import app as app_module
+
+    client, data_dir = build_client(monkeypatch, tmp_path)
+    (data_dir / "cats").mkdir()
+    (data_dir / "cats" / "cat.jpg").write_bytes(b"x")
+
+    caplog.set_level(logging.INFO, logger="miso_gallery")
+    # Patch the logger used by app.log_security_event so caplog captures it.
+    monkeypatch.setattr(app_module, "logger", logging.getLogger("miso_gallery"))
+
+    resp = client.post(
+        "/api/llm/delete",
+        json={
+            "rel_paths": ["../../etc/passwd", "/abs/path.jpg"],
+            "mode": "files",
+        },
+        headers=auth_header(),
+    )
+
+    assert resp.status_code == 200
+    # Real file must not be touched.
+    assert (data_dir / "cats" / "cat.jpg").exists()
+    # Security event must be logged for each rejected path.
+    msgs = [r.getMessage() for r in caplog.records]
+    assert any('"event": "bulk_delete"' in m and '"outcome": "denied"' in m for m in msgs), (
+        f"Expected bulk_delete denied security event, got: {msgs}"
+    )
     assert images.status_code == 200
