@@ -349,6 +349,7 @@ def test_write_only_key_can_access_read_endpoints(monkeypatch, tmp_path):
 
     # Write key should work on read endpoints (write implies read)
     images = client.get("/api/llm/images", headers=auth_header("write-only-key"))
+    assert images.status_code == 200
 
 
 def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, caplog):
@@ -382,4 +383,3 @@ def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, cap
     assert any('"event": "bulk_delete"' in m and '"outcome": "denied"' in m for m in msgs), (
         f"Expected bulk_delete denied security event, got: {msgs}"
     )
-    assert images.status_code == 200
