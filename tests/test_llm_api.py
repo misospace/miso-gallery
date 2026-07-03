@@ -373,11 +373,6 @@ def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, cap
     assert (data_dir / "cats" / "cat.jpg").exists()
     # Security event must be logged for each rejected path.
     msgs = [r.message for r in caplog.records]
-    print(f"DEBUG: All messages: {msgs}")
-    for i, m in enumerate(msgs):
-        has_event = '"event": "llm_bulk_delete"' in m
-        has_denied = '"outcome": "denied"' in m
-        print(f"DEBUG: msg[{i}] event={has_event} denied={has_denied}")
-    assert any('"event": "llm_bulk_delete"' in m and '"outcome": "denied"' in m for m in msgs), (
+    assert any('"event":"llm_bulk_delete"' in m and '"outcome":"denied"' in m for m in msgs), (
         f"Expected llm_bulk_delete denied security event, got: {msgs}"
     )
