@@ -365,10 +365,9 @@ def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, cap
     monkeypatch.setattr(app_module.app, "logger", logging.getLogger("miso_gallery"))
 
     resp = client.post(
-        "/api/llm/delete",
+        "/api/llm/bulk-delete",
         json={
             "rel_paths": ["../../etc/passwd", "/abs/path.jpg"],
-            "mode": "files",
         },
         headers=auth_header(),
     )
