@@ -424,33 +424,21 @@ def iter_gallery_items(
 
 
 def iter_gallery_media(limit: int | None = None) -> list[Path]:
-    """Iterate gallery media files, bounded by scan limit."""
-    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
-    media: list[Path] = []
-    for item in DATA_FOLDER.rglob("*"):
-        if len(media) >= effective_limit:
-            break
-        try:
-            if is_media_file(item) and not is_excluded_gallery_path(item):
-                media.append(item)
-        except (OSError, PermissionError):
-            continue
-    return sorted(media, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+    """Iterate gallery media files, bounded by scan limit.
+
+    Thin wrapper around :func:`iter_gallery_items` kept for backward
+    compatibility with existing callers.
+    """
+    return iter_gallery_items(kind="media", limit=limit)
 
 
 def iter_gallery_folders(limit: int | None = None) -> list[Path]:
-    """Iterate gallery folders, bounded by scan limit."""
-    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
-    folders: list[Path] = []
-    for item in DATA_FOLDER.rglob("*"):
-        if len(folders) >= effective_limit:
-            break
-        try:
-            if item.is_dir() and not is_excluded_gallery_path(item):
-                folders.append(item)
-        except (OSError, PermissionError):
-            continue
-    return sorted(folders, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+    """Iterate gallery folders, bounded by scan limit.
+
+    Thin wrapper around :func:`iter_gallery_items` kept for backward
+    compatibility with existing callers.
+    """
+    return iter_gallery_items(kind="folders", limit=limit)
 
 
 def file_sha256(path: Path) -> str:
