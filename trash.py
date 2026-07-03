@@ -93,7 +93,7 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
             meta = {
                 "original": rel,
                 "deleted_at": datetime.utcnow().isoformat(),
-                "size": _dir_size(dest),
+                "size": dir_size(dest),
             }
             _meta_path(dest).write_text(json.dumps(meta))
             return True
@@ -104,16 +104,6 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
             return False
 
     return False
-
-
-def _dir_size(path: Path) -> int:
-    """Calculate total size of a directory tree."""
-    total = 0
-    for item in path.rglob("*"):
-        if item.is_file():
-            with contextlib.suppress(OSError):
-                total += item.stat().st_size
-    return total
 
 
 def list_trash(data_folder: Path) -> list[dict]:
@@ -129,7 +119,7 @@ def list_trash(data_folder: Path) -> list[dict]:
                 meta = json.loads(meta_file.read_text())
             except Exception:
                 meta = {}
-        size = _dir_size(item) if item.is_dir() else item.stat().st_size
+        size = dir_size(item) if item.is_dir() else item.stat().st_size
         out.append(
             {
                 "name": item.name,
