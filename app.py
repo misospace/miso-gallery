@@ -443,9 +443,12 @@ def iter_gallery_folders(limit: int | None = None) -> list[Path]:
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    handle = path.open("rb")
+    try:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    finally:
+        handle.close()
     return digest.hexdigest()
 
 
