@@ -360,9 +360,7 @@ def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, cap
 
     client, data_dir = build_client(monkeypatch, tmp_path)
 
-    caplog.set_level(logging.INFO, logger="miso_gallery")
-    # Patch the logger used by app.log_security_event so caplog captures it.
-    monkeypatch.setattr(app_module.app, "logger", logging.getLogger("miso_gallery"))
+    caplog.set_level(logging.INFO, logger="app")
 
     resp = client.post(
         "/api/llm/bulk-delete",
