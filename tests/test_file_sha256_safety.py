@@ -15,7 +15,7 @@ def test_file_sha256_releases_handle_on_exception(tmp_path, monkeypatch):
     target = tmp_path / "blob.bin"
     target.write_bytes(b"hello world")
 
-    handle = path_open = None
+    handle = None
     real_open = Path.open
 
     class _TrackingHandle:
