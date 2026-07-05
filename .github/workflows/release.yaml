@@ -31,7 +31,17 @@ jobs:
           set -euo pipefail
           TAG="${{ github.event.release.tag_name }}"
           TAG="${TAG#v}"
-          VERSION=$(python -c "import sys; sys.path.insert(0, '.'); import app; print(app.APP_VERSION)")
+          VERSION=$(python3 - <<'PY'
+            import re
+            from pathlib import Path
+
+            text = Path("app.py").read_text()
+            match = re.search(r'^APP_VERSION = \(os\.environ\.get\("APP_VERSION"\) or "([^"]+)"\)\.strip\(\) or "\1"$', text, re.MULTILINE)
+            if not match:
+                raise SystemExit("APP_VERSION is missing or inconsistent")
+            print(match.group(1))
+          PY
+          )
           if [ "$VERSION" != "$TAG" ]; then
             echo "ERROR: APP_VERSION ($VERSION) does not match release tag ($TAG)"
             echo "The APP_VERSION constant in app.py must be bumped to $TAG before releasing."
