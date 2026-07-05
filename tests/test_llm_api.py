@@ -350,3 +350,29 @@ def test_write_only_key_can_access_read_endpoints(monkeypatch, tmp_path):
     # Write key should work on read endpoints (write implies read)
     images = client.get("/api/llm/images", headers=auth_header("write-only-key"))
     assert images.status_code == 200
+
+
+def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, caplog):
+    """Regression for #280: invalid paths in bulk_delete must emit a security event log."""
+    import logging
+
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    caplog.set_level(logging.INFO, logger="app")
+
+    resp = client.post(
+        "/api/llm/bulk-delete",
+        json={
+            "rel_paths": ["../../etc/passwd", "/abs/path.jpg"],
+        },
+        headers=auth_header(),
+    )
+
+    assert resp.status_code == 200
+    # Real file must not be touched.
+    assert (data_dir / "cats" / "cat.jpg").exists()
+    # Security event must be logged for each rejected path.
+    msgs = [r.message for r in caplog.records]
+    assert any('"event":"llm_bulk_delete"' in m and '"outcome":"denied"' in m for m in msgs), (
+        f"Expected llm_bulk_delete denied security event, got: {msgs}"
+    )

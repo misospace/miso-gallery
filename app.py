@@ -424,40 +424,31 @@ def iter_gallery_items(
 
 
 def iter_gallery_media(limit: int | None = None) -> list[Path]:
-    """Iterate gallery media files, bounded by scan limit."""
-    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
-    media: list[Path] = []
-    for item in DATA_FOLDER.rglob("*"):
-        if len(media) >= effective_limit:
-            break
-        try:
-            if is_media_file(item) and not is_excluded_gallery_path(item):
-                media.append(item)
-        except (OSError, PermissionError):
-            continue
-    return sorted(media, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+    """Iterate gallery media files, bounded by scan limit.
+
+    Thin wrapper around :func:`iter_gallery_items` kept for backward
+    compatibility with existing callers.
+    """
+    return iter_gallery_items(kind="media", limit=limit)
 
 
 def iter_gallery_folders(limit: int | None = None) -> list[Path]:
-    """Iterate gallery folders, bounded by scan limit."""
-    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
-    folders: list[Path] = []
-    for item in DATA_FOLDER.rglob("*"):
-        if len(folders) >= effective_limit:
-            break
-        try:
-            if item.is_dir() and not is_excluded_gallery_path(item):
-                folders.append(item)
-        except (OSError, PermissionError):
-            continue
-    return sorted(folders, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+    """Iterate gallery folders, bounded by scan limit.
+
+    Thin wrapper around :func:`iter_gallery_items` kept for backward
+    compatibility with existing callers.
+    """
+    return iter_gallery_items(kind="folders", limit=limit)
 
 
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as handle:
+    handle = path.open("rb")
+    try:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
+    finally:
+        handle.close()
     return digest.hexdigest()
 
 
@@ -862,10 +853,7 @@ def bulk_delete():
     # Guard: preflight folder size estimation (issue #199)
     for rel_path in selected_folders:
         if not sanitize_path(rel_path):
-            # sanitize_path() rejects paths containing ".." or starting with "/" (security.py:sanitize_path)
-            # sanitize_rel_path() further normalizes and double-checks (app.py:sanitize_rel_path)
-
-
+            log_security_event("bulk_delete", "denied", reason="invalid_path", stage="preflight", rel_path=rel_path)
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
@@ -881,6 +869,7 @@ def bulk_delete():
     # Delete selected files
     for rel_path in selected_files:
         if not sanitize_path(rel_path):
+            log_security_event("bulk_delete", "denied", reason="invalid_path", stage="delete_files", rel_path=rel_path)
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         file_path = source_file_path(safe_rel_path)
@@ -891,6 +880,7 @@ def bulk_delete():
     # Delete selected folders
     for rel_path in selected_folders:
         if not sanitize_path(rel_path):
+            log_security_event("bulk_delete", "denied", reason="invalid_path", stage="delete_folders", rel_path=rel_path)
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
@@ -1305,6 +1295,7 @@ def llm_bulk_delete():
     skipped = []
     for rel_path in rel_paths:
         if not isinstance(rel_path, str) or not sanitize_path(rel_path):
+            log_security_event("llm_bulk_delete", "denied", reason="invalid_path", rel_path=str(rel_path))
             skipped.append(str(rel_path))
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
