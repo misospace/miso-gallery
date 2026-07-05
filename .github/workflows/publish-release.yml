@@ -70,14 +70,26 @@ jobs:
         run: |
           set -euo pipefail
           VERSION=$(python3 - <<'PY'
-          import re
-          from pathlib import Path
+          import importlib.util
+          import os
+          import sys
 
-          text = Path("app.py").read_text()
-          match = re.search(r'^APP_VERSION = \(os\.environ\.get\("APP_VERSION"\) or "([^"]+)"\)\.strip\(\) or "\1"$', text, re.MULTILINE)
-          if not match:
-              raise SystemExit("APP_VERSION is missing or inconsistent")
-          print(match.group(1))
+          # Drop any inherited APP_VERSION so the module's own default is used.
+          os.environ.pop("APP_VERSION", None)
+          for mod in ("app", "app_stub"):
+              sys.modules.pop(mod, None)
+
+          spec = importlib.util.spec_from_file_location("app", "app.py")
+          if spec is None or spec.loader is None:
+              raise SystemExit("Cannot locate app.py module spec")
+          module = importlib.util.module_from_spec(spec)
+          sys.modules["app"] = module
+          spec.loader.exec_module(module)
+
+          version = getattr(module, "APP_VERSION", None)
+          if not isinstance(version, str) or not version.strip():
+              raise SystemExit("APP_VERSION is missing or empty in app.py")
+          print(version.strip())
           PY
           )
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
