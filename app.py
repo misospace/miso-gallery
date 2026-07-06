@@ -391,8 +391,8 @@ def iter_gallery_items(
 ) -> list[Path]:
     """Centralized bounded iterator for gallery filesystem scans.
 
-    Replaces duplicated rglob patterns across iter_gallery_media,
-    iter_gallery_folders, folder_cover_rel_path, and recent_view.
+    Replaces duplicated rglob patterns across iter_gallery_items (kind="media"),
+    iter_gallery_items (kind="folders"), folder_cover_rel_path, and recent_view.
 
     Args:
         kind: "media" (files only), "folders" (dirs only), or "all" (both).
@@ -423,24 +423,6 @@ def iter_gallery_items(
     return sorted(results, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
 
 
-def iter_gallery_media(limit: int | None = None) -> list[Path]:
-    """Iterate gallery media files, bounded by scan limit.
-
-    Thin wrapper around :func:`iter_gallery_items` kept for backward
-    compatibility with existing callers.
-    """
-    return iter_gallery_items(kind="media", limit=limit)
-
-
-def iter_gallery_folders(limit: int | None = None) -> list[Path]:
-    """Iterate gallery folders, bounded by scan limit.
-
-    Thin wrapper around :func:`iter_gallery_items` kept for backward
-    compatibility with existing callers.
-    """
-    return iter_gallery_items(kind="folders", limit=limit)
-
-
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     handle = path.open("rb")
@@ -457,11 +439,11 @@ def find_duplicate_media(limit: int | None = None) -> list[dict[str, object]]:
 
     Args:
         limit: Maximum number of duplicate groups to return. Defaults to GALLERY_SCAN_LIMIT.
-               Applied only to the final output (hash phase is bounded by iter_gallery_media).
+               Applied only to the final output (hash phase is bounded by iter_gallery_items(kind="media")).
     """
     effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
     by_size: dict[int, list[Path]] = {}
-    for item in iter_gallery_media():
+    for item in iter_gallery_items(kind="media"):
         try:
             by_size.setdefault(item.stat().st_size, []).append(item)
         except OSError:
@@ -1172,7 +1154,7 @@ def webhook_run_task():
 def llm_images():
     query = request.args.get("q", "").strip().lower()
     page, per_page = _parse_pagination(request.args)
-    all_media = iter_gallery_media()
+    all_media = iter_gallery_items(kind="media")
     filtered: list[dict[str, object]] = []
     for item in all_media:
         rel_path = item.relative_to(DATA_FOLDER).as_posix()
@@ -1204,7 +1186,7 @@ def llm_image(relpath: str):
 @rate_limit(max_requests=60, window=60)
 def llm_recent():
     page, per_page = _parse_pagination(request.args)
-    all_media = sorted(iter_gallery_media(), key=lambda p: p.stat().st_mtime, reverse=True)
+    all_media = sorted(iter_gallery_items(kind="media"), key=lambda p: p.stat().st_mtime, reverse=True)
     paginated, total, pg, pp, has_more = _paginate(all_media, page=page, per_page=per_page)
     # If scan hit the limit, there may be more recent items beyond the scan window
     scan_limited = len(all_media) >= GALLERY_SCAN_LIMIT
@@ -1219,7 +1201,7 @@ def llm_recent():
 def llm_folders():
     page, per_page = _parse_pagination(request.args)
     all_folders = [{"rel_path": "", "name": "", "parent": None}]
-    for folder in iter_gallery_folders():
+    for folder in iter_gallery_items(kind="folders"):
         rel_path = folder.relative_to(DATA_FOLDER).as_posix()
         parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
         all_folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
