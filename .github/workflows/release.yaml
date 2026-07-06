@@ -68,10 +68,9 @@ jobs:
       - name: Check for pre-built image from CI build
         id: prebuilt
         run: |
-          SHORT_SHA="${GITHUB_SHA::7}"
-          if docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:main-${SHORT_SHA}" >/dev/null 2>&1; then
+          if docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:main-${GITHUB_SHA}" >dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Pre-built image main-${SHORT_SHA} available; skipping rebuild."
+            echo "Pre-built image main-${GITHUB_SHA} available; skipping rebuild."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "No pre-built image; will build from source."
@@ -91,15 +90,14 @@ jobs:
       - name: Export digest from pre-built image
         if: steps.prebuilt.outputs.exists == 'true'
         run: |
-          SHORT_SHA="${GITHUB_SHA::7}"
           ARCH="${{ matrix.arch }}"
           mkdir -p ${{ runner.temp }}/digests
           DIGEST=$(docker buildx imagetools inspect --raw \
-            "ghcr.io/${{ github.repository }}:main-${SHORT_SHA}" 2>/dev/null \
+            "ghcr.io/${{ github.repository }}:main-${GITHUB_SHA}" 2>/dev/null \
             | jq -r --arg arch "$ARCH" \
               '.[] | select(.Descriptor.platform.architecture == $arch) | .Descriptor.digest')
           if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-            echo "::error::Could not locate $ARCH digest in pre-built main-${SHORT_SHA} manifest."
+            echo "::error::Could not locate $ARCH digest in pre-built main-${GITHUB_SHA} manifest."
             exit 1
           fi
           touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
