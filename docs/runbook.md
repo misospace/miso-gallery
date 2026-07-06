@@ -319,7 +319,7 @@ Tasks can also be disabled per-task by unsetting the `WEBHOOK_TASK_*` variable.
 
 2. Run the Manual Release workflow from the GitHub Actions tab, or tag and push:
    ```bash
-   npm version 0.1.x --no-git-tag-version
+   sed -i 's|"0\.1\.18"|"0.1.x"|g' app.py
    git add app.py
    git commit -m "chore: bump APP_VERSION to 0.1.x"
    git tag 0.1.x
@@ -330,7 +330,7 @@ Tasks can also be disabled per-task by unsetting the `WEBHOOK_TASK_*` variable.
 
 4. **Version invariant check:** The release workflow now validates that `APP_VERSION` matches the release tag. If they do not match, the build fails with a clear error directing you to run:
    ```bash
-   npm version <TAG> --no-git-tag-version
+   sed -i 's|"0\.1\.18"|"<TAG>"|g' app.py
    ```
 
 ---
