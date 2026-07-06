@@ -16,15 +16,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from flask import Blueprint, jsonify
+from flask import jsonify
 
 DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
 THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
 STORAGE_HEALTH_SIGNAL_FILE = Path(
     os.environ.get("STORAGE_HEALTH_SIGNAL_FILE", "/tmp/miso-gallery-storage-unhealthy.signal")
 )
-
-health_bp = Blueprint("health", __name__)
 
 
 def check_storage_read(path: Path) -> tuple[bool, str]:
@@ -174,7 +172,6 @@ def get_storage_health() -> dict[str, Any]:
     return health
 
 
-@health_bp.route("/health/storage")
 def storage_health() -> tuple[Any, int]:
     """Return storage health status."""
     health = get_storage_health()
@@ -182,7 +179,6 @@ def storage_health() -> tuple[Any, int]:
     return jsonify(health), status_code
 
 
-@health_bp.route("/health/storage/read")
 def storage_health_read() -> tuple[Any, int]:
     """Return read-only storage health status."""
     health = get_storage_read_health()
@@ -197,7 +193,6 @@ def storage_health_read() -> tuple[Any, int]:
     }), status_code
 
 
-@health_bp.route("/health/storage/write")
 def storage_health_write() -> tuple[Any, int]:
     """Return write-capable storage health status."""
     health = get_storage_write_health()
@@ -212,8 +207,6 @@ def storage_health_write() -> tuple[Any, int]:
     }), status_code
 
 
-
-@health_bp.route("/health")
 def health() -> tuple[Any, int]:
     """Return root health endpoint with version and read-only storage status.
 
