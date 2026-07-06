@@ -52,39 +52,35 @@ def _api_header():
     return {"Authorization": "Bearer agent-key"}
 
 
-class TestIterGalleryMediaBounded:
-    """iter_gallery_media should never exceed GALLERY_SCAN_LIMIT."""
+class TestIterGalleryItemsBounded:
+    """iter_gallery_items should never exceed GALLERY_SCAN_LIMIT (issue #247)."""
 
-    def test_respects_scan_limit(self, monkeypatch, tmp_path):
+    def test_media_respects_scan_limit(self, monkeypatch, tmp_path):
         client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
 
         import app as app_module
-        media = app_module.iter_gallery_media()
+        media = app_module.iter_gallery_items(kind="media")
         assert len(media) <= 50  # GALLERY_SCAN_LIMIT is set to 50
 
-    def test_custom_limit_works(self, monkeypatch, tmp_path):
+    def test_media_custom_limit_works(self, monkeypatch, tmp_path):
         client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
 
         import app as app_module
-        media = app_module.iter_gallery_media(limit=10)
+        media = app_module.iter_gallery_items(kind="media", limit=10)
         assert len(media) <= 10
 
-
-class TestIterGalleryFoldersBounded:
-    """iter_gallery_folders should never exceed GALLERY_SCAN_LIMIT."""
-
-    def test_respects_scan_limit(self, monkeypatch, tmp_path):
+    def test_folders_respects_scan_limit(self, monkeypatch, tmp_path):
         client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
 
         import app as app_module
-        folders = app_module.iter_gallery_folders()
+        folders = app_module.iter_gallery_items(kind="folders")
         assert len(folders) <= 50
 
-    def test_custom_limit_works(self, monkeypatch, tmp_path):
+    def test_folders_custom_limit_works(self, monkeypatch, tmp_path):
         client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
 
         import app as app_module
-        folders = app_module.iter_gallery_folders(limit=20)
+        folders = app_module.iter_gallery_items(kind="folders", limit=20)
         assert len(folders) <= 20
 
 
@@ -170,23 +166,19 @@ class TestFindDuplicateMediaBounded:
 
 
 class TestIteratorUnification:
-    """iter_gallery_media and iter_gallery_folders delegate to iter_gallery_items (issue #283)."""
+    """iter_gallery_items is the single bounded iterator (issue #247)."""
 
-    def test_media_wrapper_delegates_to_items(self, monkeypatch, tmp_path):
+    def test_legacy_iter_gallery_media_removed(self, monkeypatch, tmp_path):
         client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
 
         import app as app_module
-        via_media = app_module.iter_gallery_media()
-        via_items = app_module.iter_gallery_items(kind="media")
-        assert via_media == via_items
+        assert not hasattr(app_module, "iter_gallery_media")
 
-    def test_folders_wrapper_delegates_to_items(self, monkeypatch, tmp_path):
+    def test_legacy_iter_gallery_folders_removed(self, monkeypatch, tmp_path):
         client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
 
         import app as app_module
-        via_folders = app_module.iter_gallery_folders()
-        via_items = app_module.iter_gallery_items(kind="folders")
-        assert via_folders == via_items
+        assert not hasattr(app_module, "iter_gallery_folders")
 
     def test_items_kind_distinguishes_media_from_folders(self, monkeypatch, tmp_path):
         client, data_dir = _build_bounded_client(monkeypatch, tmp_path)
