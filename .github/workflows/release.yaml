@@ -32,14 +32,18 @@ jobs:
           TAG="${{ github.event.release.tag_name }}"
           TAG="${TAG#v}"
           VERSION=$(python3 - <<'PY'
-            import re
+            import importlib.util
+            import os
+            import sys
             from pathlib import Path
 
-            text = Path("app.py").read_text()
-            match = re.search(r'^APP_VERSION = \(os\.environ\.get\("APP_VERSION"\) or "([^"]+)"\)\.strip\(\) or "\1"$', text, re.MULTILINE)
-            if not match:
-                raise SystemExit("APP_VERSION is missing or inconsistent")
-            print(match.group(1))
+            sys.path.insert(0, str(Path.cwd()))
+            spec = importlib.util.spec_from_file_location("app", "app.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            version = module.APP_VERSION
+            os.environ["APP_VERSION"] = version
+            print(version)
           PY
           )
           if [ "$VERSION" != "$TAG" ]; then
