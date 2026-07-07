@@ -4,11 +4,39 @@ import contextlib
 import json
 import shutil
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 TRASH_DIR_NAME = ".trash"
 META_SUFFIX = ".meta.json"
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _from_timestamp(ts: float) -> datetime:
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
+def _parse_deleted_at(raw: str) -> datetime:
+    """Parse a stored deleted_at timestamp, treating naive values as UTC.
+
+    Legacy meta files (written before timezone-aware timestamps) lack an
+    offset; normalize them so comparisons stay consistent.
+    """
+    dt = datetime.fromisoformat(raw)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _unique_trash_dest(td: Path, name: str, ts: int) -> Path:
+    """Pick a non-clashing destination path under the trash dir."""
+    dest = td / f"{ts}_{name}"
+    i = 1
+    while dest.exists():
+        dest = td / f"{ts}_{i}_{name}"
+        i += 1
+    return dest
 
 
 def dir_size(path: Path) -> int:
@@ -56,54 +84,39 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
     ts = int(time.time())
 
     if file_path.is_file():
-        dest = td / f"{ts}_{file_path.name}"
-        i = 1
-        while dest.exists():
-            dest = td / f"{ts}_{i}_{file_path.name}"
-            i += 1
-
+        dest = _unique_trash_dest(td, file_path.name, ts)
         try:
             file_path.rename(dest)
-            meta = {
-                "original": rel,
-                "deleted_at": datetime.utcnow().isoformat(),
-                "size": dest.stat().st_size,
-            }
-            _meta_path(dest).write_text(json.dumps(meta))
-            return True
         except OSError:
             return False
-
-    if file_path.is_dir():
-        dest = td / f"{ts}_{file_path.name}"
-        i = 1
-        while dest.exists():
-            dest = td / f"{ts}_{i}_{file_path.name}"
-            i += 1
-
+    elif file_path.is_dir():
+        dest = _unique_trash_dest(td, file_path.name, ts)
         try:
             # Prefer atomic rename (same filesystem) for immediate move.
             # Fall back to copytree+rmtree only when cross-device rename fails.
             try:
                 file_path.rename(dest)
             except OSError:
-                # Cross-device or other OS-level failure; use copy-based move
                 shutil.copytree(file_path, dest)
                 shutil.rmtree(file_path)
-            meta = {
-                "original": rel,
-                "deleted_at": datetime.utcnow().isoformat(),
-                "size": dir_size(dest),
-            }
-            _meta_path(dest).write_text(json.dumps(meta))
-            return True
         except OSError:
             # Clean up partial copy on failure
             if dest.exists():
                 shutil.rmtree(dest, ignore_errors=True)
             return False
+    else:
+        return False
 
-    return False
+    try:
+        meta = {
+            "original": rel,
+            "deleted_at": _utcnow().isoformat(),
+            "size": dir_size(dest) if dest.is_dir() else dest.stat().st_size,
+        }
+        _meta_path(dest).write_text(json.dumps(meta))
+        return True
+    except OSError:
+        return False
 
 
 def list_trash(data_folder: Path) -> list[dict]:
@@ -124,7 +137,7 @@ def list_trash(data_folder: Path) -> list[dict]:
             {
                 "name": item.name,
                 "original": meta.get("original", "unknown"),
-                "deleted_at": meta.get("deleted_at", datetime.fromtimestamp(item.stat().st_mtime).isoformat()),
+                "deleted_at": meta.get("deleted_at", _from_timestamp(item.stat().st_mtime).isoformat()),
                 "size": size,
             }
         )
@@ -179,17 +192,17 @@ def empty_trash(data_folder: Path) -> int:
 
 def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
     td = trash_dir(data_folder)
-    cutoff = datetime.utcnow() - timedelta(days=retention_days)
+    cutoff = _utcnow() - timedelta(days=retention_days)
     deleted = 0
     for item in td.iterdir():
         if item.name.endswith(META_SUFFIX):
             continue
         meta_file = _meta_path(item)
-        deleted_at = datetime.fromtimestamp(item.stat().st_mtime)
+        deleted_at = _from_timestamp(item.stat().st_mtime)
         if meta_file.exists():
             try:
                 meta = json.loads(meta_file.read_text())
-                deleted_at = datetime.fromisoformat(meta.get("deleted_at", deleted_at.isoformat()))
+                deleted_at = _parse_deleted_at(meta.get("deleted_at", deleted_at.isoformat()))
             except Exception:
                 pass
         if deleted_at < cutoff:

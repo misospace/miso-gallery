@@ -170,6 +170,11 @@ def _paginate(items, page=1, per_page=GALLERY_PAGE_DEFAULT):
     return paginated, total, page, per_page, has_more
 
 
+def _apply_scan_limit(has_more: bool, scanned_count: int) -> bool:
+    """More results may exist beyond the page when the scan hit GALLERY_SCAN_LIMIT."""
+    return has_more or scanned_count >= GALLERY_SCAN_LIMIT
+
+
 def _parse_pagination(args):
     """Parse pagination query params from request.args. Returns (page, per_page)."""
     try:
@@ -209,8 +214,6 @@ def _render_task_command(template: str, params: dict[str, object]) -> str:
         raise ValueError("missing required params for command template")
 
     return rendered
-
-
 
 
 def ensure_thumbnail_cache_dir() -> None:
@@ -654,8 +657,6 @@ def images(filename: str):
 @app.route("/<path:subpath>")
 @require_auth
 def index(subpath: str = ""):
-    import time
-
     # Search query for filtering items
     search_query = request.args.get('q', '').strip().lower()
     bulk_state = request.args.get('bulk_state', '').strip().lower()
@@ -775,13 +776,14 @@ def index(subpath: str = ""):
 def thumb(filename: str):
     rel_path = sanitize_rel_path(filename)
     source_path = source_file_path(rel_path)
-    if not source_path.exists() or (source_path.suffix.lower() not in IMAGE_EXTENSIONS and source_path.suffix.lower() not in VIDEO_EXTENSIONS):
+    if not source_path.exists() or not is_media_file(source_path):
         return "Not found", 404
 
     ensure_thumbnail_cache_dir()
     cached_name = thumbnail_filename(rel_path, source_path)
     cached_path = THUMBNAIL_CACHE_DIR / cached_name
 
+    # Videos are served directly without thumbnailing.
     if source_path.suffix.lower() in VIDEO_EXTENSIONS:
         return send_from_directory(str(DATA_FOLDER), rel_path)
 
@@ -948,8 +950,6 @@ def add_tag():
 @rate_limit(max_requests=30, window=60)
 def recent_view():
     """Show recently added images sorted by modification time (newest first)."""
-    import time
-
     max_items = 50
     images = []
     excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
@@ -1186,10 +1186,7 @@ def llm_images():
             continue
         filtered.append(media_metadata(item))
     paginated, total, pg, pp, has_more = _paginate(filtered, page=page, per_page=per_page)
-    # If scan hit the limit, there may be more unscanned items matching the query
-    scan_limited = len(all_media) >= GALLERY_SCAN_LIMIT
-    if scan_limited and not has_more:
-        has_more = True
+    has_more = _apply_scan_limit(has_more, len(all_media))
     return {"images": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
 
 
@@ -1212,10 +1209,7 @@ def llm_recent():
     page, per_page = _parse_pagination(request.args)
     all_media = sorted(iter_gallery_items(kind="media"), key=lambda p: p.stat().st_mtime, reverse=True)
     paginated, total, pg, pp, has_more = _paginate(all_media, page=page, per_page=per_page)
-    # If scan hit the limit, there may be more recent items beyond the scan window
-    scan_limited = len(all_media) >= GALLERY_SCAN_LIMIT
-    if scan_limited and not has_more:
-        has_more = True
+    has_more = _apply_scan_limit(has_more, len(all_media))
     return {"images": [media_metadata(item) for item in paginated], "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
 
 
@@ -1230,9 +1224,7 @@ def llm_folders():
         parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
         all_folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
     paginated, total, pg, pp, has_more = _paginate(all_folders, page=page, per_page=per_page)
-    scan_limited = len(all_folders) - 1 >= GALLERY_SCAN_LIMIT  # -1 for root entry
-    if scan_limited and not has_more:
-        has_more = True
+    has_more = _apply_scan_limit(has_more, len(all_folders) - 1)  # -1 for root entry
     return {"folders": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
 
 
