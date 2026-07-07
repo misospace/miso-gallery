@@ -32,14 +32,18 @@ jobs:
           TAG="${{ github.event.release.tag_name }}"
           TAG="${TAG#v}"
           VERSION=$(python3 - <<'PY'
-            import re
+            import importlib.util
+            import os
+            import sys
             from pathlib import Path
 
-            text = Path("app.py").read_text()
-            match = re.search(r'^APP_VERSION = \(os\.environ\.get\("APP_VERSION"\) or "([^"]+)"\)\.strip\(\) or "\1"$', text, re.MULTILINE)
-            if not match:
-                raise SystemExit("APP_VERSION is missing or inconsistent")
-            print(match.group(1))
+            sys.path.insert(0, str(Path.cwd()))
+            spec = importlib.util.spec_from_file_location("app", "app.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            version = module.APP_VERSION
+            os.environ["APP_VERSION"] = version
+            print(version)
           PY
           )
           if [ "$VERSION" != "$TAG" ]; then
@@ -65,8 +69,20 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
 
+      - name: Check for pre-built image from CI build
+        id: prebuilt
+        run: |
+          if docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:main-${GITHUB_SHA}" >dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "Pre-built image main-${GITHUB_SHA} available; skipping rebuild."
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "No pre-built image; will build from source."
+          fi
+
       - name: Build and push Docker image
         id: build
+        if: steps.prebuilt.outputs.exists != 'true'
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
@@ -75,7 +91,23 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           outputs: type=image,push-by-digest=true,name-canonical=true,push=true
 
+      - name: Export digest from pre-built image
+        if: steps.prebuilt.outputs.exists == 'true'
+        run: |
+          ARCH="${{ matrix.arch }}"
+          mkdir -p ${{ runner.temp }}/digests
+          DIGEST=$(docker buildx imagetools inspect --raw \
+            "ghcr.io/${{ github.repository }}:main-${GITHUB_SHA}" 2>/dev/null \
+            | jq -r --arg arch "$ARCH" \
+              '.[] | select(.Descriptor.platform.architecture == $arch) | .Descriptor.digest')
+          if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
+            echo "::error::Could not locate $ARCH digest in pre-built main-${GITHUB_SHA} manifest."
+            exit 1
+          fi
+          touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
+
       - name: Export digest
+        if: steps.prebuilt.outputs.exists != 'true'
         run: |
           mkdir -p ${{ runner.temp }}/digests
           digest="${{ steps.build.outputs.digest }}"
@@ -122,12 +154,13 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |-
             type=semver,pattern={{version}}
+            type=raw,value=latest
 
       - name: Create manifest list and push
         working-directory: ${{ runner.temp }}/digests
         if: github.event_name != 'pull_request'
         run: |
-          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+          docker buildx imagetools create $(jq -cr '.tags | map("-t " + .) | join(" ")' <<<"$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf 'ghcr.io/${{ github.repository }}@sha256:%s ' *)
 
       - name: Inspect image
