@@ -241,13 +241,33 @@ def generate_thumbnail(source_path: Path, output_path: Path) -> None:
         img.save(output_path, format="JPEG", quality=85, optimize=True)
 
 
-def remove_thumbnail_cache_for(rel_path: str) -> None:
+def batch_remove_thumbnails(rel_paths: list[str]) -> None:
+    """Remove all cached thumbnails matching any of the given rel_paths in a single dir walk.
+
+    Replaces per-path loops (issue #249). One call == one `iterdir()` regardless
+    of how many paths are passed.
+    """
+    if not rel_paths:
+        return
     ensure_thumbnail_cache_dir()
-    safe_name = sanitize_rel_path(rel_path).replace("/", "__")
+    prefixes = {
+        sanitize_rel_path(rel_path).replace("/", "__") + "."
+        for rel_path in rel_paths
+    }
     for cached_file in THUMBNAIL_CACHE_DIR.iterdir():
-        if cached_file.name.startswith(f"{safe_name}."):
+        name = cached_file.name
+        if any(name.startswith(prefix) for prefix in prefixes):
             with contextlib.suppress(OSError):
                 cached_file.unlink()
+
+
+def remove_thumbnail_cache_for(rel_path: str) -> None:
+    """Remove cached thumbnails for a single rel_path.
+
+    Thin wrapper over batch_remove_thumbnails so existing single-path callers
+    keep working; bulk callers should call batch_remove_thumbnails directly.
+    """
+    batch_remove_thumbnails([rel_path])
 
 
 def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
@@ -847,6 +867,7 @@ def bulk_delete():
 
     moved_files = 0
     moved_folders = 0
+    purged_thumbnails: list[str] = []
 
     # Delete selected files
     for rel_path in selected_files:
@@ -857,7 +878,7 @@ def bulk_delete():
         file_path = source_file_path(safe_rel_path)
         if file_path.exists() and file_path.is_file() and move_to_trash(file_path, DATA_FOLDER):
             moved_files += 1
-            remove_thumbnail_cache_for(safe_rel_path)
+            purged_thumbnails.append(safe_rel_path)
 
     # Delete selected folders
     for rel_path in selected_folders:
@@ -868,7 +889,10 @@ def bulk_delete():
         folder_path = DATA_FOLDER / safe_rel_path
         if folder_path.exists() and folder_path.is_dir() and move_to_trash(folder_path, DATA_FOLDER):
             moved_folders += 1
-            remove_thumbnail_cache_for(safe_rel_path)
+            purged_thumbnails.append(safe_rel_path)
+
+    if purged_thumbnails:
+        batch_remove_thumbnails(purged_thumbnails)
 
     outcome = "success" if (moved_files or moved_folders) else "noop"
     log_security_event(
@@ -1275,6 +1299,7 @@ def llm_bulk_delete():
     dry_run = bool(payload.get("dry_run", False))
     deleted = []
     skipped = []
+    purged_thumbnails: list[str] = []
     for rel_path in rel_paths:
         if not isinstance(rel_path, str) or not sanitize_path(rel_path):
             log_security_event("llm_bulk_delete", "denied", reason="invalid_path", rel_path=str(rel_path))
@@ -1288,10 +1313,12 @@ def llm_bulk_delete():
         if dry_run:
             deleted.append(safe_rel_path)
         elif move_to_trash(media_path, DATA_FOLDER):
-            remove_thumbnail_cache_for(safe_rel_path)
+            purged_thumbnails.append(safe_rel_path)
             deleted.append(safe_rel_path)
         else:
             skipped.append(safe_rel_path)
+    if purged_thumbnails:
+        batch_remove_thumbnails(purged_thumbnails)
     log_security_event("llm_bulk_delete", "success" if (deleted and not dry_run) else "dry_run", deleted=len(deleted), skipped=len(skipped), dry_run=dry_run)
     return {"deleted": deleted, "skipped": skipped, "deleted_count": len(deleted), "skipped_count": len(skipped), "dry_run": dry_run}
 
@@ -1320,8 +1347,9 @@ def llm_dedup():
             for rel_path in group["duplicates"]:
                 media_path = source_file_path(str(rel_path))
                 if media_path.exists() and move_to_trash(media_path, DATA_FOLDER):
-                    remove_thumbnail_cache_for(str(rel_path))
                     removed.append(str(rel_path))
+        if removed:
+            batch_remove_thumbnails([str(r) for r in removed])
     log_security_event("llm_dedup", "success", groups=len(groups), removed=len(removed), dry_run=not remove)
     if remove:
         return {"duplicate_groups": groups, "group_count": len(groups), "dry_run": False, "removed": removed, "deleted_count": len(removed)}
