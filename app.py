@@ -45,6 +45,7 @@ from security import (
     sanitize_path,
     validate_csrf,
 )
+from tag_store import TagStore
 from trash import (
     dir_size,
     empty_trash,
@@ -62,6 +63,7 @@ with open(SERVICE_WORKER_PATH, "r") as _f:
 
 DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
 THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
+TAG_DATABASE = Path(os.environ.get("TAG_DATABASE", str(DATA_FOLDER / ".miso-gallery-tags.sqlite3")))
 
 
 def resolve_secret_key() -> str:
@@ -390,7 +392,17 @@ def is_excluded_gallery_path(path: Path) -> bool:
     return any(part in {THUMBNAIL_CACHE_DIR.name, ".trash"} or part.startswith(".") for part in rel_parts)
 
 
-def media_metadata(path: Path) -> dict[str, object]:
+def relative_media_path(path: Path) -> str:
+    """Return the stable gallery-relative identifier used by API metadata."""
+    return path.relative_to(DATA_FOLDER).as_posix()
+
+
+def _tag_store() -> TagStore:
+    """Build a store for the configured path without writing during app import."""
+    return TagStore(TAG_DATABASE)
+
+
+def media_metadata(path: Path, tags: list[str] | None = None) -> dict[str, object]:
     rel_path = path.relative_to(DATA_FOLDER).as_posix()
     stat = path.stat()
     media_type = "video" if path.suffix.lower() in VIDEO_EXTENSIONS else "image"
@@ -398,6 +410,7 @@ def media_metadata(path: Path) -> dict[str, object]:
         "name": path.name,
         "rel_path": rel_path,
         "media_type": media_type,
+        "tags": _tag_store().get_tags(rel_path) if tags is None else tags,
         "size": stat.st_size,
         "size_human": format_size(stat.st_size),
         "modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
@@ -934,8 +947,7 @@ def add_tag():
     if not rel_path or not tag:
         return {"error": "Missing rel_path or tag"}, 400
 
-    # For now, just log the tag assignment (no backend storage yet)
-    # This is a UI-first partial fix for #91
+    _tag_store().add_tags(rel_path, [tag])
     log_security_event(
         "add_tag",
         "success",
@@ -1179,15 +1191,22 @@ def llm_images():
     query = request.args.get("q", "").strip().lower()
     page, per_page = _parse_pagination(request.args)
     all_media = iter_gallery_items(kind="media")
-    filtered: list[dict[str, object]] = []
+    filtered: list[Path] = []
     for item in all_media:
         rel_path = item.relative_to(DATA_FOLDER).as_posix()
         if query and query not in rel_path.lower() and query not in item.name.lower():
             continue
-        filtered.append(media_metadata(item))
+        filtered.append(item)
     paginated, total, pg, pp, has_more = _paginate(filtered, page=page, per_page=per_page)
     has_more = _apply_scan_limit(has_more, len(all_media))
-    return {"images": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    tags_by_path = _tag_store().get_tags_for_paths(
+        [relative_media_path(item) for item in paginated]
+    )
+    images = [
+        media_metadata(item, tags_by_path.get(relative_media_path(item), []))
+        for item in paginated
+    ]
+    return {"images": images, "count": len(images), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
 
 
 @app.route("/api/llm/image/<path:relpath>")
@@ -1210,7 +1229,14 @@ def llm_recent():
     all_media = sorted(iter_gallery_items(kind="media"), key=lambda p: p.stat().st_mtime, reverse=True)
     paginated, total, pg, pp, has_more = _paginate(all_media, page=page, per_page=per_page)
     has_more = _apply_scan_limit(has_more, len(all_media))
-    return {"images": [media_metadata(item) for item in paginated], "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    tags_by_path = _tag_store().get_tags_for_paths(
+        [relative_media_path(item) for item in paginated]
+    )
+    images = [
+        media_metadata(item, tags_by_path.get(relative_media_path(item), []))
+        for item in paginated
+    ]
+    return {"images": images, "count": len(images), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
 
 
 @app.route("/api/llm/folders")
@@ -1229,7 +1255,7 @@ def llm_folders():
 
 
 @app.route("/api/llm/tags", methods=["POST"])
-@require_api_key_with_scope("read")
+@require_api_key_with_scope("write")
 @rate_limit(max_requests=30, window=60)
 def llm_tags():
     payload = request.get_json(silent=True) or {}
@@ -1242,6 +1268,8 @@ def llm_tags():
         tags = [tags]
     if not isinstance(rel_paths, list) or not isinstance(tags, list) or action not in {"add", "remove"}:
         return {"error": "rel_paths/images, tags, and action=add|remove are required"}, 400
+    normalized_tags = sorted({str(tag).strip() for tag in tags if str(tag).strip()})
+    store = _tag_store()
     updated = []
     for rel_path in rel_paths:
         if not isinstance(rel_path, str) or not sanitize_path(rel_path):
@@ -1249,9 +1277,13 @@ def llm_tags():
         safe_rel_path = sanitize_rel_path(rel_path)
         media_path = source_file_path(safe_rel_path)
         if media_path.exists() and is_media_file(media_path) and not is_excluded_gallery_path(media_path):
+            if action == "remove":
+                store.remove_tags(safe_rel_path, normalized_tags)
+            else:
+                store.add_tags(safe_rel_path, normalized_tags)
             updated.append(safe_rel_path)
-    log_security_event("llm_tags", "success", action=action, updated=len(updated), tags=[str(tag) for tag in tags])
-    return {"status": "ok", "action": action, "updated": updated, "tags": [str(tag) for tag in tags]}
+    log_security_event("llm_tags", "success", action=action, updated=len(updated), tags=normalized_tags)
+    return {"status": "ok", "action": action, "updated": updated, "tags": normalized_tags}
 
 
 @app.route("/api/llm/delete", methods=["POST"])
