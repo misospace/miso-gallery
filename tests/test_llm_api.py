@@ -96,6 +96,67 @@ def test_llm_tags_and_task_run(monkeypatch, tmp_path):
     assert task.get_json()["stdout"].strip() == "hello"
 
 
+def test_tags_persist_and_are_included_in_image_metadata(monkeypatch, tmp_path):
+    import importlib
+
+    tag_database = tmp_path / "tags.sqlite3"
+    client, _ = build_client(
+        monkeypatch,
+        tmp_path,
+        extra_env={"TAG_DATABASE": str(tag_database)},
+    )
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["csrf_token"] = "test-csrf-token"
+
+    browser_tag = client.post(
+        "/tag",
+        data={
+            "rel_path": "sample.png",
+            "tag": " favorite ",
+            "csrf_token": "test-csrf-token",
+        },
+    )
+    assert browser_tag.status_code == 200
+
+    api_tag = client.post(
+        "/api/llm/tags",
+        json={
+            "images": ["sample.png"],
+            "tags": ["portrait", " portrait "],
+            "action": "add",
+        },
+        headers=auth_header(),
+    )
+    assert api_tag.status_code == 200
+    assert api_tag.get_json()["tags"] == ["portrait"]
+    assert tag_database.exists()
+
+    # Recreate the application to prove the tags came from durable storage.
+    import app
+
+    reloaded_app = importlib.reload(app)
+    reloaded_client = reloaded_app.app.test_client()
+    images = reloaded_client.get(
+        "/api/llm/images?q=sample",
+        headers=auth_header(),
+    )
+    assert images.status_code == 200
+    assert images.get_json()["images"][0]["tags"] == ["favorite", "portrait"]
+
+    remove_tag = reloaded_client.post(
+        "/api/llm/tags",
+        json={"rel_path": "sample.png", "tag": "portrait", "action": "remove"},
+        headers=auth_header(),
+    )
+    assert remove_tag.status_code == 200
+    image = reloaded_client.get(
+        "/api/llm/image/sample.png",
+        headers=auth_header(),
+    )
+    assert image.get_json()["tags"] == ["favorite"]
+
+
 def test_read_key_rejected_from_task_run(monkeypatch, tmp_path):
     monkeypatch.setenv("WEBHOOK_ENABLED", "true")
     monkeypatch.setenv("WEBHOOK_TASK_ECHO", "python3 -c \"import sys;print(sys.argv[1])\" {params.value}")
@@ -153,6 +214,14 @@ def test_read_key_rejected_from_write_endpoints(monkeypatch, tmp_path):
     # Read key should NOT work on bulk-delete
     bulk = client.post("/api/llm/bulk-delete", json={"rel_paths": ["cats/cat.jpg"]}, headers=auth_header("read-only-key"))
     assert bulk.status_code == 401
+
+    # Tag changes are writes even though tags appear in read metadata.
+    tags = client.post(
+        "/api/llm/tags",
+        json={"rel_path": "sample.png", "tag": "miso", "action": "add"},
+        headers=auth_header("read-only-key"),
+    )
+    assert tags.status_code == 401
 
 
 def test_llm_bulk_delete_dry_run(monkeypatch, tmp_path):

@@ -51,6 +51,7 @@ services:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATA_FOLDER` | No | `/data` | Path to image directory |
+| `TAG_DATABASE` | No | `$DATA_FOLDER/.miso-gallery-tags.sqlite3` | Path to the SQLite tag database |
 | `IMAGE_BASE_URL` | No | - | Base URL for shareable links |
 | `PORT` | No | `5000` | Server port |
 
