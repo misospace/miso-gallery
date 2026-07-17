@@ -142,7 +142,12 @@ return 1
 
 
 FALLBACK_LIMITER = InMemoryRateLimiter()
-ROUTE_LIMIT_OVERRIDES = _load_route_overrides()
+
+# Lazy-loaded route overrides and primary limiter so that:
+# - tests can inject mock limiters without module-level patching
+# - environment changes can be picked up via refresh_route_overrides() / refresh_primary_limiter()
+_route_limit_overrides: dict[str, RateLimitConfig] | None = None
+_primary_limiter: RedisRateLimiter | InMemoryRateLimiter | None = None
 
 
 def _build_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
@@ -165,7 +170,34 @@ def _build_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
         return FALLBACK_LIMITER
 
 
-PRIMARY_LIMITER = _build_primary_limiter()
+def get_route_limit_overrides() -> dict[str, RateLimitConfig]:
+    """Return the current route limit overrides, loading lazily on first call."""
+    global _route_limit_overrides
+    if _route_limit_overrides is None:
+        _route_limit_overrides = _load_route_overrides()
+    return _route_limit_overrides
+
+
+def refresh_route_overrides() -> dict[str, RateLimitConfig]:
+    """Reload route limit overrides from the current environment."""
+    global _route_limit_overrides
+    _route_limit_overrides = _load_route_overrides()
+    return _route_limit_overrides
+
+
+def get_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
+    """Return the primary rate limiter, building it lazily on first call."""
+    global _primary_limiter
+    if _primary_limiter is None:
+        _primary_limiter = _build_primary_limiter()
+    return _primary_limiter
+
+
+def refresh_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
+    """Rebuild the primary rate limiter from the current environment."""
+    global _primary_limiter
+    _primary_limiter = _build_primary_limiter()
+    return _primary_limiter
 
 
 def _is_trusted_source(source_addr: str | None) -> bool:
@@ -253,7 +285,7 @@ def _client_ip() -> str:
 
 
 def _effective_config(endpoint: str, default_max_requests: int, default_window: int) -> RateLimitConfig:
-    override = ROUTE_LIMIT_OVERRIDES.get(endpoint)
+    override = get_route_limit_overrides().get(endpoint)
     if override:
         return override
     return RateLimitConfig(max_requests=default_max_requests, window=default_window)
@@ -273,7 +305,7 @@ def rate_limit(max_requests: int = 30, window: int = 60):
             key = f"{_client_ip()}:{endpoint}"
 
             try:
-                allowed = PRIMARY_LIMITER.allow(key, config.max_requests, config.window)
+                allowed = get_primary_limiter().allow(key, config.max_requests, config.window)
             except Exception as exc:  # pragma: no cover - runtime resilience
                 logger.warning("Primary limiter failed (%s); using in-memory fallback", exc)
                 allowed = FALLBACK_LIMITER.allow(key, config.max_requests, config.window)

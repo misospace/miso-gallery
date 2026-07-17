@@ -455,3 +455,60 @@ def test_load_route_overrides_blank_endpoint_key_skipped(monkeypatch):
     overrides = _load_route_overrides()
     assert "" not in overrides
     assert "auth" in overrides
+
+
+def test_get_route_limit_overrides_lazy(monkeypatch):
+    """get_route_limit_overrides loads lazily on first call."""
+    import security
+
+    monkeypatch.setenv("RATE_LIMIT_ROUTE_LIMITS", json.dumps({"test": {"max_requests": 1, "window": 10}}))
+
+    # Force a fresh load by resetting the module-level cache
+    security._route_limit_overrides = None
+
+    overrides = security.get_route_limit_overrides()
+    assert "test" in overrides
+    assert overrides["test"].max_requests == 1
+
+
+def test_refresh_route_overrides_picks_up_env_change(monkeypatch):
+    """refresh_route_overrides reloads from the current environment."""
+    import security
+
+    monkeypatch.setenv("RATE_LIMIT_ROUTE_LIMITS", json.dumps({"initial": {"max_requests": 5, "window": 60}}))
+    security._route_limit_overrides = None
+
+    overrides1 = security.get_route_limit_overrides()
+    assert "initial" in overrides1
+
+    # Change the environment variable and refresh
+    monkeypatch.setenv("RATE_LIMIT_ROUTE_LIMITS", json.dumps({"updated": {"max_requests": 10, "window": 120}}))
+    overrides2 = security.refresh_route_overrides()
+    assert "updated" in overrides2
+    assert "initial" not in overrides2
+
+
+def test_get_primary_limiter_lazy(monkeypatch):
+    """get_primary_limiter builds lazily on first call."""
+    import security
+
+    # Force a fresh build by resetting the module-level cache
+    security._primary_limiter = None
+
+    limiter = security.get_primary_limiter()
+    assert limiter is not None
+    assert hasattr(limiter, "allow")
+
+
+def test_refresh_primary_limiter_rebuilds(monkeypatch):
+    """refresh_primary_limiter rebuilds from the current environment."""
+    import security
+
+    # Force a fresh build by resetting the module-level cache
+    security._primary_limiter = None
+
+    limiter1 = security.get_primary_limiter()
+    assert limiter1 is not None
+
+    limiter2 = security.refresh_primary_limiter()
+    assert limiter2 is not None
