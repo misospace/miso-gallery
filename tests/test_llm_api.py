@@ -445,3 +445,19 @@ def test_bulk_delete_invalid_path_logs_security_event(monkeypatch, tmp_path, cap
     assert any('"event":"llm_bulk_delete"' in m and '"outcome":"denied"' in m for m in msgs), (
         f"Expected llm_bulk_delete denied security event, got: {msgs}"
     )
+
+
+def test_tag_store_is_singleton(monkeypatch, tmp_path):
+    """Regression for #327: _tag_store() must return the same TagStore instance per process."""
+    from app import _tag_store
+
+    # Reset any cached instance from previous tests
+    if hasattr(_tag_store, "_instance"):
+        delattr(_tag_store, "_instance")
+
+    monkeypatch.setenv("TAG_DATABASE", str(tmp_path / "tags.db"))
+
+    store1 = _tag_store()
+    store2 = _tag_store()
+
+    assert store1 is store2, "_tag_store() should return the same instance on repeated calls"
