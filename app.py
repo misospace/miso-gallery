@@ -398,8 +398,15 @@ def relative_media_path(path: Path) -> str:
 
 
 def _tag_store() -> TagStore:
-    """Build a store for the configured path without writing during app import."""
-    return TagStore(TAG_DATABASE)
+    """Get or create the singleton TagStore instance.
+
+    Caches the TagStore at module scope so only one SQLite connection is opened
+    per process, avoiding WAL contention and file-descriptor churn under
+    Gunicorn multi-worker deployments.
+    """
+    if not hasattr(_tag_store, "_instance"):
+        _tag_store._instance = TagStore(TAG_DATABASE)
+    return _tag_store._instance
 
 
 def media_metadata(path: Path, tags: list[str] | None = None) -> dict[str, object]:
