@@ -1,4 +1,5 @@
 import re
+from unittest.mock import patch
 
 from PIL import Image
 
@@ -66,3 +67,14 @@ def test_recent_cards_render_details_panel(monkeypatch, tmp_path):
     assert "content-visibility:auto" in html
     assert "contain-intrinsic-size:260px 320px" in html
     assert "fetchpriority=\"low\"" in html
+
+
+def test_recent_view_uses_iter_gallery_items(monkeypatch, tmp_path):
+    """Regression test: recent_view must delegate to iter_gallery_items, not duplicate scan logic."""
+    client = _build_client(monkeypatch, tmp_path)
+
+    with patch("app.iter_gallery_items", wraps=None) as mock_iter:
+        mock_iter.return_value = []  # Return empty so no items are processed
+        resp = client.get("/recent")
+        assert resp.status_code == 200
+        mock_iter.assert_called_once_with(kind="media")

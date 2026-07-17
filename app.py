@@ -971,60 +971,37 @@ def recent_view():
     """Show recently added images sorted by modification time (newest first)."""
     max_items = 50
     images = []
-    excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
 
-    def is_image(path: Path) -> bool:
-        return path.suffix.lower() in IMAGE_EXTENSIONS
-
-    def is_excluded_from_recent(path: Path) -> bool:
-        rel_parts = path.relative_to(DATA_FOLDER).parts
-        return any(part in excluded_dirs for part in rel_parts)
-
-    scan_count = 0
-    for item in DATA_FOLDER.rglob("*"):
-        # Bound the scan to prevent blocking on large galleries/NFS.
-        scan_count += 1
-        if scan_count > GALLERY_SCAN_LIMIT:
-            break
+    for path in iter_gallery_items(kind="media"):
         try:
-            if not item.is_file() or not is_image(item):
-                continue
-            if is_excluded_from_recent(item):
-                continue
-            if item.name.startswith("."):
-                continue
-
-            try:
-                mtime = item.stat().st_mtime
-                size = item.stat().st_size
-            except (OSError, PermissionError):
-                # Skip items that become inaccessible during NFS attribute cache inconsistency
-                continue
-
-            try:
-                rel_path = item.relative_to(DATA_FOLDER).as_posix()
-            except (OSError, ValueError):
-                continue
-
-            date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
-
-            # Get folder path for navigation
-            folder_path = os.path.dirname(rel_path)
-            folder_url = url_for("index", subpath=folder_path) if folder_path else url_for("index")
-
-            images.append({
-                "name": item.name,
-                "rel_path": rel_path,
-                "url": url_for("view", filename=rel_path),
-                "thumb": url_for("thumb", filename=rel_path),
-                "added": date_str,
-                "size": format_size(size),
-                "mtime": mtime,
-                "folder_url": folder_url,
-            })
+            stat = path.stat()
+            mtime = stat.st_mtime
+            size = stat.st_size
         except (OSError, PermissionError):
-            # Skip items that raise during iteration
+            # Skip items that become inaccessible during NFS attribute cache inconsistency
             continue
+
+        try:
+            rel_path_str = path.relative_to(DATA_FOLDER).as_posix()
+        except (OSError, ValueError):
+            continue
+
+        date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
+
+        # Get folder path for navigation
+        folder_path = os.path.dirname(rel_path_str)
+        folder_url = url_for("index", subpath=folder_path) if folder_path else url_for("index")
+
+        images.append({
+            "name": path.name,
+            "rel_path": rel_path_str,
+            "url": url_for("view", filename=rel_path_str),
+            "thumb": url_for("thumb", filename=rel_path_str),
+            "added": date_str,
+            "size": format_size(size),
+            "mtime": mtime,
+            "folder_url": folder_url,
+        })
 
     images.sort(key=lambda x: x["mtime"], reverse=True)
     images = images[:max_items]
