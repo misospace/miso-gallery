@@ -157,6 +157,81 @@ def test_tags_persist_and_are_included_in_image_metadata(monkeypatch, tmp_path):
     assert image.get_json()["tags"] == ["favorite"]
 
 
+def test_add_tag_batch_inserts_multiple_tags_single_request(monkeypatch, tmp_path):
+    """Regression test for #330: /tag route accepts multiple tags via tags[] form field."""
+    import importlib
+
+    tag_database = tmp_path / "tags.sqlite3"
+    client, _ = build_client(
+        monkeypatch,
+        tmp_path,
+        extra_env={"TAG_DATABASE": str(tag_database)},
+    )
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["csrf_token"] = "test-csrf-token"
+
+    # Batch insert multiple tags in a single request using tags[] form field
+    batch_tag = client.post(
+        "/tag",
+        data={
+            "rel_path": "sample.png",
+            "tags[]": ["alpha", "beta", "gamma"],
+            "csrf_token": "test-csrf-token",
+        },
+    )
+    assert batch_tag.status_code == 200
+
+    # Verify all tags were added via durable storage
+    import app
+
+    reloaded_app = importlib.reload(app)
+    reloaded_client = reloaded_app.app.test_client()
+    images = reloaded_client.get(
+        "/api/llm/images?q=sample",
+        headers=auth_header(),
+    )
+    assert images.status_code == 200
+    tags = images.get_json()["images"][0]["tags"]
+    assert set(tags) == {"alpha", "beta", "gamma"}
+
+
+def test_add_tag_single_tag_backward_compatible(monkeypatch, tmp_path):
+    """Single-tag `tag` field still works for backward compatibility."""
+    import importlib
+
+    tag_database = tmp_path / "tags.sqlite3"
+    client, _ = build_client(
+        monkeypatch,
+        tmp_path,
+        extra_env={"TAG_DATABASE": str(tag_database)},
+    )
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["csrf_token"] = "test-csrf-token"
+
+    single_tag = client.post(
+        "/tag",
+        data={
+            "rel_path": "copy.png",
+            "tag": "solo",
+            "csrf_token": "test-csrf-token",
+        },
+    )
+    assert single_tag.status_code == 200
+
+    import app
+
+    reloaded_app = importlib.reload(app)
+    reloaded_client = reloaded_app.app.test_client()
+    images = reloaded_client.get(
+        "/api/llm/images?q=copy",
+        headers=auth_header(),
+    )
+    assert images.status_code == 200
+    assert images.get_json()["images"][0]["tags"] == ["solo"]
+
+
 def test_read_key_rejected_from_task_run(monkeypatch, tmp_path):
     monkeypatch.setenv("WEBHOOK_ENABLED", "true")
     monkeypatch.setenv("WEBHOOK_TASK_ECHO", "python3 -c \"import sys;print(sys.argv[1])\" {params.value}")

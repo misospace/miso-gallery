@@ -949,17 +949,24 @@ def add_tag():
         return {"error": "Invalid CSRF token"}, 403
 
     rel_path = sanitize_rel_path(request.form.get("rel_path", ""))
-    tag = request.form.get("tag", "").strip()
 
-    if not rel_path or not tag:
+    # Accept multiple tags via `tags[]` form field for batch inserts (Fixes #330).
+    # Falls back to single `tag` field for backward compatibility.
+    tags = [t.strip() for t in request.form.getlist("tags[]") if t.strip()]
+    if not tags:
+        tag = request.form.get("tag", "").strip()
+        if tag:
+            tags = [tag]
+
+    if not rel_path or not tags:
         return {"error": "Missing rel_path or tag"}, 400
 
-    _tag_store().add_tags(rel_path, [tag])
+    _tag_store().add_tags(rel_path, tags)
     log_security_event(
         "add_tag",
         "success",
         target=rel_path,
-        tag=tag,
+        tag=",".join(tags),
     )
 
     return {"status": "ok"}
