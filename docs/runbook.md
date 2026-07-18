@@ -43,6 +43,38 @@ This runbook documents the procedure for backing up and restoring images stored 
 
 Consider scheduling a cron job to perform regular backups.
 
+### Backup Considerations: Tag Database Placement
+
+By default, the SQLite tag database is created inside `DATA_FOLDER` at
+`$DATA_FOLDER/.miso-gallery-tags.sqlite3` (alongside its `-wal` and `-shm`
+sibling files). This means any backup, sync, or snapshot tool that walks
+`DATA_FOLDER` will also pick up the live database — and depending on the
+backup mechanism, the captured DB may be in an inconsistent state
+mid-transaction.
+
+For deployments where `DATA_FOLDER` lives on **NFS**, an **LVM/ZFS/Btrfs
+snapshot**, or any other **atomic-snapshot** storage, it is strongly
+recommended to relocate the tag database outside of `DATA_FOLDER` so the
+two can be backed up independently:
+
+```bash
+# Example: place the tag database in a dedicated, non-snapshotted path
+-e TAG_DATABASE=/var/lib/miso-gallery/tags.sqlite3
+```
+
+When `TAG_DATABASE` is set to a path outside `DATA_FOLDER`:
+
+- File-level backup tools (e.g. `rsync` of `DATA_FOLDER`) will no longer
+  include the DB, so back it up separately (e.g. via `sqlite3 .backup` or
+  by stopping the service long enough to copy the file).
+- Snapshot-based backups of `DATA_FOLDER` will not capture a half-written
+  database, eliminating the risk of restoring a corrupted SQLite file
+  alongside otherwise-valid media.
+
+The `TAG_DATABASE` environment variable was introduced for exactly this
+reason — it is supported on every release that ships with tagging and
+requires no code changes to use.
+
 ---
 
 ## Health Checks
