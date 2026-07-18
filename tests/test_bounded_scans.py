@@ -201,3 +201,123 @@ class TestScanLimitConstant:
         import app as app_module
         assert hasattr(app_module, "GALLERY_SCAN_LIMIT")
         assert app_module.GALLERY_SCAN_LIMIT == 5000
+
+
+class TestFolderCoverDelegatesToIterGalleryItems:
+    """folder_cover_rel_path delegates to iter_gallery_items (issue #325)."""
+
+    def test_cover_uses_iter_gallery_items(self, monkeypatch, tmp_path):
+        """folder_cover_rel_path should use iter_gallery_items with root=folder."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / ".thumb_cache").mkdir(exist_ok=True)
+
+        # Create a subfolder with media files
+        subfolder = data_dir / "photos"
+        subfolder.mkdir()
+        (subfolder / "cover.png").write_bytes(
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+            b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
+        )
+        (subfolder / "other.jpg").write_bytes(
+            b'\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01'
+        )
+
+        monkeypatch.setenv("DATA_FOLDER", str(data_dir))
+        monkeypatch.setenv("AUTH_TYPE", "local")
+        monkeypatch.setenv("ADMIN_PASSWORD", "pass123")
+        monkeypatch.setenv("OIDC_ENABLED", "false")
+        monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
+        monkeypatch.setenv("LLM_API_KEYS", "agent-key")
+        monkeypatch.setenv("GALLERY_AUTO_FOLDER_COVERS", "true")
+
+        for mod in ("auth", "app"):
+            sys.modules.pop(mod, None)
+
+        import app as app_module
+        app_module.DATA_FOLDER = data_dir
+        app_module.THUMBNAIL_CACHE_DIR = data_dir / ".thumb_cache"
+        app_module.app.config["TESTING"] = True
+
+        # folder_cover_rel_path should return the first sorted media file
+        cover = app_module.folder_cover_rel_path("photos")
+        assert cover is not None
+        assert "cover.png" in cover
+
+    def test_cover_respects_exclusions(self, monkeypatch, tmp_path):
+        """folder_cover_rel_path should skip excluded paths via iter_gallery_items."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / ".thumb_cache").mkdir(exist_ok=True)
+
+        # Create a subfolder with only an excluded media file
+        subfolder = data_dir / "photos"
+        subfolder.mkdir()
+        hidden_dir = subfolder / ".hidden"
+        hidden_dir.mkdir()
+        (hidden_dir / "secret.png").write_bytes(
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+            b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
+        )
+
+        monkeypatch.setenv("DATA_FOLDER", str(data_dir))
+        monkeypatch.setenv("AUTH_TYPE", "local")
+        monkeypatch.setenv("ADMIN_PASSWORD", "pass123")
+        monkeypatch.setenv("OIDC_ENABLED", "false")
+        monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
+        monkeypatch.setenv("LLM_API_KEYS", "agent-key")
+        monkeypatch.setenv("GALLERY_AUTO_FOLDER_COVERS", "true")
+
+        for mod in ("auth", "app"):
+            sys.modules.pop(mod, None)
+
+        import app as app_module
+        app_module.DATA_FOLDER = data_dir
+        app_module.THUMBNAIL_CACHE_DIR = data_dir / ".thumb_cache"
+        app_module.app.config["TESTING"] = True
+
+        # Should return None since the only media file is in an excluded path
+        cover = app_module.folder_cover_rel_path("photos")
+        assert cover is None
+
+    def test_iter_gallery_items_root_parameter(self, monkeypatch, tmp_path):
+        """iter_gallery_items should accept root parameter for scoped scans."""
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / ".thumb_cache").mkdir(exist_ok=True)
+
+        # Create files in root and subfolder
+        (data_dir / "root_img.png").write_bytes(
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+            b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
+        )
+        subfolder = data_dir / "sub"
+        subfolder.mkdir()
+        (subfolder / "sub_img.png").write_bytes(
+            b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01'
+            b'\x00\x00\x00\x01\x08\x02\x00\x00\x00\x90wS\xde'
+        )
+
+        monkeypatch.setenv("DATA_FOLDER", str(data_dir))
+        monkeypatch.setenv("AUTH_TYPE", "local")
+        monkeypatch.setenv("ADMIN_PASSWORD", "pass123")
+        monkeypatch.setenv("OIDC_ENABLED", "false")
+        monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
+        monkeypatch.setenv("LLM_API_KEYS", "agent-key")
+
+        for mod in ("auth", "app"):
+            sys.modules.pop(mod, None)
+
+        import app as app_module
+        app_module.DATA_FOLDER = data_dir
+        app_module.THUMBNAIL_CACHE_DIR = data_dir / ".thumb_cache"
+        app_module.app.config["TESTING"] = True
+
+        # Scanning from subfolder should only return files in that subfolder
+        items = app_module.iter_gallery_items(kind="media", root=subfolder)
+        assert len(items) == 1
+        assert items[0].name == "sub_img.png"
+
+        # Scanning from root should return both
+        all_items = app_module.iter_gallery_items(kind="media")
+        assert len(all_items) == 2

@@ -347,27 +347,15 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
         _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
         return None
 
-    cover_rel: str | None = None
-    # Bound the scan to prevent unbounded subtree traversal on cache misses.
-    candidates = []
-    for count, item in enumerate(folder_path.rglob("*")):
-        if count >= GALLERY_SCAN_LIMIT:
-            break
-        candidates.append(item)
-    candidates.sort(key=lambda p: p.as_posix().lower())
-    for candidate in candidates:
-        if not candidate.is_file() or candidate.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
-        rel_candidate = candidate.relative_to(DATA_FOLDER)
-        if any(part in {".thumb_cache", ".trash"} or part.startswith(".") for part in rel_candidate.parts):
-            continue
-        cover_rel = rel_candidate.as_posix()
-        break
+    # Delegate to iter_gallery_items for bounded, exclusion-aware scanning.
+    items = iter_gallery_items(kind="media", limit=1, root=folder_path)
 
-    if cover_rel is None:
+    if not items:
         _FOLDER_COVER_CACHE.pop(folder_rel_path, None)
-    else:
-        _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
+        return None
+
+    cover_rel = items[0].relative_to(DATA_FOLDER).as_posix()
+    _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
     return cover_rel
 
 
@@ -431,6 +419,7 @@ def media_metadata(path: Path, tags: list[str] | None = None) -> dict[str, objec
 def iter_gallery_items(
     kind: str = "media",
     limit: int | None = None,
+    root: Path | None = None,
 ) -> list[Path]:
     """Centralized bounded iterator for gallery filesystem scans.
 
@@ -440,13 +429,15 @@ def iter_gallery_items(
     Args:
         kind: "media" (files only), "folders" (dirs only), or "all" (both).
         limit: Maximum items to return. Defaults to GALLERY_SCAN_LIMIT.
+        root: Optional root directory to scan. Defaults to DATA_FOLDER.
 
     Returns:
         Sorted list of Path objects within the bound.
     """
     effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
+    scan_root = root if root is not None else DATA_FOLDER
     results: list[Path] = []
-    for item in DATA_FOLDER.rglob("*"):
+    for item in scan_root.rglob("*"):
         if len(results) >= effective_limit:
             break
         try:
