@@ -31,6 +31,13 @@ self.addEventListener("fetch", (event) => {
   const requestUrl = new URL(request.url);
   if (requestUrl.origin !== self.location.origin) return;
 
+  // Let direct media navigations fail normally instead of disguising storage
+  // errors as a successful navigation to the cached gallery homepage.
+  const isMediaNavigation = ["/view/", "/images/", "/thumb/"].some((prefix) =>
+    requestUrl.pathname.startsWith(prefix)
+  );
+  if (request.mode === "navigate" && isMediaNavigation) return;
+
   if (request.destination === "image") {
     event.respondWith(
       caches.match(request).then((cached) => {
