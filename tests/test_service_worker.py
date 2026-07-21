@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 SERVICE_WORKER = Path(__file__).parents[1] / "templates" / "service-worker.js"
 
 
