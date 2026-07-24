@@ -195,7 +195,12 @@ def verify_local_password(password: str) -> bool:
     stored = ADMIN_PASSWORD
     if stored.startswith(("pbkdf2:", "scrypt:")):
         return check_password_hash(stored, password)
-    return password == stored
+
+    logger.warning(
+        "ADMIN_PASSWORD is configured as plaintext; migrate it to a Werkzeug password hash "
+        "to avoid keeping the password in process memory"
+    )
+    return secrets.compare_digest(password, stored)
 
 
 def require_auth(view_fn):
