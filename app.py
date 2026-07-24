@@ -437,8 +437,13 @@ def iter_gallery_items(
     effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
     scan_root = root if root is not None else DATA_FOLDER
     results: list[Path] = []
+    # Collect first, sort second, then truncate. Collecting before truncating is
+    # required so a small limit (e.g. folder covers asking for a single image)
+    # returns the sorted-first item rather than an arbitrary filesystem-ordered
+    # prefix. The collection cap is the scan safety bound (GALLERY_SCAN_LIMIT);
+    # the requested limit only constrains how many we return.
     for item in scan_root.rglob("*"):
-        if len(results) >= effective_limit:
+        if len(results) >= GALLERY_SCAN_LIMIT:
             break
         try:
             # Skip symlinks to prevent filesystem traversal outside the data root.
@@ -454,7 +459,7 @@ def iter_gallery_items(
             results.append(item)
         except (OSError, PermissionError):
             continue
-    return sorted(results, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+    return sorted(results, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())[:effective_limit]
 
 
 def file_sha256(path: Path) -> str:

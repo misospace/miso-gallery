@@ -84,6 +84,64 @@ class TestIterGalleryItemsBounded:
         assert len(folders) <= 20
 
 
+class TestIterGalleryItemsSortsBeforeTruncating:
+    """iter_gallery_items must sort before applying ``limit`` (issue #325).
+
+    A small limit asks for the sorted-first items, not an arbitrary
+    filesystem-ordered prefix. Regression guard for the folder-cover path,
+    which calls ``iter_gallery_items(kind="media", limit=1, root=...)``.
+    """
+
+    @staticmethod
+    def _bootstrap(monkeypatch, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / ".thumb_cache").mkdir(exist_ok=True)
+
+        # Create media files in reverse-sorted order so that filesystem
+        # (readdir) order is unlikely to coincide with sorted order.
+        for name in ("zebra.png", "mango.jpg", "apple.webp"):
+            (data_dir / name).write_bytes(b"\x00")
+
+        monkeypatch.setenv("DATA_FOLDER", str(data_dir))
+        monkeypatch.setenv("AUTH_TYPE", "none")
+        monkeypatch.setenv("OIDC_ENABLED", "false")
+        monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
+
+        for mod in ("auth", "app"):
+            sys.modules.pop(mod, None)
+
+        import app as app_module
+        app_module.DATA_FOLDER = data_dir
+        app_module.THUMBNAIL_CACHE_DIR = data_dir / ".thumb_cache"
+        app_module.app.config["TESTING"] = True
+        return app_module
+
+    def test_limit_one_returns_sorted_first(self, monkeypatch, tmp_path):
+        app_module = self._bootstrap(monkeypatch, tmp_path)
+
+        items = app_module.iter_gallery_items(kind="media", limit=1)
+
+        assert len(items) == 1
+        assert items[0].name == "apple.webp"
+
+    def test_limit_keeps_sorted_order(self, monkeypatch, tmp_path):
+        app_module = self._bootstrap(monkeypatch, tmp_path)
+
+        items = app_module.iter_gallery_items(kind="media", limit=2)
+
+        assert [p.name for p in items] == ["apple.webp", "mango.jpg"]
+
+    def test_scan_limit_still_caps_count(self, monkeypatch, tmp_path):
+        """The GALLERY_SCAN_LIMIT safety bound must still be enforced."""
+        app_module = self._bootstrap(monkeypatch, tmp_path)
+        app_module.GALLERY_SCAN_LIMIT = 2
+
+        items = app_module.iter_gallery_items(kind="media")
+
+        assert len(items) <= 2
+
+
 class TestLlmImagesHasMore:
     """llm_images should return has_more=True when scan is limited."""
 
