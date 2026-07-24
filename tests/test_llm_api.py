@@ -536,3 +536,17 @@ def test_tag_store_is_singleton(monkeypatch, tmp_path):
     store2 = _tag_store()
 
     assert store1 is store2, "_tag_store() should return the same instance on repeated calls"
+
+
+def test_tag_store_enables_wal_mode(tmp_path):
+    """Regression for #350: TagStore must enable WAL mode to avoid contention under concurrent workers."""
+    from tag_store import TagStore
+
+    store = TagStore(tmp_path / "tags.db")
+
+    # Verify WAL mode is enabled on the connection used by _connect
+    with store._connect() as conn:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert journal_mode == "wal", (
+            f"Expected journal_mode=WAL for concurrent worker access, got {journal_mode}"
+        )
