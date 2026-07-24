@@ -9,6 +9,7 @@ import secrets
 import shlex
 import subprocess
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from flask import (
@@ -56,14 +57,18 @@ from trash import (
 )
 
 # Load service worker from external file (extracted from app.py)
-SERVICE_WORKER_PATH = os.path.join(os.path.dirname(__file__), "templates", "service-worker.js")
+SERVICE_WORKER_PATH = os.path.join(
+    os.path.dirname(__file__), "templates", "service-worker.js"
+)
 with open(SERVICE_WORKER_PATH, "r") as _f:
     SERVICE_WORKER_TEMPLATE = _f.read()
 
 
 DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
 THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
-TAG_DATABASE = Path(os.environ.get("TAG_DATABASE", str(DATA_FOLDER / ".miso-gallery-tags.sqlite3")))
+TAG_DATABASE = Path(
+    os.environ.get("TAG_DATABASE", str(DATA_FOLDER / ".miso-gallery-tags.sqlite3"))
+)
 
 
 def resolve_secret_key() -> str:
@@ -71,7 +76,7 @@ def resolve_secret_key() -> str:
     if not configured:
         raise ValueError(
             "SECRET_KEY environment variable is required. "
-            "Generate one with: python -c \"import secrets; print(secrets.token_urlsafe(48))\""
+            'Generate one with: python -c "import secrets; print(secrets.token_urlsafe(48))"'
         )
     return configured
 
@@ -84,8 +89,12 @@ app.secret_key = resolve_secret_key()
 # SESSION_COOKIE_SECURE: Only send over HTTPS (set via env for flexibility)
 # SESSION_COOKIE_SAMESITE: Lax to allow cross-site navigation while maintaining security
 # SESSION_COOKIE_HTTPONLY: Prevent JavaScript access to session cookie
-app.config["PERMANENT_SESSION_LIFETIME"] = int(os.environ.get("SESSION_LIFETIME_DAYS", 30)) * 24 * 60 * 60
-app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "true").strip().lower() == "true"
+app.config["PERMANENT_SESSION_LIFETIME"] = (
+    int(os.environ.get("SESSION_LIFETIME_DAYS", 30)) * 24 * 60 * 60
+)
+app.config["SESSION_COOKIE_SECURE"] = (
+    os.environ.get("SESSION_COOKIE_SECURE", "true").strip().lower() == "true"
+)
 app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_REFRESH_EACH_REQUEST"] = False
@@ -103,7 +112,9 @@ def _request_id() -> str:
     return secrets.token_hex(8)
 
 
-def log_security_event(event: str, outcome: str, *, request_id: str = "", **fields: object) -> None:
+def log_security_event(
+    event: str, outcome: str, *, request_id: str = "", **fields: object
+) -> None:
     """Emit a structured log line for security/access events.
 
     Intentionally avoids logging secrets (passwords, OIDC tokens, raw userinfo).
@@ -120,9 +131,12 @@ def log_security_event(event: str, outcome: str, *, request_id: str = "", **fiel
             "remote_addr": _client_ip(),
             "user_id": session.get("user_id"),
             "user_name": session.get("user_name"),
-            "auth_method": session.get("auth_method") or ("local" if session.get("authenticated") else None),
+            "auth_method": session.get("auth_method")
+            or ("local" if session.get("authenticated") else None),
             "api_key_hint": session.get("api_key_hint"),
-            "api_key_class": session.get("api_key_class"),  # key class identifier for audit logs
+            "api_key_class": session.get(
+                "api_key_class"
+            ),  # key class identifier for audit logs
             "request_id": request_id,
         }
         payload.update(fields)
@@ -144,10 +158,33 @@ PWA_THEME_COLOR = "#0d0d0d"
 PWA_APP_NAME = "Miso Gallery"
 APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.19").strip() or "0.1.19"
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
-AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
-FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
+AUTO_FOLDER_COVERS_ENABLED = os.environ.get(
+    "GALLERY_AUTO_FOLDER_COVERS", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+FOLDER_COVER_CACHE_TTL = max(
+    int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0
+)
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
-_FOLDER_COVER_CACHE: dict[str, tuple[float, str | None]] = {}
+# Cache of the auto-selected cover for each folder. Maps the folder's relative
+# path to (timestamp, selected cover rel path or None). Bounded LRU so deeply
+# nested galleries cannot grow the cache without bound (issue #348).
+FOLDER_COVER_CACHE_MAX_SIZE = max(
+    int(os.environ.get("GALLERY_FOLDER_COVER_CACHE_MAX_SIZE", "1024") or 1024),
+    1,
+)
+_FOLDER_COVER_CACHE: "OrderedDict[str, tuple[float, str | None]]" = OrderedDict()
+
+
+def _folder_cover_cache_put(
+    folder_rel_path: str, timestamp: float, cover_rel: str | None
+) -> None:
+    """Insert/refresh a folder cover cache entry, evicting the oldest at capacity."""
+    if folder_rel_path in _FOLDER_COVER_CACHE:
+        _FOLDER_COVER_CACHE.move_to_end(folder_rel_path)
+    _FOLDER_COVER_CACHE[folder_rel_path] = (timestamp, cover_rel)
+    while len(_FOLDER_COVER_CACHE) > FOLDER_COVER_CACHE_MAX_SIZE:
+        _FOLDER_COVER_CACHE.popitem(last=False)
+
 
 # Bounded pagination defaults for gallery endpoints
 GALLERY_PAGE_DEFAULT = 50
@@ -157,7 +194,9 @@ GALLERY_SCAN_LIMIT = int(os.environ.get("GALLERY_SCAN_LIMIT", "5000"))
 # Destructive-operation guardrails (issue #199)
 BULK_DELETE_MAX_ITEMS = int(os.environ.get("BULK_DELETE_MAX_ITEMS", "200"))
 BULK_DELETE_MAX_FOLDERS = int(os.environ.get("BULK_DELETE_MAX_FOLDERS", "50"))
-BULK_DELETE_FOLDER_SIZE_CAP = int(os.environ.get("BULK_DELETE_FOLDER_SIZE_CAP", str(10 * 1024 * 1024 * 1024)))  # 10 GB default
+BULK_DELETE_FOLDER_SIZE_CAP = int(
+    os.environ.get("BULK_DELETE_FOLDER_SIZE_CAP", str(10 * 1024 * 1024 * 1024))
+)  # 10 GB default
 LLM_BULK_DELETE_MAX_ITEMS = int(os.environ.get("LLM_BULK_DELETE_MAX_ITEMS", "500"))
 LLM_DEDUP_MAX_REMOVALS = int(os.environ.get("LLM_DEDUP_MAX_REMOVALS", "200"))
 
@@ -184,14 +223,22 @@ def _parse_pagination(args):
     except (ValueError, TypeError):
         page = 1
     try:
-        per_page = max(1, min(GALLERY_PAGE_MAX, int(args.get("limit", str(GALLERY_PAGE_DEFAULT)))))
+        per_page = max(
+            1, min(GALLERY_PAGE_MAX, int(args.get("limit", str(GALLERY_PAGE_DEFAULT))))
+        )
     except (ValueError, TypeError):
         per_page = GALLERY_PAGE_DEFAULT
     return page, per_page
 
 
 def _webhook_enabled() -> bool:
-    return os.environ.get("WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+    return os.environ.get("WEBHOOK_ENABLED", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
 
 def _verify_webhook_secret(token: str) -> bool:
     """Verify Bearer token matches WEBHOOK_SECRET if configured."""
@@ -201,7 +248,9 @@ def _verify_webhook_secret(token: str) -> bool:
 
 
 def _task_env_key(task_name: str) -> str:
-    normalized = "".join(ch if ch.isalnum() else "_" for ch in task_name).strip("_").upper()
+    normalized = (
+        "".join(ch if ch.isalnum() else "_" for ch in task_name).strip("_").upper()
+    )
     return f"{WEBHOOK_TASK_PREFIX}{normalized}" if normalized else ""
 
 
@@ -242,7 +291,9 @@ def thumbnail_filename(rel_path: str, source_path: Path) -> str:
 def generate_thumbnail(source_path: Path, output_path: Path) -> None:
     with Image.open(source_path) as img:
         img = img.convert("RGB")
-        img.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), Image.Resampling.LANCZOS)
+        img.thumbnail(
+            (THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), Image.Resampling.LANCZOS
+        )
         img.save(output_path, format="JPEG", quality=85, optimize=True)
 
 
@@ -256,8 +307,7 @@ def batch_remove_thumbnails(rel_paths: list[str]) -> None:
         return
     ensure_thumbnail_cache_dir()
     prefixes = {
-        sanitize_rel_path(rel_path).replace("/", "__") + "."
-        for rel_path in rel_paths
+        sanitize_rel_path(rel_path).replace("/", "__") + "." for rel_path in rel_paths
     }
     for cached_file in THUMBNAIL_CACHE_DIR.iterdir():
         name = cached_file.name
@@ -294,7 +344,9 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
             continue
 
         rel_path = item.relative_to(DATA_FOLDER)
-        if any(part in excluded_dirs or part.startswith(".") for part in rel_path.parts):
+        if any(
+            part in excluded_dirs or part.startswith(".") for part in rel_path.parts
+        ):
             continue
 
         rel_posix = rel_path.as_posix()
@@ -333,18 +385,45 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
 
     now = time.time()
     cached = _FOLDER_COVER_CACHE.get(folder_rel_path)
-    if cached and now - cached[0] < FOLDER_COVER_CACHE_TTL:
-        cached_rel = cached[1]
-        if cached_rel:
-            cached_path = DATA_FOLDER / sanitize_rel_path(cached_rel)
-            if cached_path.exists() and cached_path.is_file() and cached_path.suffix.lower() in IMAGE_EXTENSIONS:
-                return cached_rel
+    if cached is not None:
+        cached_ts, cached_rel = cached
+        ttl_within = now - cached_ts < FOLDER_COVER_CACHE_TTL
+        if cached_rel is None:
+            # Short-circuit a cached "no cover" result while the TTL is still
+            # valid (issue #348): avoids a redundant folder scan on every
+            # request, and keeps the entry from being re-populated by mistake.
+            if ttl_within:
+                return None
+            # TTL expired — drop the stale None entry and fall through to a
+            # fresh scan so newly added files are picked up.
+            _FOLDER_COVER_CACHE.pop(folder_rel_path, None)
         else:
-            cached = None
+            cached_path = DATA_FOLDER / sanitize_rel_path(cached_rel)
+            cached_valid = (
+                cached_path.exists()
+                and cached_path.is_file()
+                and cached_path.suffix.lower() in IMAGE_EXTENSIONS
+            )
+            if cached_valid and ttl_within:
+                return cached_rel
+            # Either the backing file was deleted, or the TTL has expired:
+            # if the file is still on disk, re-validate and refresh the
+            # timestamp (issue #348) so we don't needlessly re-scan a folder
+            # whose cover hasn't actually changed.
+            if cached_valid:
+                _folder_cover_cache_put(folder_rel_path, now, cached_rel)
+                return cached_rel
+            # Stale: drop the entry so the scan below (or a future miss) sees
+            # a clean cache.
+            _FOLDER_COVER_CACHE.pop(folder_rel_path, None)
 
-    folder_path = DATA_FOLDER / sanitize_rel_path(folder_rel_path) if folder_rel_path else DATA_FOLDER
+    folder_path = (
+        DATA_FOLDER / sanitize_rel_path(folder_rel_path)
+        if folder_rel_path
+        else DATA_FOLDER
+    )
     if not folder_path.exists() or not folder_path.is_dir():
-        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
+        _folder_cover_cache_put(folder_rel_path, now, None)
         return None
 
     # Delegate to iter_gallery_items for bounded, exclusion-aware scanning.
@@ -354,8 +433,21 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
         _FOLDER_COVER_CACHE.pop(folder_rel_path, None)
         return None
 
-    cover_rel = items[0].relative_to(DATA_FOLDER).as_posix()
-    _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
+    candidate = items[0]
+    # Re-validate the candidate still exists on disk before re-caching
+    # (issue #348): covers the TOCTOU window where the file is deleted
+    # between the scan and the cache write. A nonexistent path must never
+    # be re-populated for the full TTL.
+    if (
+        not candidate.exists()
+        or not candidate.is_file()
+        or candidate.suffix.lower() not in IMAGE_EXTENSIONS
+    ):
+        _FOLDER_COVER_CACHE.pop(folder_rel_path, None)
+        return None
+
+    cover_rel = candidate.relative_to(DATA_FOLDER).as_posix()
+    _folder_cover_cache_put(folder_rel_path, now, cover_rel)
     return cover_rel
 
 
@@ -377,7 +469,10 @@ def is_excluded_gallery_path(path: Path) -> bool:
         rel_parts = path.relative_to(DATA_FOLDER).parts
     except ValueError:
         return True
-    return any(part in {THUMBNAIL_CACHE_DIR.name, ".trash"} or part.startswith(".") for part in rel_parts)
+    return any(
+        part in {THUMBNAIL_CACHE_DIR.name, ".trash"} or part.startswith(".")
+        for part in rel_parts
+    )
 
 
 def relative_media_path(path: Path) -> str:
@@ -413,7 +508,6 @@ def media_metadata(path: Path, tags: list[str] | None = None) -> dict[str, objec
         "view_url": url_for("view", filename=rel_path),
         "thumb_url": url_for("thumb", filename=rel_path),
     }
-
 
 
 def iter_gallery_items(
@@ -498,13 +592,17 @@ def find_duplicate_media(limit: int | None = None) -> list[dict[str, object]]:
                 continue
             if len(groups) >= effective_limit:
                 return groups
-            matches = sorted(matches, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())
+            matches = sorted(
+                matches, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower()
+            )
             groups.append(
                 {
                     "hash": digest,
                     "size": matches[0].stat().st_size,
                     "keep": matches[0].relative_to(DATA_FOLDER).as_posix(),
-                    "duplicates": [p.relative_to(DATA_FOLDER).as_posix() for p in matches[1:]],
+                    "duplicates": [
+                        p.relative_to(DATA_FOLDER).as_posix() for p in matches[1:]
+                    ],
                     "all": [p.relative_to(DATA_FOLDER).as_posix() for p in matches],
                 }
             )
@@ -555,14 +653,31 @@ def run_configured_task(payload: dict[str, object]) -> tuple[dict[str, object], 
             check=False,
         )
     except subprocess.TimeoutExpired:
-        log_security_event("webhook_task", "error", task=task, reason="timeout", timeout=timeout)
-        return {"task": task, "success": False, "error": f"task timed out after {timeout}s"}, 504
+        log_security_event(
+            "webhook_task", "error", task=task, reason="timeout", timeout=timeout
+        )
+        return {
+            "task": task,
+            "success": False,
+            "error": f"task timed out after {timeout}s",
+        }, 504
     except OSError as exc:
-        log_security_event("webhook_task", "error", task=task, reason="spawn_failed", error=str(exc))
-        return {"task": task, "success": False, "error": f"failed to execute task: {exc}"}, 500
+        log_security_event(
+            "webhook_task", "error", task=task, reason="spawn_failed", error=str(exc)
+        )
+        return {
+            "task": task,
+            "success": False,
+            "error": f"failed to execute task: {exc}",
+        }, 500
 
     success = completed.returncode == 0
-    log_security_event("webhook_task", "success" if success else "error", task=task, exit_code=completed.returncode)
+    log_security_event(
+        "webhook_task",
+        "success" if success else "error",
+        task=task,
+        exit_code=completed.returncode,
+    )
     return {
         "task": task,
         "success": success,
@@ -586,11 +701,18 @@ def check_auth():
     if (
         request.path.startswith("/thumb/")
         or request.path.startswith("/assets/")
-        or request.path in {"/favicon.ico", "/manifest.webmanifest", "/service-worker.js"}
+        or request.path
+        in {"/favicon.ico", "/manifest.webmanifest", "/service-worker.js"}
     ):
         return None
 
-    if request.path in ["/login", "/auth", "/logout", "/auth/oidc", "/auth/oidc/callback"]:
+    if request.path in [
+        "/login",
+        "/auth",
+        "/logout",
+        "/auth/oidc",
+        "/auth/oidc/callback",
+    ]:
         return None
 
     if session.get("authenticated"):
@@ -609,6 +731,7 @@ def favicon():
         return send_from_directory(str(logo_path.parent), logo_path.name)
 
     return ("", 204)
+
 
 @app.route("/assets/<path:filename>")
 def assets(filename: str):
@@ -657,7 +780,6 @@ def service_worker():
     return response
 
 
-
 @app.route("/images/<path:filename>")
 def images(filename: str):
     rel_path = sanitize_rel_path(filename)
@@ -669,10 +791,10 @@ def images(filename: str):
 @require_auth
 def index(subpath: str = ""):
     # Search query for filtering items
-    search_query = request.args.get('q', '').strip().lower()
-    bulk_state = request.args.get('bulk_state', '').strip().lower()
-    bulk_deleted = request.args.get('bulk_deleted', '0').strip()
-    bulk_folders = request.args.get('bulk_folders', '0').strip()
+    search_query = request.args.get("q", "").strip().lower()
+    bulk_state = request.args.get("bulk_state", "").strip().lower()
+    bulk_deleted = request.args.get("bulk_deleted", "0").strip()
+    bulk_folders = request.args.get("bulk_folders", "0").strip()
     safe_subpath = sanitize_rel_path(subpath) if subpath else ""
     folder_path = DATA_FOLDER / safe_subpath
     if not folder_path.exists() or not folder_path.is_dir():
@@ -685,7 +807,9 @@ def index(subpath: str = ""):
         if item.name in {".thumb_cache", ".trash"}:
             continue
 
-        rel_path = f"{safe_subpath}/{item.name}".lstrip("/") if safe_subpath else item.name
+        rel_path = (
+            f"{safe_subpath}/{item.name}".lstrip("/") if safe_subpath else item.name
+        )
         rel_path = rel_path.replace("\\", "/")
 
         if item.is_dir():
@@ -696,11 +820,16 @@ def index(subpath: str = ""):
                     "name": item.name,
                     "rel_path": rel_path,
                     "url": url_for("index", subpath=rel_path),
-                    "cover_thumb_url": url_for("thumb", filename=cover_rel_path) if cover_rel_path else None,
+                    "cover_thumb_url": url_for("thumb", filename=cover_rel_path)
+                    if cover_rel_path
+                    else None,
                     "is_dir": True,
                 }
             )
-        elif item.suffix.lower() in IMAGE_EXTENSIONS or item.suffix.lower() in VIDEO_EXTENSIONS:
+        elif (
+            item.suffix.lower() in IMAGE_EXTENSIONS
+            or item.suffix.lower() in VIDEO_EXTENSIONS
+        ):
             stats["images"] += 1
             item_stat = item.stat()
             is_video = item.suffix.lower() in VIDEO_EXTENSIONS
@@ -712,7 +841,9 @@ def index(subpath: str = ""):
                     "view_url": url_for("view", filename=rel_path),
                     "delete_url": url_for("delete", filename=rel_path),
                     "size": format_size(item_stat.st_size),
-                    "modified": time.strftime("%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)),
+                    "modified": time.strftime(
+                        "%Y-%m-%d %H:%M", time.localtime(item_stat.st_mtime)
+                    ),
                     "is_dir": False,
                     "media_type": "video" if is_video else "image",
                 }
@@ -721,7 +852,9 @@ def index(subpath: str = ""):
     # Apply category search filter (root only).
     # Issue #51 expects folder/category name substring matching.
     if search_query and not safe_subpath:
-        items = [i for i in items if i.get("is_dir") and search_query in i["name"].lower()]
+        items = [
+            i for i in items if i.get("is_dir") and search_query in i["name"].lower()
+        ]
         stats["folders"] = sum(1 for i in items if i.get("is_dir"))
         stats["images"] = sum(1 for i in items if not i.get("is_dir"))
     parent_url = None
@@ -739,10 +872,20 @@ def index(subpath: str = ""):
         for part in parts:
             accum.append(part)
             path = "/".join(accum)
-            nav_crumbs.append({"name": part, "url": url_for("index", subpath=path), "is_current": path == safe_subpath})
+            nav_crumbs.append(
+                {
+                    "name": part,
+                    "url": url_for("index", subpath=path),
+                    "is_current": path == safe_subpath,
+                }
+            )
 
         parent_subpath = "/".join(parts[:-1])
-        parent_url = url_for("index", subpath=parent_subpath) if parent_subpath else url_for("index")
+        parent_url = (
+            url_for("index", subpath=parent_subpath)
+            if parent_subpath
+            else url_for("index")
+        )
     else:
         breadcrumb = "All Images"
 
@@ -766,7 +909,8 @@ def index(subpath: str = ""):
             "message": "No selected items were moved to trash.",
         }
 
-    return render_template("index.html",
+    return render_template(
+        "index.html",
         items=items,
         breadcrumb=breadcrumb,
         parent_url=parent_url,
@@ -850,33 +994,67 @@ def bulk_delete():
         log_security_event("bulk_delete", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
 
-    current_subpath = sanitize_rel_path(request.form.get("current_subpath", "")) if request.form.get("current_subpath") else ""
+    current_subpath = (
+        sanitize_rel_path(request.form.get("current_subpath", ""))
+        if request.form.get("current_subpath")
+        else ""
+    )
     selected_files = request.form.getlist("filenames")
     selected_folders = request.form.getlist("folders")
 
     # Guard: cap total item count (issue #199)
     total_items = len(selected_files) + len(selected_folders)
     if total_items > BULK_DELETE_MAX_ITEMS:
-        log_security_event("bulk_delete", "rejected", reason="exceeds_max_items", selected_files=len(selected_files), selected_folders=len(selected_folders), max_items=BULK_DELETE_MAX_ITEMS)
+        log_security_event(
+            "bulk_delete",
+            "rejected",
+            reason="exceeds_max_items",
+            selected_files=len(selected_files),
+            selected_folders=len(selected_folders),
+            max_items=BULK_DELETE_MAX_ITEMS,
+        )
         return {"error": f"Too many items. Maximum is {BULK_DELETE_MAX_ITEMS}."}, 422
 
     # Guard: cap folder count (issue #199)
     if len(selected_folders) > BULK_DELETE_MAX_FOLDERS:
-        log_security_event("bulk_delete", "rejected", reason="exceeds_max_folders", selected_folders=len(selected_folders), max_folders=BULK_DELETE_MAX_FOLDERS)
-        return {"error": f"Too many folders. Maximum is {BULK_DELETE_MAX_FOLDERS}."}, 422
+        log_security_event(
+            "bulk_delete",
+            "rejected",
+            reason="exceeds_max_folders",
+            selected_folders=len(selected_folders),
+            max_folders=BULK_DELETE_MAX_FOLDERS,
+        )
+        return {
+            "error": f"Too many folders. Maximum is {BULK_DELETE_MAX_FOLDERS}."
+        }, 422
 
     # Guard: preflight folder size estimation (issue #199)
     for rel_path in selected_folders:
         if not sanitize_path(rel_path):
-            log_security_event("bulk_delete", "denied", reason="invalid_path", stage="preflight", rel_path=rel_path)
+            log_security_event(
+                "bulk_delete",
+                "denied",
+                reason="invalid_path",
+                stage="preflight",
+                rel_path=rel_path,
+            )
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
         if folder_path.exists() and folder_path.is_dir():
             size = dir_size(folder_path)
             if size > BULK_DELETE_FOLDER_SIZE_CAP:
-                log_security_event("bulk_delete", "rejected", reason="folder_too_large", rel_path=safe_rel_path, size=size, cap=BULK_DELETE_FOLDER_SIZE_CAP)
-                return {"error": f"Folder is too large to delete ({size} bytes exceeds {BULK_DELETE_FOLDER_SIZE_CAP} byte limit)."}, 422
+                log_security_event(
+                    "bulk_delete",
+                    "rejected",
+                    reason="folder_too_large",
+                    rel_path=safe_rel_path,
+                    size=size,
+                    cap=BULK_DELETE_FOLDER_SIZE_CAP,
+                )
+                return {
+                    "error": f"Folder is too large to delete ({size} bytes exceeds {BULK_DELETE_FOLDER_SIZE_CAP} byte limit)."
+                }, 422
 
     moved_files = 0
     moved_folders = 0
@@ -885,22 +1063,42 @@ def bulk_delete():
     # Delete selected files
     for rel_path in selected_files:
         if not sanitize_path(rel_path):
-            log_security_event("bulk_delete", "denied", reason="invalid_path", stage="delete_files", rel_path=rel_path)
+            log_security_event(
+                "bulk_delete",
+                "denied",
+                reason="invalid_path",
+                stage="delete_files",
+                rel_path=rel_path,
+            )
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         file_path = source_file_path(safe_rel_path)
-        if file_path.exists() and file_path.is_file() and move_to_trash(file_path, DATA_FOLDER):
+        if (
+            file_path.exists()
+            and file_path.is_file()
+            and move_to_trash(file_path, DATA_FOLDER)
+        ):
             moved_files += 1
             purged_thumbnails.append(safe_rel_path)
 
     # Delete selected folders
     for rel_path in selected_folders:
         if not sanitize_path(rel_path):
-            log_security_event("bulk_delete", "denied", reason="invalid_path", stage="delete_folders", rel_path=rel_path)
+            log_security_event(
+                "bulk_delete",
+                "denied",
+                reason="invalid_path",
+                stage="delete_folders",
+                rel_path=rel_path,
+            )
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
-        if folder_path.exists() and folder_path.is_dir() and move_to_trash(folder_path, DATA_FOLDER):
+        if (
+            folder_path.exists()
+            and folder_path.is_dir()
+            and move_to_trash(folder_path, DATA_FOLDER)
+        ):
             moved_folders += 1
             purged_thumbnails.append(safe_rel_path)
 
@@ -962,6 +1160,7 @@ def add_tag():
 
     return {"status": "ok"}
 
+
 @app.route("/recent")
 @require_auth
 @rate_limit(max_requests=30, window=60)
@@ -988,18 +1187,22 @@ def recent_view():
 
         # Get folder path for navigation
         folder_path = os.path.dirname(rel_path_str)
-        folder_url = url_for("index", subpath=folder_path) if folder_path else url_for("index")
+        folder_url = (
+            url_for("index", subpath=folder_path) if folder_path else url_for("index")
+        )
 
-        images.append({
-            "name": path.name,
-            "rel_path": rel_path_str,
-            "url": url_for("view", filename=rel_path_str),
-            "thumb": url_for("thumb", filename=rel_path_str),
-            "added": date_str,
-            "size": format_size(size),
-            "mtime": mtime,
-            "folder_url": folder_url,
-        })
+        images.append(
+            {
+                "name": path.name,
+                "rel_path": rel_path_str,
+                "url": url_for("view", filename=rel_path_str),
+                "thumb": url_for("thumb", filename=rel_path_str),
+                "added": date_str,
+                "size": format_size(size),
+                "mtime": mtime,
+                "folder_url": folder_url,
+            }
+        )
 
     images.sort(key=lambda x: x["mtime"], reverse=True)
     images = images[:max_items]
@@ -1015,7 +1218,9 @@ def recent_view():
 @rate_limit(max_requests=30, window=60)
 def trash_view():
     items = list_trash(DATA_FOLDER)
-    return render_template("trash.html", items=items, csrf=csrf_token(), theme_color=PWA_THEME_COLOR)
+    return render_template(
+        "trash.html", items=items, csrf=csrf_token(), theme_color=PWA_THEME_COLOR
+    )
 
 
 @app.route("/trash/restore/<path:item_name>", methods=["POST"])
@@ -1027,7 +1232,9 @@ def trash_restore(item_name: str):
         return {"error": "Invalid CSRF token"}, 403
 
     restored = restore_from_trash(item_name, DATA_FOLDER)
-    log_security_event("trash_restore", "success" if restored else "not_found", item=item_name)
+    log_security_event(
+        "trash_restore", "success" if restored else "not_found", item=item_name
+    )
     return redirect(url_for("trash_view"))
 
 
@@ -1074,7 +1281,8 @@ def login():
     }
     error = error_map.get(error_code)
 
-    return render_template("login.html",
+    return render_template(
+        "login.html",
         csrf=csrf_token(),
         oidc_enabled=is_oidc_configured(),
         local_enabled=bool(os.environ.get("ADMIN_PASSWORD")),
@@ -1105,7 +1313,9 @@ def auth():
         log_security_event("login", "success", auth_method="local")
         return redirect(next_url)
 
-    log_security_event("login", "failure", auth_method="local", reason="invalid_password")
+    log_security_event(
+        "login", "failure", auth_method="local", reason="invalid_password"
+    )
     return redirect(url_for("login", error="invalid", next=next_url))
 
 
@@ -1125,7 +1335,11 @@ def maintenance_thumbnails_regenerate():
         return {"error": "Invalid CSRF token"}, 403
 
     try:
-        limit = max(1, min(5000, int(request.args.get("limit", "0") or "0"))) if request.args.get("limit") else None
+        limit = (
+            max(1, min(5000, int(request.args.get("limit", "0") or "0")))
+            if request.args.get("limit")
+            else None
+        )
     except (ValueError, TypeError):
         limit = None
     stats = run_thumbnail_integrity_check(limit=limit)
@@ -1179,7 +1393,9 @@ def llm_images():
         if query and query not in rel_path.lower() and query not in item.name.lower():
             continue
         filtered.append(item)
-    paginated, total, pg, pp, has_more = _paginate(filtered, page=page, per_page=per_page)
+    paginated, total, pg, pp, has_more = _paginate(
+        filtered, page=page, per_page=per_page
+    )
     has_more = _apply_scan_limit(has_more, len(all_media))
     tags_by_path = _tag_store().get_tags_for_paths(
         [relative_media_path(item) for item in paginated]
@@ -1188,7 +1404,14 @@ def llm_images():
         media_metadata(item, tags_by_path.get(relative_media_path(item), []))
         for item in paginated
     ]
-    return {"images": images, "count": len(images), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    return {
+        "images": images,
+        "count": len(images),
+        "total": total,
+        "page": pg,
+        "per_page": pp,
+        "has_more": has_more,
+    }
 
 
 @app.route("/api/llm/image/<path:relpath>")
@@ -1198,7 +1421,11 @@ def llm_image(relpath: str):
     if not sanitize_path(relpath):
         return {"error": "Invalid path"}, 400
     media_path = source_file_path(relpath)
-    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
+    if (
+        not media_path.exists()
+        or not is_media_file(media_path)
+        or is_excluded_gallery_path(media_path)
+    ):
         return {"error": "Image not found"}, 404
     return media_metadata(media_path)
 
@@ -1208,8 +1435,12 @@ def llm_image(relpath: str):
 @rate_limit(max_requests=60, window=60)
 def llm_recent():
     page, per_page = _parse_pagination(request.args)
-    all_media = sorted(iter_gallery_items(kind="media"), key=lambda p: p.stat().st_mtime, reverse=True)
-    paginated, total, pg, pp, has_more = _paginate(all_media, page=page, per_page=per_page)
+    all_media = sorted(
+        iter_gallery_items(kind="media"), key=lambda p: p.stat().st_mtime, reverse=True
+    )
+    paginated, total, pg, pp, has_more = _paginate(
+        all_media, page=page, per_page=per_page
+    )
     has_more = _apply_scan_limit(has_more, len(all_media))
     tags_by_path = _tag_store().get_tags_for_paths(
         [relative_media_path(item) for item in paginated]
@@ -1218,7 +1449,14 @@ def llm_recent():
         media_metadata(item, tags_by_path.get(relative_media_path(item), []))
         for item in paginated
     ]
-    return {"images": images, "count": len(images), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    return {
+        "images": images,
+        "count": len(images),
+        "total": total,
+        "page": pg,
+        "per_page": pp,
+        "has_more": has_more,
+    }
 
 
 @app.route("/api/llm/folders")
@@ -1229,11 +1467,26 @@ def llm_folders():
     all_folders = [{"rel_path": "", "name": "", "parent": None}]
     for folder in iter_gallery_items(kind="folders"):
         rel_path = folder.relative_to(DATA_FOLDER).as_posix()
-        parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
-        all_folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
-    paginated, total, pg, pp, has_more = _paginate(all_folders, page=page, per_page=per_page)
+        parent = (
+            folder.parent.relative_to(DATA_FOLDER).as_posix()
+            if folder.parent != DATA_FOLDER
+            else ""
+        )
+        all_folders.append(
+            {"rel_path": rel_path, "name": folder.name, "parent": parent}
+        )
+    paginated, total, pg, pp, has_more = _paginate(
+        all_folders, page=page, per_page=per_page
+    )
     has_more = _apply_scan_limit(has_more, len(all_folders) - 1)  # -1 for root entry
-    return {"folders": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    return {
+        "folders": paginated,
+        "count": len(paginated),
+        "total": total,
+        "page": pg,
+        "per_page": pp,
+        "has_more": has_more,
+    }
 
 
 @app.route("/api/llm/tags", methods=["POST"])
@@ -1241,15 +1494,23 @@ def llm_folders():
 @rate_limit(max_requests=30, window=60)
 def llm_tags():
     payload = request.get_json(silent=True) or {}
-    rel_paths = payload.get("rel_paths") or payload.get("images") or payload.get("rel_path")
+    rel_paths = (
+        payload.get("rel_paths") or payload.get("images") or payload.get("rel_path")
+    )
     tags = payload.get("tags") or payload.get("tag")
     action = str(payload.get("action", "add")).strip().lower()
     if isinstance(rel_paths, str):
         rel_paths = [rel_paths]
     if isinstance(tags, str):
         tags = [tags]
-    if not isinstance(rel_paths, list) or not isinstance(tags, list) or action not in {"add", "remove"}:
-        return {"error": "rel_paths/images, tags, and action=add|remove are required"}, 400
+    if (
+        not isinstance(rel_paths, list)
+        or not isinstance(tags, list)
+        or action not in {"add", "remove"}
+    ):
+        return {
+            "error": "rel_paths/images, tags, and action=add|remove are required"
+        }, 400
     normalized_tags = sorted({str(tag).strip() for tag in tags if str(tag).strip()})
     store = _tag_store()
     updated = []
@@ -1258,14 +1519,25 @@ def llm_tags():
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         media_path = source_file_path(safe_rel_path)
-        if media_path.exists() and is_media_file(media_path) and not is_excluded_gallery_path(media_path):
+        if (
+            media_path.exists()
+            and is_media_file(media_path)
+            and not is_excluded_gallery_path(media_path)
+        ):
             if action == "remove":
                 store.remove_tags(safe_rel_path, normalized_tags)
             else:
                 store.add_tags(safe_rel_path, normalized_tags)
             updated.append(safe_rel_path)
-    log_security_event("llm_tags", "success", action=action, updated=len(updated), tags=normalized_tags)
-    return {"status": "ok", "action": action, "updated": updated, "tags": normalized_tags}
+    log_security_event(
+        "llm_tags", "success", action=action, updated=len(updated), tags=normalized_tags
+    )
+    return {
+        "status": "ok",
+        "action": action,
+        "updated": updated,
+        "tags": normalized_tags,
+    }
 
 
 @app.route("/api/llm/delete", methods=["POST"])
@@ -1278,7 +1550,11 @@ def llm_delete():
         return {"error": "Valid rel_path is required"}, 400
     safe_rel_path = sanitize_rel_path(rel_path)
     media_path = source_file_path(safe_rel_path)
-    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
+    if (
+        not media_path.exists()
+        or not is_media_file(media_path)
+        or is_excluded_gallery_path(media_path)
+    ):
         return {"error": "Image not found"}, 404
     dry_run = bool(payload.get("dry_run", False))
     moved = False
@@ -1286,8 +1562,17 @@ def llm_delete():
         moved = move_to_trash(media_path, DATA_FOLDER)
         if moved:
             remove_thumbnail_cache_for(safe_rel_path)
-    log_security_event("llm_delete", "success" if (moved and not dry_run) else "dry_run", target=safe_rel_path, dry_run=dry_run)
-    return {"deleted": moved if not dry_run else True, "rel_path": safe_rel_path, "dry_run": dry_run}, 200
+    log_security_event(
+        "llm_delete",
+        "success" if (moved and not dry_run) else "dry_run",
+        target=safe_rel_path,
+        dry_run=dry_run,
+    )
+    return {
+        "deleted": moved if not dry_run else True,
+        "rel_path": safe_rel_path,
+        "dry_run": dry_run,
+    }, 200
 
 
 @app.route("/api/llm/bulk-delete", methods=["POST"])
@@ -1300,20 +1585,37 @@ def llm_bulk_delete():
         return {"error": "rel_paths/images must be a list"}, 400
     # Guard: cap item count (issue #199)
     if len(rel_paths) > LLM_BULK_DELETE_MAX_ITEMS:
-        log_security_event("llm_bulk_delete", "rejected", reason="exceeds_max_items", count=len(rel_paths), max_items=LLM_BULK_DELETE_MAX_ITEMS)
-        return {"error": f"Too many items. Maximum is {LLM_BULK_DELETE_MAX_ITEMS}."}, 422
+        log_security_event(
+            "llm_bulk_delete",
+            "rejected",
+            reason="exceeds_max_items",
+            count=len(rel_paths),
+            max_items=LLM_BULK_DELETE_MAX_ITEMS,
+        )
+        return {
+            "error": f"Too many items. Maximum is {LLM_BULK_DELETE_MAX_ITEMS}."
+        }, 422
     dry_run = bool(payload.get("dry_run", False))
     deleted = []
     skipped = []
     purged_thumbnails: list[str] = []
     for rel_path in rel_paths:
         if not isinstance(rel_path, str) or not sanitize_path(rel_path):
-            log_security_event("llm_bulk_delete", "denied", reason="invalid_path", rel_path=str(rel_path))
+            log_security_event(
+                "llm_bulk_delete",
+                "denied",
+                reason="invalid_path",
+                rel_path=str(rel_path),
+            )
             skipped.append(str(rel_path))
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         media_path = source_file_path(safe_rel_path)
-        if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
+        if (
+            not media_path.exists()
+            or not is_media_file(media_path)
+            or is_excluded_gallery_path(media_path)
+        ):
             skipped.append(safe_rel_path)
             continue
         if dry_run:
@@ -1325,8 +1627,20 @@ def llm_bulk_delete():
             skipped.append(safe_rel_path)
     if purged_thumbnails:
         batch_remove_thumbnails(purged_thumbnails)
-    log_security_event("llm_bulk_delete", "success" if (deleted and not dry_run) else "dry_run", deleted=len(deleted), skipped=len(skipped), dry_run=dry_run)
-    return {"deleted": deleted, "skipped": skipped, "deleted_count": len(deleted), "skipped_count": len(skipped), "dry_run": dry_run}
+    log_security_event(
+        "llm_bulk_delete",
+        "success" if (deleted and not dry_run) else "dry_run",
+        deleted=len(deleted),
+        skipped=len(skipped),
+        dry_run=dry_run,
+    )
+    return {
+        "deleted": deleted,
+        "skipped": skipped,
+        "deleted_count": len(deleted),
+        "skipped_count": len(skipped),
+        "dry_run": dry_run,
+    }
 
 
 @app.route("/api/llm/dedup", methods=["POST"])
@@ -1336,7 +1650,11 @@ def llm_dedup():
     payload = request.get_json(silent=True) or {}
     remove = bool(payload.get("remove") or payload.get("delete"))
     try:
-        limit = max(1, min(100, int(payload.get("limit", "0") or "0"))) if payload.get("limit") else None
+        limit = (
+            max(1, min(100, int(payload.get("limit", "0") or "0")))
+            if payload.get("limit")
+            else None
+        )
     except (ValueError, TypeError):
         limit = None
     groups = find_duplicate_media()
@@ -1347,8 +1665,16 @@ def llm_dedup():
         # Guard: cap total removal count (issue #199)
         estimated_removals = sum(len(g["duplicates"]) for g in groups)
         if estimated_removals > LLM_DEDUP_MAX_REMOVALS:
-            log_security_event("llm_dedup", "rejected", reason="exceeds_max_removals", estimated=estimated_removals, max_removals=LLM_DEDUP_MAX_REMOVALS)
-            return {"error": f"Too many duplicates to remove. Maximum is {LLM_DEDUP_MAX_REMOVALS}."}, 422
+            log_security_event(
+                "llm_dedup",
+                "rejected",
+                reason="exceeds_max_removals",
+                estimated=estimated_removals,
+                max_removals=LLM_DEDUP_MAX_REMOVALS,
+            )
+            return {
+                "error": f"Too many duplicates to remove. Maximum is {LLM_DEDUP_MAX_REMOVALS}."
+            }, 422
         for group in groups:
             for rel_path in group["duplicates"]:
                 media_path = source_file_path(str(rel_path))
@@ -1356,10 +1682,28 @@ def llm_dedup():
                     removed.append(str(rel_path))
         if removed:
             batch_remove_thumbnails([str(r) for r in removed])
-    log_security_event("llm_dedup", "success", groups=len(groups), removed=len(removed), dry_run=not remove)
+    log_security_event(
+        "llm_dedup",
+        "success",
+        groups=len(groups),
+        removed=len(removed),
+        dry_run=not remove,
+    )
     if remove:
-        return {"duplicate_groups": groups, "group_count": len(groups), "dry_run": False, "removed": removed, "deleted_count": len(removed)}
-    return {"duplicate_groups": groups, "group_count": len(groups), "dry_run": True, "skipped_count": 0, "deleted_count": 0}
+        return {
+            "duplicate_groups": groups,
+            "group_count": len(groups),
+            "dry_run": False,
+            "removed": removed,
+            "deleted_count": len(removed),
+        }
+    return {
+        "duplicate_groups": groups,
+        "group_count": len(groups),
+        "dry_run": True,
+        "skipped_count": 0,
+        "deleted_count": 0,
+    }
 
 
 @app.route("/api/llm/task/run", methods=["POST"])
@@ -1387,7 +1731,8 @@ def settings_view():
         except ValueError:
             maintenance_result = None
 
-    return render_template("settings.html",
+    return render_template(
+        "settings.html",
         theme_color=PWA_THEME_COLOR,
         data_folder=str(DATA_FOLDER),
         thumb_cache=str(THUMBNAIL_CACHE_DIR),
@@ -1399,7 +1744,8 @@ def settings_view():
 @app.route("/about")
 @require_auth
 def about_view():
-    return render_template("about.html",
+    return render_template(
+        "about.html",
         theme_color=PWA_THEME_COLOR,
         app_version=APP_VERSION,
         auth_enabled=is_auth_enabled(),
@@ -1420,7 +1766,9 @@ def oidc_login():
     session["oidc_next_url"] = next_url
 
     # Get the callback URL
-    callback_url = os.environ.get("OIDC_CALLBACK_URL") or url_for("oidc_callback", _external=True)
+    callback_url = os.environ.get("OIDC_CALLBACK_URL") or url_for(
+        "oidc_callback", _external=True
+    )
 
     # Redirect to OIDC provider
     return oauth.oidc.authorize_redirect(callback_url)
@@ -1448,7 +1796,9 @@ def oidc_callback():
 
         # Extract user identifier (prefer email, fallback to sub)
         user_id = user_info.get("email") or user_info.get("sub")
-        user_name = user_info.get("name") or user_info.get("preferred_username") or user_id
+        user_name = (
+            user_info.get("name") or user_info.get("preferred_username") or user_id
+        )
 
         if not user_id:
             return "Could not identify user from OIDC response", 400
@@ -1457,7 +1807,10 @@ def oidc_callback():
         allowed, reason = verify_oidc_authorization(user_info)
         if not allowed:
             log_security_event(
-                "login", "denied", auth_method="oidc", reason=reason,
+                "login",
+                "denied",
+                auth_method="oidc",
+                reason=reason,
                 oidc_sub=oidc_sub,
             )
             next_url = session.pop("oidc_next_url", None) or "/"
@@ -1482,11 +1835,17 @@ def oidc_callback():
         return redirect(url_for("login", error="oidc_failed", next=next_url))
 
 
-
 app.add_url_rule("/health", "health", health, methods=["GET"])
 app.add_url_rule("/health/storage", "storage_health", storage_health, methods=["GET"])
-app.add_url_rule("/health/storage/read", "storage_health_read", storage_health_read, methods=["GET"])
-app.add_url_rule("/health/storage/write", "storage_health_write", storage_health_write, methods=["GET"])
+app.add_url_rule(
+    "/health/storage/read", "storage_health_read", storage_health_read, methods=["GET"]
+)
+app.add_url_rule(
+    "/health/storage/write",
+    "storage_health_write",
+    storage_health_write,
+    methods=["GET"],
+)
 
 
 if __name__ == "__main__":
