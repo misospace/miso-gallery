@@ -379,3 +379,65 @@ class TestFolderCoverDelegatesToIterGalleryItems:
         # Scanning from root should return both
         all_items = app_module.iter_gallery_items(kind="media")
         assert len(all_items) == 2
+
+
+class TestRecentViewScanTruncation:
+    """recent_view() should detect scan truncation and surface an indicator."""
+
+    def test_recent_view_no_truncation(self, tmp_path, monkeypatch):
+        from conftest import build_client
+        client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none", extra_env={"GALLERY_SCAN_LIMIT": "50"})
+        # Remove default fixture files so we have exactly 1 item
+        for f in data_dir.iterdir():
+            if f.is_file() and f.name not in (".thumb_cache",):
+                f.unlink()
+        (data_dir / "img1.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+
+        resp = client.get("/recent")
+        assert resp.status_code == 200
+        text = resp.data.decode()
+        assert "Gallery scan limit reached" not in text
+
+    def test_recent_view_with_truncation(self, tmp_path, monkeypatch):
+        from conftest import build_client
+        client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none", extra_env={"GALLERY_SCAN_LIMIT": "50"})
+        # Remove default fixture files and create 51 files to exceed limit of 50
+        for f in data_dir.iterdir():
+            if f.is_file() and f.name not in (".thumb_cache",):
+                f.unlink()
+        for i in range(51):
+            (data_dir / f"img{i:04d}.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+
+        resp = client.get("/recent")
+        assert resp.status_code == 200
+        text = resp.data.decode()
+        assert "Gallery scan limit reached" in text
+
+
+class TestIndexViewScanTruncation:
+    """index() should detect scan truncation and surface an indicator."""
+
+    def test_index_view_no_truncation(self, tmp_path, monkeypatch):
+        from conftest import build_client
+        client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none", extra_env={"GALLERY_SCAN_LIMIT": "50"})
+        # Default fixture has 3 files (sample.png, copy.png, cats/cat.jpg) - under limit
+
+        resp = client.get("/")
+        assert resp.status_code == 200
+        text = resp.data.decode()
+        assert "Gallery scan limit reached" not in text
+
+    def test_index_view_with_truncation(self, tmp_path, monkeypatch):
+        from conftest import build_client
+        client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none", extra_env={"GALLERY_SCAN_LIMIT": "50"})
+        # Remove default fixture files and create 51 files to exceed limit of 50
+        for f in data_dir.iterdir():
+            if f.is_file() and f.name not in (".thumb_cache",):
+                f.unlink()
+        for i in range(51):
+            (data_dir / f"img{i:04d}.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+
+        resp = client.get("/")
+        assert resp.status_code == 200
+        text = resp.data.decode()
+        assert "Gallery scan limit reached" in text
