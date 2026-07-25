@@ -14,6 +14,7 @@ from pathlib import Path
 from flask import (
     Flask,
     abort,
+    jsonify,
     make_response,
     redirect,
     render_template,
@@ -595,7 +596,7 @@ def check_auth():
     ):
         return None
 
-    if request.path in ["/login", "/auth", "/logout", "/auth/oidc", "/auth/oidc/callback"]:
+    if request.path in ["/login", "/auth", "/logout", "/auth/oidc", "/auth/oidc/callback", "/auth/oidc/refresh"]:
         return None
 
     if session.get("authenticated"):
@@ -1475,6 +1476,12 @@ def oidc_callback():
         session["user_name"] = user_name
         session["auth_method"] = "oidc"
 
+        # Store refresh token and expiry for future token refresh
+        if token.get("refresh_token"):
+            session["oidc_refresh_token"] = token["refresh_token"]
+        if token.get("expires_in"):
+            session["oidc_token_expires_at"] = time.time() + int(token["expires_in"])
+
         log_security_event("login", "success", auth_method="oidc", oidc_sub=oidc_sub)
 
         # Redirect to the stored next URL or index
@@ -1486,6 +1493,76 @@ def oidc_callback():
         next_url = session.pop("oidc_next_url", None) or "/"
         return redirect(url_for("login", error="oidc_failed", next=next_url))
 
+
+
+@app.route("/auth/oidc/refresh")
+def oidc_refresh():
+    """Refresh OIDC access token using stored refresh token."""
+    if not is_oidc_configured():
+        return jsonify({"error": "OIDC not configured"}), 400
+
+    if not session.get("authenticated") or session.get("auth_method") != "oidc":
+        return jsonify({"error": "not authenticated via OIDC"}), 401
+
+    refresh_token = session.get("oidc_refresh_token")
+    if not refresh_token:
+        log_security_event(
+            "token_refresh", "denied",
+            auth_method="oidc",
+            reason="no_refresh_token",
+            user_id=session.get("user_id"),
+        )
+        return jsonify({"error": "no refresh token available"}), 400
+
+    try:
+        # Use the OAuth2Session to refresh the token
+        from authlib.integrations.requests_client import OAuth2Session
+
+        client_id = os.environ.get("OIDC_CLIENT_ID", "")
+        client_secret = os.environ.get("OIDC_CLIENT_SECRET", "")
+        token_url = os.environ.get("OIDC_TOKEN_URL") or os.environ.get("OIDC_ISSUER_URL", "").rstrip("/") + "/protocol/openid-connect/token"
+
+        oauth_session = OAuth2Session(client_id, token=refresh_token)
+        new_token = oauth_session.refresh_token(token_url, client_secret=client_secret)
+
+        # Update session with new tokens
+        if new_token.get("access_token"):
+            session["oidc_access_token"] = new_token["access_token"]
+        if new_token.get("refresh_token"):
+            session["oidc_refresh_token"] = new_token["refresh_token"]
+        if new_token.get("expires_in"):
+            session["oidc_token_expires_at"] = time.time() + int(new_token["expires_in"])
+
+        # Re-verify OIDC authorization after token refresh
+        resp = oauth.oidc.get("userinfo")
+        user_info = resp.json()
+        allowed, reason = verify_oidc_authorization(user_info)
+        if not allowed:
+            log_security_event(
+                "token_refresh", "denied",
+                auth_method="oidc",
+                reason=reason,
+                user_id=session.get("user_id"),
+            )
+            # Invalidate session on authorization failure
+            session.clear()
+            return jsonify({"error": "authorization revoked after refresh"}), 403
+
+        log_security_event(
+            "token_refresh", "success",
+            auth_method="oidc",
+            user_id=session.get("user_id"),
+        )
+        return jsonify({"status": "refreshed"})
+
+    except Exception as e:
+        log_security_event(
+            "token_refresh", "error",
+            auth_method="oidc",
+            error=type(e).__name__,
+            user_id=session.get("user_id"),
+        )
+        return jsonify({"error": "token refresh failed"}), 500
 
 
 app.add_url_rule("/health", "health", health, methods=["GET"])
