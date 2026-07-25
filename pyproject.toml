@@ -1,0 +1,30 @@
+[project]
+name = "miso-gallery"
+version = "0.1.0"
+description = "A lightweight, self-hosted image gallery for AI-generated images"
+readme = "README.md"
+license = {text = "GPL-3.0"}
+requires-python = ">=3.11"
+dependencies = [
+    "Flask>=3.1,<4",
+    "Pillow>=11.3,<12",
+    "requests>=2.32,<3",
+    "Werkzeug>=3.1,<4",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "ruff>=0.9,<1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]
