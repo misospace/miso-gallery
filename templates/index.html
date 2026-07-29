@@ -88,6 +88,7 @@
     .image-card:hover .thumb-preview-btn { opacity:1; }
     .selector { position:absolute; top:10px; left:10px; z-index:2; transform:scale(1.2); cursor:pointer; }
     .empty { text-align:center; padding:50px; color:#666; }
+    .scan-limit-warning { background:#3d2e00; border:1px solid #f5a623; border-radius:8px; padding:12px 16px; margin-bottom:16px; color:#f5a623; font-size:.85rem; }
     .stats { color:#666; font-size:.85rem; margin-top:20px; text-align:center; }
     @media (max-width: 640px) {
       .toolbar,
@@ -144,6 +145,11 @@
   </nav>
 
   <div class="container">
+    {% if scan_truncated %}
+    <div class="scan-limit-warning">
+      ⚠️ Gallery scan limit reached: showing first {{ scan_limit }} items. Some media may not appear here.
+    </div>
+    {% endif %}
     <form method="GET" action="{{ url_for('index', subpath=current_subpath) }}" style="margin-bottom:15px;">
       <input id="categorySearch" type="text" name="q" placeholder="Filter categories..." value="{{ search_query }}" autocomplete="off" spellcheck="false" aria-label="Filter categories by name" style="padding:6px 10px; border-radius:4px; border:1px solid #444; background:#2a2a2a; color:#e0e0e0; min-width: 240px;">
       <button type="submit" class="refresh-btn" style="margin-left:5px;">🔍 Apply filter</button>

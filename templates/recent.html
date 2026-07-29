@@ -44,6 +44,7 @@
     .folder-nav-btn:hover { background:#3b82f6; }
     .image-card:hover .folder-nav-btn, .image-card:hover .thumb-preview-btn { opacity:1; }
     .empty { text-align:center; padding:50px; color:#666; }
+    .scan-limit-warning { background:#3d2e00; border:1px solid #f5a623; border-radius:8px; padding:12px 16px; margin-bottom:16px; color:#f5a623; font-size:.85rem; }
   </style>
 </head>
 <body>
@@ -56,6 +57,11 @@
   </div>
 </header>
 <div class="container">
+  {% if scan_truncated %}
+  <div class="scan-limit-warning">
+    ⚠️ Gallery scan limit reached: showing first {{ scan_limit }} items. Some recent media may not appear here.
+  </div>
+  {% endif %}
   <h2 style="margin-bottom:20px;font-size:1.2rem;color:#888;">Recently Added ({{ items|length }})</h2>
   {% if items %}
     <div class="grid">

@@ -729,6 +729,12 @@ def index(subpath: str = ""):
         items = [i for i in items if i.get("is_dir") and search_query in i["name"].lower()]
         stats["folders"] = sum(1 for i in items if i.get("is_dir"))
         stats["images"] = sum(1 for i in items if not i.get("is_dir"))
+
+    # Detect scan truncation (Issue #349).
+    scanned_count = stats["folders"] + stats["images"]
+    scan_truncated = _apply_scan_limit(has_more=False, scanned_count=scanned_count)
+    scan_limit = GALLERY_SCAN_LIMIT
+
     parent_url = None
     nav_crumbs: list[dict[str, object]] = []
     if safe_subpath:
@@ -781,6 +787,8 @@ def index(subpath: str = ""):
         search_query=search_query,
         category_filter_active=bool(search_query and not safe_subpath),
         bulk_feedback=bulk_feedback,
+        scan_truncated=scan_truncated,
+        scan_limit=scan_limit,
         app_version=APP_VERSION,
         csrf=csrf_token(),
         theme_color=PWA_THEME_COLOR,
@@ -1007,12 +1015,23 @@ def recent_view():
         })
 
     images.sort(key=lambda x: x["mtime"], reverse=True)
+
+    # Detect scan truncation (Issue #349).
+    scan_truncated = _apply_scan_limit(has_more=False, scanned_count=len(images))
+    scan_limit = GALLERY_SCAN_LIMIT
+
     images = images[:max_items]
 
     for img in images:
         del img["mtime"]
 
-    return render_template("recent.html", items=images, theme_color=PWA_THEME_COLOR)
+    return render_template(
+        "recent.html",
+        items=images,
+        scan_truncated=scan_truncated,
+        scan_limit=scan_limit,
+        theme_color=PWA_THEME_COLOR,
+    )
 
 
 @app.route("/trash")
