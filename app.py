@@ -4,7 +4,9 @@ import contextlib
 import hashlib
 import html
 import json
+import mimetypes
 import os
+import re
 import secrets
 import shlex
 import subprocess
@@ -19,6 +21,7 @@ from flask import (
     redirect,
     render_template,
     request,
+    send_file,
     send_from_directory,
     session,
     url_for,
@@ -796,6 +799,58 @@ def index(subpath: str = ""):
     )
 
 
+def _serve_video_with_range(source_path: Path):
+    """Serve a video file with HTTP Range-request support for seeking/scrubbing.
+
+    Returns 206 Partial Content when a Range header is present, otherwise 200 OK
+    with the full file.
+    """
+    file_size = source_path.stat().st_size
+    range_header = request.headers.get("Range")
+
+    if not range_header:
+        # No Range header — serve the entire file
+        return send_file(str(source_path))
+
+    # Parse Range header (expect format: "bytes=start-end" or "bytes=start-")
+    match = re.match(r"bytes=(\d+)-(\d*)", range_header)
+    if not match:
+        # Invalid Range header — serve full file without Range processing
+        return send_file(str(source_path), conditional=False)
+
+    start = int(match.group(1))
+    end_str = match.group(2)
+    end = int(end_str) if end_str else file_size - 1
+
+    # Clamp to valid range
+    start = max(0, min(start, file_size - 1))
+    end = max(start, min(end, file_size - 1))
+
+    length = end - start + 1
+
+    def generate():
+        with open(source_path, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk_size = min(8192, remaining)
+                data = f.read(chunk_size)
+                if not data:
+                    break
+                yield data
+                remaining -= len(data)
+
+    mime_type = mimetypes.guess_type(str(source_path))[0] or "application/octet-stream"
+
+    response = make_response(generate())
+    response.status_code = 206
+    response.headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+    response.headers["Content-Length"] = str(length)
+    response.headers["Content-Type"] = mime_type
+    response.headers["Accept-Ranges"] = "bytes"
+    return response
+
+
 @app.route("/thumb/<path:filename>")
 @rate_limit(max_requests=120, window=60)
 def thumb(filename: str):
@@ -808,9 +863,9 @@ def thumb(filename: str):
     cached_name = thumbnail_filename(rel_path, source_path)
     cached_path = THUMBNAIL_CACHE_DIR / cached_name
 
-    # Videos are served directly without thumbnailing.
+    # Videos are served directly with Range-request support for seeking/scrubbing.
     if source_path.suffix.lower() in VIDEO_EXTENSIONS:
-        return send_from_directory(str(DATA_FOLDER), rel_path)
+        return _serve_video_with_range(source_path)
 
     if not cached_path.exists():
         try:
