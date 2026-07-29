@@ -79,7 +79,9 @@ def build_client(monkeypatch, tmp_path, *, api_keys: str = TEST_API_KEY, auth_ty
         monkeypatch.setenv("ADMIN_PASSWORD", "pass123")
     else:
         monkeypatch.delenv("ADMIN_PASSWORD", raising=False)
-    monkeypatch.setenv("OIDC_ENABLED", "false")
+    # Only set OIDC_ENABLED to false if not already set via extra_env
+    if extra_env is None or "OIDC_ENABLED" not in extra_env:
+        monkeypatch.setenv("OIDC_ENABLED", "false")
     monkeypatch.setenv("SECRET_KEY", TEST_SECRET)
 
     if api_keys is None:
