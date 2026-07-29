@@ -17,6 +17,10 @@ class TagStore:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(str(self.database_path), timeout=30)
         try:
+            # Enable WAL mode for concurrent reader/writer access under multi-worker load.
+            # synchronous=NORMAL reduces fsync overhead while maintaining durability.
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS media_tags (
