@@ -1,5 +1,6 @@
 """Tests for OIDC token refresh functionality (issue #351)."""
 
+import logging
 import sys
 from pathlib import Path
 
@@ -179,3 +180,42 @@ def test_oidc_callback_stores_expiry_without_refresh(monkeypatch, tmp_path):
             app_module.verify_oidc_authorization = original_verify
     finally:
         app_module.oauth.oidc.authorize_access_token = original_authorize
+
+
+def test_verify_local_password_plaintext_warning(monkeypatch, tmp_path, caplog):
+    """verify_local_password logs a warning when plaintext ADMIN_PASSWORD is used."""
+    import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "ADMIN_PASSWORD", "plaintext-secret")
+
+    with caplog.at_level(logging.WARNING, logger="auth"):
+        result = auth_module.verify_local_password("plaintext-secret")
+        assert result is True
+        assert "Plaintext ADMIN_PASSWORD detected" in caplog.text
+
+
+def test_verify_local_password_hashed_no_warning(monkeypatch, tmp_path, caplog):
+    """verify_local_password does not warn when a hashed password is used."""
+    from werkzeug.security import generate_password_hash
+
+    import auth as auth_module
+
+    hashed = generate_password_hash("hashed-secret")
+    monkeypatch.setattr(auth_module, "ADMIN_PASSWORD", hashed)
+
+    with caplog.at_level(logging.WARNING, logger="auth"):
+        result = auth_module.verify_local_password("hashed-secret")
+        assert result is True
+        assert "Plaintext ADMIN_PASSWORD detected" not in caplog.text
+
+
+def test_verify_local_password_plaintext_constant_time(monkeypatch, tmp_path):
+    """verify_local_password uses constant-time comparison for plaintext passwords."""
+    import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "ADMIN_PASSWORD", "short")
+
+    # These should all return False without timing side-channels
+    assert auth_module.verify_local_password("longer-password") is False
+    assert auth_module.verify_local_password("shor") is False
+    assert auth_module.verify_local_password("short") is True

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import os
@@ -187,7 +188,14 @@ def verify_local_password(password: str) -> bool:
 
     Supports plaintext and hashed formats for migration:
     - plaintext: ADMIN_PASSWORD=***
-    - hashed: ADMIN_PASSWORD=*** or scrypt:...
+    - hashed: ADMIN_PASSWORD=pbkdf2:... or scrypt:...
+
+    SECURITY WARNING: Plaintext ADMIN_PASSWORD values are insecure.
+    Migrate to a hashed password by setting ADMIN_PASSWORD to a Werkzeug hash,
+    e.g., generated via::
+
+        python -c "from werkzeug.security import generate_password_hash; \
+print(generate_password_hash('your-password'))"
     """
     if not ADMIN_PASSWORD:
         return False
@@ -195,7 +203,14 @@ def verify_local_password(password: str) -> bool:
     stored = ADMIN_PASSWORD
     if stored.startswith(("pbkdf2:", "scrypt:")):
         return check_password_hash(stored, password)
-    return password == stored
+    # Plaintext fallback for migration support — log warning and use
+    # constant-time comparison to avoid timing side-channels.
+    logger.warning(
+        "Plaintext ADMIN_PASSWORD detected. This is insecure and will be "
+        "deprecated in a future release. Migrate to a hashed password by "
+        "setting ADMIN_PASSWORD to a Werkzeug hash (e.g., pbkdf2:sha256:...)."
+    )
+    return hmac.compare_digest(password, stored)
 
 
 def require_auth(view_fn):
