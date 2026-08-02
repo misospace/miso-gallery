@@ -158,6 +158,10 @@ GALLERY_PAGE_DEFAULT = 50
 GALLERY_PAGE_MAX = 500
 GALLERY_SCAN_LIMIT = int(os.environ.get("GALLERY_SCAN_LIMIT", "5000"))
 
+# Shared filesystem scan cache (TTL-based) to avoid redundant rglob passes
+GALLERY_SCAN_CACHE_TTL = max(int(os.environ.get("GALLERY_SCAN_CACHE_TTL", "10") or 10), 1)
+_gallery_scan_cache: dict[str, tuple[float, list[Path]]] = {}
+
 # Destructive-operation guardrails (issue #199)
 BULK_DELETE_MAX_ITEMS = int(os.environ.get("BULK_DELETE_MAX_ITEMS", "200"))
 BULK_DELETE_MAX_FOLDERS = int(os.environ.get("BULK_DELETE_MAX_FOLDERS", "50"))
@@ -420,6 +424,16 @@ def media_metadata(path: Path, tags: list[str] | None = None) -> dict[str, objec
 
 
 
+def _invalidate_gallery_scan_cache() -> None:
+    """Clear the shared filesystem scan cache.
+
+    Call this after any write operation (delete, upload, tag, move) so that
+    subsequent reads re-scan the gallery directory tree instead of returning a
+    stale snapshot.
+    """
+    _gallery_scan_cache.clear()
+
+
 def iter_gallery_items(
     kind: str = "media",
     limit: int | None = None,
@@ -429,6 +443,12 @@ def iter_gallery_items(
 
     Replaces duplicated rglob patterns across iter_gallery_items (kind="media"),
     iter_gallery_items (kind="folders"), folder_cover_rel_path, and recent_view.
+
+    Results are cached per-process with a short TTL (GALLERY_SCAN_CACHE_TTL)
+    so repeated scans within the window reuse a snapshot instead of re-walking
+    the entire gallery directory tree. Small-limit queries (e.g. folder covers
+    with limit=1) bypass the cache to maintain immediate consistency when files
+    are added or deleted directly on disk.
 
     Args:
         kind: "media" (files only), "folders" (dirs only), or "all" (both).
@@ -440,6 +460,19 @@ def iter_gallery_items(
     """
     effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
     scan_root = root if root is not None else DATA_FOLDER
+
+    # Cache key includes kind, limit, and root so each unique query is cached separately.
+    cache_key = (kind, effective_limit, str(scan_root))
+
+    # Check cache (skip for small limits to maintain immediate consistency)
+    now = time.time()
+    if effective_limit > 1:
+        cached = _gallery_scan_cache.get(cache_key)
+        if cached is not None:
+            ts, cached_results = cached
+            if now - ts < GALLERY_SCAN_CACHE_TTL:
+                return cached_results
+
     results: list[Path] = []
     # Collect first, sort second, then truncate. Collecting before truncating is
     # required so a small limit (e.g. folder covers asking for a single image)
@@ -463,7 +496,12 @@ def iter_gallery_items(
             results.append(item)
         except (OSError, PermissionError):
             continue
-    return sorted(results, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())[:effective_limit]
+    sorted_results = sorted(results, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())[:effective_limit]
+
+    # Store in cache (only for larger queries)
+    if effective_limit > 1:
+        _gallery_scan_cache[cache_key] = (now, sorted_results)
+    return sorted_results
 
 
 def file_sha256(path: Path) -> str:
@@ -906,6 +944,7 @@ def delete(filename: str):
             outcome = "error"
 
     log_security_event("delete", outcome, target=rel_path)
+    _invalidate_gallery_scan_cache()
 
     folder = os.path.dirname(rel_path)
     return redirect(url_for("index", subpath=folder if folder else ""))
@@ -986,6 +1025,7 @@ def bulk_delete():
         moved_folders=moved_folders,
         current_subpath=current_subpath,
     )
+    _invalidate_gallery_scan_cache()
 
     redirect_kwargs = {"subpath": current_subpath}
     if moved_files or moved_folders:
@@ -1028,6 +1068,7 @@ def add_tag():
         target=rel_path,
         tag=",".join(tags),
     )
+    _invalidate_gallery_scan_cache()
 
     return {"status": "ok"}
 
@@ -1108,6 +1149,7 @@ def trash_restore(item_name: str):
 
     restored = restore_from_trash(item_name, DATA_FOLDER)
     log_security_event("trash_restore", "success" if restored else "not_found", item=item_name)
+    _invalidate_gallery_scan_cache()
     return redirect(url_for("trash_view"))
 
 
@@ -1121,6 +1163,7 @@ def trash_empty():
 
     deleted = empty_trash(DATA_FOLDER)
     log_security_event("trash_empty", "success", deleted=deleted)
+    _invalidate_gallery_scan_cache()
     return redirect(url_for("trash_view"))
 
 
@@ -1136,6 +1179,7 @@ def trash_purge():
     except ValueError:
         retention_days = 30
     purge_old_trash(DATA_FOLDER, retention_days)
+    _invalidate_gallery_scan_cache()
     return redirect(url_for("trash_view"))
 
 
@@ -1243,6 +1287,7 @@ def webhook_run_task():
         return {"error": "Invalid CSRF token"}, 403
 
     body, status = run_configured_task(request.get_json(silent=True) or {})
+    _invalidate_gallery_scan_cache()
     return body, status
 
 
@@ -1367,6 +1412,7 @@ def llm_delete():
         if moved:
             remove_thumbnail_cache_for(safe_rel_path)
     log_security_event("llm_delete", "success" if (moved and not dry_run) else "dry_run", target=safe_rel_path, dry_run=dry_run)
+    _invalidate_gallery_scan_cache()
     return {"deleted": moved if not dry_run else True, "rel_path": safe_rel_path, "dry_run": dry_run}, 200
 
 
@@ -1406,6 +1452,7 @@ def llm_bulk_delete():
     if purged_thumbnails:
         batch_remove_thumbnails(purged_thumbnails)
     log_security_event("llm_bulk_delete", "success" if (deleted and not dry_run) else "dry_run", deleted=len(deleted), skipped=len(skipped), dry_run=dry_run)
+    _invalidate_gallery_scan_cache()
     return {"deleted": deleted, "skipped": skipped, "deleted_count": len(deleted), "skipped_count": len(skipped), "dry_run": dry_run}
 
 
@@ -1447,6 +1494,7 @@ def llm_dedup():
 @rate_limit(max_requests=10, window=60)
 def llm_task_run():
     body, status = run_configured_task(request.get_json(silent=True) or {})
+    _invalidate_gallery_scan_cache()
     return body, status
 
 
