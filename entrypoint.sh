@@ -10,6 +10,9 @@ set -e
 
 : "${WEB_CONCURRENCY:=2}"
 
+# Ensure /data exists and is writable (handles bind-mounted volumes).
+mkdir -p /data
+
 exec gunicorn \
     --bind "0.0.0.0:${PORT:-5000}" \
     --workers "$WEB_CONCURRENCY" \

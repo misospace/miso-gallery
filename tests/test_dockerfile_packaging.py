@@ -50,3 +50,44 @@ def test_entrypoint_documents_rate_limiter_warning():
     """entrypoint.sh should warn about in-memory rate limiter with multiple workers."""
     entrypoint = Path("entrypoint.sh").read_text()
     assert "rate limiter" in entrypoint.lower() or "rate limiting" in entrypoint.lower()
+
+
+def test_dockerfile_creates_appuser_group():
+    """Dockerfile should create a dedicated appuser group."""
+    dockerfile = Path("Dockerfile").read_text()
+    assert "groupadd" in dockerfile
+    assert "appuser" in dockerfile
+
+
+def test_dockerfile_creates_appuser_user():
+    """Dockerfile should create a dedicated appuser user with numeric UID."""
+    dockerfile = Path("Dockerfile").read_text()
+    assert "useradd" in dockerfile
+    # Must use a numeric UID (DL3066 compliance)
+    assert "-u 10001" in dockerfile
+
+
+def test_dockerfile_uses_appuser():
+    """Dockerfile should switch to appuser before ENTRYPOINT."""
+    dockerfile = Path("Dockerfile").read_text()
+    lines = dockerfile.splitlines()
+    user_line = None
+    entrypoint_line = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("USER"):
+            user_line = i
+        if stripped.startswith("ENTRYPOINT"):
+            entrypoint_line = i
+    assert user_line is not None, "No USER directive found"
+    assert entrypoint_line is not None, "No ENTRYPOINT directive found"
+    assert user_line < entrypoint_line, "USER must come before ENTRYPOINT"
+    # Must use numeric UID (DL3066 compliance)
+    assert "USER 10001" in dockerfile
+
+
+def test_dockerfile_chowns_data():
+    """Dockerfile should chown /data to appuser."""
+    dockerfile = Path("Dockerfile").read_text()
+    assert "chown" in dockerfile
+    assert "/data" in dockerfile
