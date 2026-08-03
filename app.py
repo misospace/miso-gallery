@@ -11,6 +11,7 @@ import secrets
 import shlex
 import subprocess
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 from flask import (
@@ -151,7 +152,8 @@ WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
 AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
 FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
-_FOLDER_COVER_CACHE: dict[str, tuple[float, str | None]] = {}
+_FOLDER_COVER_CACHE: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
+_FOLDER_COVER_MAX_SIZE = 1024
 
 # Bounded pagination defaults for gallery endpoints
 GALLERY_PAGE_DEFAULT = 50
@@ -342,28 +344,55 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
     now = time.time()
     cached = _FOLDER_COVER_CACHE.get(folder_rel_path)
     if cached and now - cached[0] < FOLDER_COVER_CACHE_TTL:
+        # Move to end (most recently used) for LRU ordering.
+        _FOLDER_COVER_CACHE.move_to_end(folder_rel_path)
         cached_rel = cached[1]
-        if cached_rel:
-            cached_path = DATA_FOLDER / sanitize_rel_path(cached_rel)
-            if cached_path.exists() and cached_path.is_file() and cached_path.suffix.lower() in IMAGE_EXTENSIONS:
-                return cached_rel
-        else:
-            cached = None
+        if cached_rel is None:
+            # Short-circuit: folder was previously scanned and had no media.
+            return None
+        # Re-validate the backing file still exists and resolves within DATA_FOLDER.
+        try:
+            cached_path = (DATA_FOLDER / sanitize_rel_path(cached_rel)).resolve()
+            cached_path.relative_to(DATA_FOLDER.resolve())
+        except ValueError:
+            # Resolved path escapes DATA_FOLDER (e.g. symlink) — treat as missing.
+            _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
+            return None
+        if cached_path.exists() and cached_path.is_file() and cached_path.suffix.lower() in IMAGE_EXTENSIONS:
+            return cached_rel
+        # Stale entry — fall through to re-scan.
 
     folder_path = DATA_FOLDER / sanitize_rel_path(folder_rel_path) if folder_rel_path else DATA_FOLDER
     if not folder_path.exists() or not folder_path.is_dir():
         _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
+        while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
+            _FOLDER_COVER_CACHE.popitem(last=False)
         return None
 
     # Delegate to iter_gallery_items for bounded, exclusion-aware scanning.
     items = iter_gallery_items(kind="media", limit=1, root=folder_path)
 
     if not items:
-        _FOLDER_COVER_CACHE.pop(folder_rel_path, None)
+        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
+        while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
+            _FOLDER_COVER_CACHE.popitem(last=False)
+        return None
+
+    # Validate the discovered cover resolves within DATA_FOLDER.
+    try:
+        resolved = items[0].resolve()
+        resolved.relative_to(DATA_FOLDER.resolve())
+    except ValueError:
+        # Symlink or other escape — treat as no cover.
+        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
+        while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
+            _FOLDER_COVER_CACHE.popitem(last=False)
         return None
 
     cover_rel = items[0].relative_to(DATA_FOLDER).as_posix()
     _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
+    while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
+        _FOLDER_COVER_CACHE.popitem(last=False)
     return cover_rel
 
 
