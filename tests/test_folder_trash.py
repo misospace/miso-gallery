@@ -13,8 +13,11 @@ Covers:
 
 from __future__ import annotations
 
+import contextlib
 import re
 import time
+
+import pytest
 
 from conftest import build_client
 
@@ -362,3 +365,96 @@ class TestDirSizeSymlinkConsistency:
         assert trash_items[0]["size"] == 50, (
             f"Expected 50 bytes (symlinks skipped), got {trash_items[0]['size']}"
         )
+
+
+class TestTrashPurgeValidation:
+    """Verify trash_purge() validates days input and provides user feedback (regression for #364)."""
+
+    @pytest.fixture(autouse=True)
+    def reset_rate_limiters(self):
+        """Reset rate limiter state before each test to avoid cross-test interference."""
+        from security import FALLBACK_LIMITER, _primary_limiter
+
+        FALLBACK_LIMITER.reset()
+        if _primary_limiter is not None:
+            with contextlib.suppress(Exception):
+                _primary_limiter._client.flushdb()
+
+    def test_trash_purge_invalid_days_logs_warning_and_flashes(self, monkeypatch, tmp_path, caplog):
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        # Create a trashed item to purge
+        folder = data_dir / "purge_me"
+        folder.mkdir()
+        (folder / "file.jpg").write_bytes(b"fakesize")
+        from trash import move_to_trash
+
+        move_to_trash(folder, data_dir)
+
+        # Login first
+        login_resp = client.get("/login")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', login_resp.data.decode())
+        assert csrf_match, "CSRF token not found in login form"
+        login_csrf = csrf_match.group(1)
+        auth_resp = client.post(
+            "/auth",
+            data={"password": "pass123", "next": "/", "csrf_token": login_csrf},
+            follow_redirects=False,
+        )
+        assert auth_resp.status_code == 302
+
+        # Get CSRF token from trash page
+        trash_resp = client.get("/trash")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', trash_resp.data.decode())
+        assert csrf_match, "CSRF token not found on trash page"
+        csrf_token = csrf_match.group(1)
+
+        # Submit invalid days value
+        with caplog.at_level("WARNING"):
+            response = client.post(
+                "/trash/purge",
+                data={"csrf_token": csrf_token, "days": "abc"},
+                follow_redirects=True,
+            )
+
+        assert response.status_code == 200
+        # Verify flash message is present in the rendered page
+        assert b"Invalid retention period" in response.data
+        # Verify a warning was logged about the invalid input
+        assert any("Invalid 'days' value" in record.message for record in caplog.records)
+
+    def test_trash_purge_valid_days(self, monkeypatch, tmp_path):
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        # Create a trashed item
+        folder = data_dir / "purge_me2"
+        folder.mkdir()
+        (folder / "file.jpg").write_bytes(b"fakesize")
+        from trash import move_to_trash
+
+        move_to_trash(folder, data_dir)
+
+        # Login first
+        login_resp = client.get("/login")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', login_resp.data.decode())
+        assert csrf_match, "CSRF token not found in login form"
+        login_csrf = csrf_match.group(1)
+        auth_resp = client.post(
+            "/auth",
+            data={"password": "pass123", "next": "/", "csrf_token": login_csrf},
+            follow_redirects=False,
+        )
+        assert auth_resp.status_code == 302
+
+        # Get CSRF token from trash page
+        trash_resp = client.get("/trash")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', trash_resp.data.decode())
+        assert csrf_match, "CSRF token not found on trash page"
+        csrf_token = csrf_match.group(1)
+
+        response = client.post(
+            "/trash/purge",
+            data={"csrf_token": csrf_token, "days": "7"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302

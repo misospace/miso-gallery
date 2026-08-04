@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import html
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -17,6 +18,7 @@ from pathlib import Path
 from flask import (
     Flask,
     abort,
+    flash,
     jsonify,
     make_response,
     redirect,
@@ -64,6 +66,8 @@ from trash import (
 SERVICE_WORKER_PATH = os.path.join(os.path.dirname(__file__), "templates", "service-worker.js")
 with open(SERVICE_WORKER_PATH, "r") as _f:
     SERVICE_WORKER_TEMPLATE = _f.read()
+
+log = logging.getLogger("app")
 
 
 DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
@@ -1225,6 +1229,11 @@ def trash_purge():
     try:
         retention_days = max(1, min(3650, int(days)))
     except ValueError:
+        log.warning(
+            "Invalid 'days' value '%s' submitted to trash purge; using default of 30 days",
+            days,
+        )
+        flash("Invalid retention period provided; using default of 30 days.", "warning")
         retention_days = 30
     purge_old_trash(DATA_FOLDER, retention_days)
     _invalidate_gallery_scan_cache()
