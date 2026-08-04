@@ -15,6 +15,7 @@ from conftest import auth_header, build_client
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def _reset_rate_limiter():
     """Reset the in-process rate-limit buckets so each test starts with a
@@ -22,6 +23,7 @@ def _reset_rate_limiter():
     fallback limiter is process-global, so without this the tests would
     exhaust each other."""
     from security import FALLBACK_LIMITER
+
     FALLBACK_LIMITER.reset()
     yield
     FALLBACK_LIMITER.reset()
@@ -30,6 +32,7 @@ def _reset_rate_limiter():
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_png_data(byte_value: int) -> bytes:
     """Return *n* distinct 1x1 PNG payloads that all share ``byte_value`` as a
@@ -62,6 +65,7 @@ def _set_data_folder(monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 # Tests for ``find_duplicate_media()``
 # ---------------------------------------------------------------------------
+
 
 def test_find_duplicate_media_detects_known_duplicate_pair(monkeypatch, tmp_path):
     """Two files with identical bytes must be grouped together."""
@@ -124,6 +128,7 @@ def test_find_duplicate_media_limit_caps_group_count(monkeypatch, tmp_path):
 # Tests for the ``/api/llm/dedup`` endpoint
 # ---------------------------------------------------------------------------
 
+
 def test_llm_dedup_dry_run_returns_groups_without_removing(monkeypatch, tmp_path):
     """``dry_run`` must never modify the filesystem."""
 
@@ -171,9 +176,7 @@ def test_llm_dedup_payload_limit_caps_returned_groups(monkeypatch, tmp_path):
         (data_dir / f"photo_{idx}.png").write_bytes(payload_bytes)
         (data_dir / f"photo_{idx}_dup.png").write_bytes(payload_bytes)
 
-    resp = client.post(
-        "/api/llm/dedup", json={"limit": 1}, headers=auth_header()
-    )
+    resp = client.post("/api/llm/dedup", json={"limit": 1}, headers=auth_header())
     assert resp.status_code == 200
     payload = resp.get_json()
     assert payload["dry_run"] is True
@@ -185,9 +188,7 @@ def test_llm_dedup_payload_limit_caps_returned_groups(monkeypatch, tmp_path):
     assert resp.get_json()["group_count"] == 3
 
 
-def test_llm_dedup_max_removals_guardrail_blocks_oversized_batch(
-    monkeypatch, tmp_path
-):
+def test_llm_dedup_max_removals_guardrail_blocks_oversized_batch(monkeypatch, tmp_path):
     """When removals exceed ``LLM_DEDUP_MAX_REMOVALS``, the endpoint must
     refuse the request with a 4xx response rather than trashing files."""
 
@@ -204,9 +205,7 @@ def test_llm_dedup_max_removals_guardrail_blocks_oversized_batch(
     # Force the guardrail down to 1 so the three pairs exceed it.
     monkeypatch.setattr(app, "LLM_DEDUP_MAX_REMOVALS", 1)
 
-    resp = client.post(
-        "/api/llm/dedup", json={"remove": True}, headers=auth_header()
-    )
+    resp = client.post("/api/llm/dedup", json={"remove": True}, headers=auth_header())
 
     # Endpoint must reject the request with 4xx rather than trash files.
     assert 400 <= resp.status_code < 500
@@ -227,11 +226,71 @@ def test_llm_dedup_max_removals_allows_under_limit_batch(monkeypatch, tmp_path):
 
     monkeypatch.setattr(app, "LLM_DEDUP_MAX_REMOVALS", 5)
 
-    resp = client.post(
-        "/api/llm/dedup", json={"remove": True}, headers=auth_header()
-    )
+    resp = client.post("/api/llm/dedup", json={"remove": True}, headers=auth_header())
     assert resp.status_code == 200
     payload = resp.get_json()
     assert payload["dry_run"] is False
     assert payload["deleted_count"] == 1
     assert "sample.png" in payload["removed"] or "copy.png" in payload["removed"]
+
+
+# ---------------------------------------------------------------------------
+# Tests for ``batch_remove_thumbnails()``
+# ---------------------------------------------------------------------------
+
+
+def test_batch_remove_thumbnails_removes_matching_prefixes(monkeypatch, tmp_path):
+    """``batch_remove_thumbnails()`` must delete only the cached thumbnails
+    whose ``__``-prefixed stem corresponds to one of the supplied paths."""
+
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    import app
+
+    thumb_dir = data_dir / ".thumb_cache"
+    thumb_dir.mkdir(parents=True, exist_ok=True)
+
+    matching_a = thumb_dir / "sample__img.png.111.222.jpg"
+    matching_b = thumb_dir / "cats__cat.jpg.333.444.jpg"
+    unrelated = thumb_dir / "other__bar.png.555.666.jpg"
+    matching_a.write_bytes(b"a")
+    matching_b.write_bytes(b"b")
+    unrelated.write_bytes(b"c")
+
+    app.batch_remove_thumbnails(["sample/img.png", "cats/cat.jpg"])
+
+    assert not matching_a.exists(), "matching prefix should have been removed"
+    assert not matching_b.exists(), "matching nested prefix should have been removed"
+    assert unrelated.exists(), "unrelated prefix must be preserved"
+
+
+def test_batch_remove_thumbnails_handles_empty_input(monkeypatch, tmp_path):
+    """An empty rel-path list must short-circuit without touching disk."""
+
+    build_client(monkeypatch, tmp_path)
+
+    import app
+
+    # Should not raise even when the cache directory is freshly empty.
+    app.batch_remove_thumbnails([])  # no exception
+
+
+# ---------------------------------------------------------------------------
+# Test for the LLM_DEDUP_MAX_REMOVALS env-var loading path
+# ---------------------------------------------------------------------------
+
+
+def test_llm_dedup_max_removals_env_var_is_honoured_at_import(monkeypatch, tmp_path):
+    """The module-level ``LLM_DEDUP_MAX_REMOVALS`` constant must reflect the
+    value of the ``LLM_DEDUP_MAX_REMOVALS`` environment variable at import
+    time (this is the path used in production, not monkeypatching)."""
+
+    import importlib
+    import sys
+
+    monkeypatch.setenv("LLM_DEDUP_MAX_REMOVALS", "7")
+
+    sys.modules.pop("app", None)
+    reloaded = importlib.import_module("app")
+
+    assert reloaded.LLM_DEDUP_MAX_REMOVALS == 7
