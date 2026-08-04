@@ -149,6 +149,7 @@ PWA_THEME_COLOR = "#0d0d0d"
 PWA_APP_NAME = "Miso Gallery"
 APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.19").strip() or "0.1.19"
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
+_VALID_TASK_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
 FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
@@ -213,6 +214,20 @@ def _verify_webhook_secret(token: str) -> bool:
 def _task_env_key(task_name: str) -> str:
     normalized = "".join(ch if ch.isalnum() else "_" for ch in task_name).strip("_").upper()
     return f"{WEBHOOK_TASK_PREFIX}{normalized}" if normalized else ""
+
+
+def _validate_task_name(task_name: str) -> str | None:
+    """Validate that a task name only contains safe characters.
+
+    Returns an error message string if validation fails, or None if valid.
+    Only [a-zA-Z0-9_-] are permitted to prevent env var key collision and injection.
+    """
+    if not _VALID_TASK_RE.match(task_name):
+        return (
+            f"Invalid task name: '{task_name}'. "
+            "Task names may only contain letters, digits, hyphens, and underscores."
+        )
+    return None
 
 
 def _render_task_command(template: str, params: dict[str, object]) -> str:
@@ -598,6 +613,10 @@ def run_configured_task(payload: dict[str, object]) -> tuple[dict[str, object], 
         return {"error": "task is required"}, 400
     if not isinstance(params, dict):
         return {"error": "params must be an object"}, 400
+
+    validation_error = _validate_task_name(task)
+    if validation_error is not None:
+        return {"error": validation_error}, 400
 
     env_key = _task_env_key(task)
     if not env_key:
@@ -1522,7 +1541,13 @@ def llm_dedup():
 @require_api_key_with_scope("write")
 @rate_limit(max_requests=10, window=60)
 def llm_task_run():
-    body, status = run_configured_task(request.get_json(silent=True) or {})
+    data = request.get_json(silent=True) or {}
+    task = data.get("task", "")
+    if task:
+        validation_error = _validate_task_name(task)
+        if validation_error is not None:
+            return {"error": validation_error}, 400
+    body, status = run_configured_task(data)
     _invalidate_gallery_scan_cache()
     return body, status
 
