@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import contextlib
+import json
 import re
 import time
 
@@ -272,6 +273,110 @@ class TestTrashRestore:
         assert folder.exists()
         assert (folder / "file1.jpg").read_bytes() == content_before["file1.jpg"]
         assert (nested / "file2.jpg").read_bytes() == content_before["subdir/file2.jpg"]
+
+
+class TestRestorePathTraversal:
+    """Regression tests for path traversal in restore_from_trash (#382).
+
+    The <path:> converter in Flask allows / and .., so a crafted item_name
+    could escape the trash directory. These tests verify that traversal
+    attempts are rejected.
+    """
+
+    def test_restore_rejects_dotdot_in_name(self, monkeypatch, tmp_path):
+        from trash import restore_from_trash
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        # Create a file outside the trash dir that an attacker might target
+        secret = data_dir / "secret.txt"
+        secret.write_text("top_secret")
+
+        with pytest.raises(ValueError, match="Invalid trash item name"):
+            restore_from_trash("../secret.txt", data_dir)
+
+        # Verify the secret file was not moved
+        assert secret.exists()
+        assert secret.read_text() == "top_secret"
+
+    def test_restore_rejects_double_dotdot(self, monkeypatch, tmp_path):
+        from trash import restore_from_trash
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        # Create a file outside the data dir entirely
+        external = tmp_path / "external_secret.txt"
+        external.write_text("external_data")
+
+        with pytest.raises(ValueError, match="Invalid trash item name"):
+            restore_from_trash("../../external_secret.txt", data_dir)
+
+        # Verify the external file was not touched
+        assert external.exists()
+        assert external.read_text() == "external_data"
+
+    def test_restore_rejects_slash_in_name(self, monkeypatch, tmp_path):
+        from trash import restore_from_trash
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError, match="Invalid trash item name"):
+            restore_from_trash("subdir/file.txt", data_dir)
+
+    def test_restore_rejects_backslash_in_name(self, monkeypatch, tmp_path):
+        from trash import restore_from_trash
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError, match="Invalid trash item name"):
+            restore_from_trash("subdir\\file.txt", data_dir)
+
+    def test_restore_rejects_mixed_traversal(self, monkeypatch, tmp_path):
+        from trash import restore_from_trash
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        with pytest.raises(ValueError, match="Invalid trash item name"):
+            restore_from_trash("foo/../../../etc/passwd", data_dir)
+
+    def test_restore_rejects_malicious_meta_original(self, monkeypatch, tmp_path):
+        """Even if item_name is valid, a crafted .meta.json 'original' must not escape."""
+        from trash import restore_from_trash, trash_dir
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        td = trash_dir(data_dir)
+        td.mkdir(parents=True, exist_ok=True)
+
+        # Create a valid-looking item in trash with a malicious meta
+        fake_item = td / "fake_item.txt"
+        fake_item.write_text("harmless")
+        meta_file = td / "fake_item.txt.meta.json"
+        meta_file.write_text(
+            json.dumps({"original": "../../../etc/passwd", "deleted_at": 0})
+        )
+
+        with pytest.raises(ValueError, match="Invalid original path"):
+            restore_from_trash("fake_item.txt", data_dir)
+
+    def test_restore_rejects_meta_original_dotdot(self, monkeypatch, tmp_path):
+        """Meta 'original' with .. segments must be rejected."""
+        from trash import restore_from_trash, trash_dir
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        td = trash_dir(data_dir)
+        td.mkdir(parents=True, exist_ok=True)
+
+        fake_item = td / "fake2.txt"
+        fake_item.write_text("harmless")
+        meta_file = td / "fake2.txt.meta.json"
+        meta_file.write_text(
+            json.dumps({"original": "../outside_trash.txt", "deleted_at": 0})
+        )
+
+        with pytest.raises(ValueError, match="Invalid original path"):
+            restore_from_trash("fake2.txt", data_dir)
 
 
 class TestTrashListIncludesDirs:

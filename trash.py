@@ -145,11 +145,34 @@ def list_trash(data_folder: Path) -> list[dict]:
     return out
 
 
+def _is_safe_relative_path(path_str: str) -> bool:
+    """Return True if *path_str* contains no path-traversal segments."""
+    return all(part != ".." for part in path_str.replace("\\", "/").split("/"))
+
+
 def restore_from_trash(item_name: str, data_folder: Path) -> bool:
+    """Restore an item from trash to its original location.
+
+    Returns True if restored, False if not found or invalid.
+    Raises ValueError if *item_name* contains path traversal sequences.
+    """
+    # Reject path traversal in item_name (Flask's <path:> converter allows / and ..)
+    if "/" in item_name or "\\" in item_name or ".." in item_name:
+        raise ValueError(f"Invalid trash item name: {item_name!r}")
+
     td = trash_dir(data_folder)
     item = td / item_name
     if not item.exists():
         return False
+
+    # Verify resolved path stays within the trash directory
+    try:
+        resolved_item = item.resolve()
+        resolved_td = td.resolve()
+    except OSError:
+        return False
+    if not (str(resolved_item).startswith(str(resolved_td) + "/") or resolved_item == resolved_td):
+        raise ValueError(f"Item path escapes trash directory: {item_name!r}")
 
     meta_file = _meta_path(item)
     try:
@@ -157,7 +180,17 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         rel = meta.get("original")
         if not rel:
             return False
+        # Validate original path doesn't escape data_folder
+        if not _is_safe_relative_path(rel):
+            raise ValueError(f"Invalid original path in meta: {rel!r}")
         dest = data_folder / rel
+        try:
+            resolved_dest = dest.resolve()
+            resolved_data = data_folder.resolve()
+        except OSError:
+            return False
+        if not (str(resolved_dest).startswith(str(resolved_data) + "/") or resolved_dest == resolved_data):
+            raise ValueError(f"Destination path escapes data folder: {rel!r}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
             ts = int(time.time())
@@ -171,6 +204,8 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         if meta_file.exists():
             meta_file.unlink(missing_ok=True)
         return True
+    except ValueError:
+        raise
     except Exception:
         return False
 
