@@ -1199,7 +1199,13 @@ def trash_restore(item_name: str):
         log_security_event("trash_restore", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
 
-    restored = restore_from_trash(item_name, DATA_FOLDER)
+    try:
+        restored = restore_from_trash(item_name, DATA_FOLDER)
+    except ValueError as exc:
+        log_security_event("trash_restore", "denied", reason=str(exc), item=item_name)
+        flash(str(exc), "error")
+        return redirect(url_for("trash_view"))
+
     log_security_event("trash_restore", "success" if restored else "not_found", item=item_name)
     _invalidate_gallery_scan_cache()
     return redirect(url_for("trash_view"))
