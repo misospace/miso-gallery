@@ -441,3 +441,47 @@ class TestIndexViewScanTruncation:
         assert resp.status_code == 200
         text = resp.data.decode()
         assert "Gallery scan limit reached" in text
+
+
+class TestSubfolderScanLimit:
+    """index() should respect GALLERY_SCAN_LIMIT when browsing subfolders (issue #386)."""
+
+    def test_subfolder_respects_scan_limit(self, tmp_path, monkeypatch):
+        from conftest import build_client
+        client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none", extra_env={"GALLERY_SCAN_LIMIT": "50"})
+        # Remove default fixture files
+        for f in data_dir.iterdir():
+            if f.is_file() and f.name not in (".thumb_cache",):
+                f.unlink()
+
+        # Create a subfolder with many files exceeding the scan limit
+        subfolder = data_dir / "large_folder"
+        subfolder.mkdir()
+        for i in range(60):
+            (subfolder / f"img{i:04d}.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+
+        # Browse the subfolder — should be truncated at 50 items
+        resp = client.get("/large_folder")
+        assert resp.status_code == 200
+        text = resp.data.decode()
+        assert "Gallery scan limit reached" in text
+
+    def test_subfolder_no_truncation_when_under_limit(self, tmp_path, monkeypatch):
+        from conftest import build_client
+        client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none", extra_env={"GALLERY_SCAN_LIMIT": "50"})
+        # Remove default fixture files
+        for f in data_dir.iterdir():
+            if f.is_file() and f.name not in (".thumb_cache",):
+                f.unlink()
+
+        # Create a subfolder with fewer files than the scan limit
+        subfolder = data_dir / "small_folder"
+        subfolder.mkdir()
+        for i in range(10):
+            (subfolder / f"img{i:04d}.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+
+        # Browse the subfolder — should not be truncated
+        resp = client.get("/small_folder")
+        assert resp.status_code == 200
+        text = resp.data.decode()
+        assert "Gallery scan limit reached" not in text
