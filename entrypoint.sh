@@ -13,7 +13,11 @@ set -e
 # Ensure /data exists and is writable (handles bind-mounted volumes).
 mkdir -p /data
 
+# Start gunicorn with environment-driven worker count and timeout.
+# --timeout must be >= max WEBHOOK_TASK_TIMEOUT (120s) so long-running webhook tasks
+# are not killed by the worker process. We add a 10s buffer to avoid race conditions.
 exec gunicorn \
     --bind "0.0.0.0:${PORT:-5000}" \
     --workers "$WEB_CONCURRENCY" \
+    --timeout 130 \
     app:app

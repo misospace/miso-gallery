@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -50,6 +51,23 @@ def test_entrypoint_documents_rate_limiter_warning():
     """entrypoint.sh should warn about in-memory rate limiter with multiple workers."""
     entrypoint = Path("entrypoint.sh").read_text()
     assert "rate limiter" in entrypoint.lower() or "rate limiting" in entrypoint.lower()
+
+
+def test_entrypoint_gunicorn_timeout_at_least_max_task_timeout():
+    """Gunicorn --timeout must be >= max WEBHOOK_TASK_TIMEOUT (120s).
+
+    Regression test for issue #385: webhook tasks can run up to 120s, but
+    gunicorn's default 30s worker timeout would kill the worker mid-task.
+    """
+    entrypoint = Path("entrypoint.sh").read_text()
+    match = re.search(r"--timeout\s+(\d+)", entrypoint)
+    assert match, "entrypoint.sh should set --timeout for gunicorn"
+    timeout = int(match.group(1))
+    # Max webhook task timeout is 120s (hard-coded cap in app.py)
+    max_task_timeout = 120
+    assert timeout >= max_task_timeout, (
+        f"gunicorn --timeout ({timeout}s) must be >= max WEBHOOK_TASK_TIMEOUT ({max_task_timeout}s)"
+    )
 
 
 def test_dockerfile_creates_appuser_group():
