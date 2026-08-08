@@ -101,6 +101,18 @@ app.config["SESSION_REFRESH_EACH_REQUEST"] = False
 
 app.after_request(add_security_headers)
 
+# ---------------------------------------------------------------------------
+# Startup-time security checks
+# ---------------------------------------------------------------------------
+
+if (os.environ.get("WEBHOOK_ENABLED", "").strip().lower() == "true"
+        and not os.environ.get("WEBHOOK_SECRET")):
+    log.warning(
+        "SECURITY: WEBHOOK_ENABLED=true but WEBHOOK_SECRET is not set. "
+        "The /api/webhook/run endpoint will be unavailable (503) to prevent "
+        "unauthenticated command execution."
+    )
+
 
 def _client_ip() -> str | None:
     forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
@@ -1344,16 +1356,33 @@ def maintenance_thumbnails_regenerate():
 @require_auth
 @rate_limit(max_requests=20, window=60)
 def webhook_run_task():
-    # Require WEBHOOK_SECRET as Bearer token when configured, regardless of auth mode.
-    # This prevents unauthenticated command execution when AUTH_TYPE=none.
-    if WEBHOOK_SECRET:
-        auth_header = request.headers.get("Authorization", "")
-        scheme, _, token = auth_header.partition(" ")
-        if scheme.lower() != "bearer" or not _verify_webhook_secret(token):
-            return {"error": "Webhook secret required"}, 401
+    # Fail closed: require WEBHOOK_SECRET when webhooks are enabled to prevent
+    # unauthenticated command execution (especially when AUTH_TYPE=none).
+    if not _webhook_enabled():
+        return jsonify({"error": "Webhook execution is disabled"}), 403
+
+    if not WEBHOOK_SECRET:
+        log.warning(
+            "Blocked webhook task execution: WEBHOOK_ENABLED=true but "
+            "WEBHOOK_SECRET is not configured."
+        )
+        return jsonify(
+            {
+                "error": (
+                    "Webhook execution unavailable: WEBHOOK_SECRET is not "
+                    "configured. Set WEBHOOK_SECRET to enable webhook tasks."
+                )
+            }
+        ), 503
+
+    # Validate bearer token
+    auth_header = request.headers.get("Authorization", "")
+    scheme, _, token = auth_header.partition(" ")
+    if scheme.lower() != "bearer" or not _verify_webhook_secret(token):
+        return jsonify({"error": "Webhook secret required"}), 401
 
     if is_auth_enabled() and not validate_csrf(request.headers.get("X-CSRF-Token")):
-        return {"error": "Invalid CSRF token"}, 403
+        return jsonify({"error": "Invalid CSRF token"}), 403
 
     body, status = run_configured_task(request.get_json(silent=True) or {})
     _invalidate_gallery_scan_cache()

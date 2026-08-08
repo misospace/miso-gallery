@@ -181,8 +181,8 @@ def test_media_endpoint_no_auth_required(monkeypatch, tmp_path):
 # 3. Webhook auth-disabled behavior
 # ---------------------------------------------------------------------------
 
-def test_webhook_disabled_returns_404(monkeypatch, tmp_path):
-    """When WEBHOOK_ENABLED=false, webhook endpoints should return 404."""
+def test_webhook_disabled_returns_403(monkeypatch, tmp_path):
+    """When WEBHOOK_ENABLED=false, webhook endpoint should return 403."""
     client, _ = build_client(
         monkeypatch, tmp_path,
         auth_type="none",
@@ -190,24 +190,26 @@ def test_webhook_disabled_returns_404(monkeypatch, tmp_path):
     )
 
     resp = client.post("/api/webhook/run", json={"task": "generate"})
-    assert resp.status_code == 404
+    assert resp.status_code == 403
 
 
 def test_webhook_enabled_accepts_requests(monkeypatch, tmp_path):
-    """When WEBHOOK_ENABLED=true, webhook endpoint should accept requests."""
+    """When WEBHOOK_ENABLED=true with WEBHOOK_SECRET, endpoint accepts valid requests."""
     client, _ = build_client(
         monkeypatch, tmp_path,
         auth_type="none",
         extra_env={
             "WEBHOOK_ENABLED": "true",
+            "WEBHOOK_SECRET": "test-secret-123",
             "WEBHOOK_TASK_GENERATE": "echo {params.name}",
         },
     )
 
-    resp = client.post("/api/webhook/run", json={
-        "task": "generate",
-        "params": {"name": "test"},
-    })
+    resp = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {"name": "test"}},
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
     assert resp.status_code == 200
 
 
@@ -216,10 +218,17 @@ def test_webhook_no_task_rejected(monkeypatch, tmp_path):
     client, _ = build_client(
         monkeypatch, tmp_path,
         auth_type="none",
-        extra_env={"WEBHOOK_ENABLED": "true"},
+        extra_env={
+            "WEBHOOK_ENABLED": "true",
+            "WEBHOOK_SECRET": "test-secret-123",
+        },
     )
 
-    resp = client.post("/api/webhook/run", json={})
+    resp = client.post(
+        "/api/webhook/run",
+        json={},
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
     assert resp.status_code == 400
 
 
