@@ -219,3 +219,64 @@ def test_verify_local_password_plaintext_constant_time(monkeypatch, tmp_path):
     assert auth_module.verify_local_password("longer-password") is False
     assert auth_module.verify_local_password("shor") is False
     assert auth_module.verify_local_password("short") is True
+
+
+def test_oidc_tokens_not_in_cookie_payload(monkeypatch, tmp_path):
+    """Session cookie payload must not contain plaintext OIDC credentials.
+
+    Regression test for issue #384: Flask's default SecureCookieSessionInterface
+    signs (HMAC) the session cookie but does not encrypt it, so any value stored
+    in ``session`` — including long-lived refresh tokens — is readable by the
+    browser.  This test verifies that the raw cookie value is opaque (encrypted)
+    and does not leak OIDC token values in plaintext.
+    """
+    extra_env = {
+        "OIDC_ENABLED": "true",
+        "OIDC_ISSUER": "https://issuer.example",
+        "OIDC_CLIENT_ID": "client",
+        "OIDC_CLIENT_SECRET": "secret",
+    }
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
+
+    # Store OIDC tokens in the session (simulating what oidc_callback does)
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["auth_method"] = "oidc"
+        sess["user_id"] = "test-user"
+        sess["user_name"] = "Test User"
+        sess["oidc_refresh_token"] = "super-secret-refresh-token-12345"
+        sess["oidc_access_token"] = "super-secret-access-token-67890"
+
+    # Make a request so the session cookie is set in the response
+    resp = client.get("/")
+
+    # Extract the raw session cookie value from the response headers
+    cookie_name = client.application.config.get("SESSION_COOKIE_NAME", "session")
+    cookie_value = None
+    for cookie in resp.headers.getlist("Set-Cookie"):
+        if cookie.startswith(cookie_name + "="):
+            # Parse "name=value; attributes..."
+            cookie_value = cookie.split("=", 1)[1].split(";")[0].strip()
+            break
+
+    assert cookie_value is not None, "Session cookie was not set in response"
+
+    # The cookie value must NOT contain plaintext OIDC token values.
+    # With encryption, the payload is opaque ciphertext; with plain signing,
+    # it would be URL-safe base64 of a JSON dict containing the tokens.
+    assert "super-secret-refresh-token-12345" not in cookie_value, (
+        "oidc_refresh_token found in plaintext in session cookie"
+    )
+    assert "super-secret-access-token-67890" not in cookie_value, (
+        "oidc_access_token found in plaintext in session cookie"
+    )
+
+    # Additional sanity: the cookie should not be valid JSON (which would
+    # indicate it's a plain signed session rather than encrypted).
+    import json as _json
+
+    try:
+        _json.loads(cookie_value)
+        raise AssertionError("Session cookie is valid JSON — tokens are not encrypted")
+    except (_json.JSONDecodeError, ValueError):
+        pass  # Expected: encrypted payload is not valid JSON
