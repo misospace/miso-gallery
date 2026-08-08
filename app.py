@@ -12,9 +12,11 @@ import secrets
 import shlex
 import subprocess
 import time
+from base64 import urlsafe_b64encode
 from collections import OrderedDict
 from pathlib import Path
 
+from cryptography.fernet import Fernet, InvalidToken
 from flask import (
     Flask,
     abort,
@@ -29,6 +31,7 @@ from flask import (
     session,
     url_for,
 )
+from flask.sessions import SecureCookieSessionInterface
 from PIL import Image, UnidentifiedImageError
 
 from auth import (
@@ -98,6 +101,53 @@ app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "t
 app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
 app.config["SESSION_REFRESH_EACH_REQUEST"] = False
+
+
+class EncryptedSessionInterface(SecureCookieSessionInterface):
+    """Encrypt session data with Fernet so OIDC tokens are not client-readable.
+
+    Flask's default SecureCookieSessionInterface signs (HMAC) the cookie but does
+    not encrypt it, meaning any value stored in ``session`` is visible to the
+    browser.  This subclass wraps the serialised JSON payload in a Fernet
+    ciphertext before signing, so the cookie payload is opaque even if an
+    attacker obtains the SECRET_KEY (they would still need the derived Fernet key).
+    """
+
+    def _get_fernet(self, app):
+        # Derive a 32-byte URL-safe key from the app's SECRET_KEY so we don't
+        # require a separate configuration value.
+        key = hashlib.sha256(app.secret_key.encode("utf-8")).digest()
+        return Fernet(urlsafe_b64encode(key))
+
+    def get_signing_serializer(self, app):
+        if not app.secret_key:
+            return None
+        fernet = self._get_fernet(app)
+        serializer = super().get_signing_serializer(app)
+        if serializer is None:
+            return None
+
+        # Wrap the parent's sign/dump so encryption happens around the JSON.
+        original_dump = serializer.dump
+        original_load = serializer.load
+
+        def encrypted_dump(data):
+            json_bytes = original_dump(data)
+            return fernet.encrypt(json_bytes)
+
+        def encrypted_load(payload):
+            try:
+                decrypted = fernet.decrypt(payload)
+            except InvalidToken:
+                return None
+            return original_load(decrypted)
+
+        serializer.dump = encrypted_dump
+        serializer.load = encrypted_load
+        return serializer
+
+
+app.session_interface = EncryptedSessionInterface()
 
 app.after_request(add_security_headers)
 
