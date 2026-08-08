@@ -780,6 +780,7 @@ def index(subpath: str = ""):
     items = []
     stats = {"folders": 0, "images": 0}
 
+    has_more = False
     for item in sorted(folder_path.iterdir(), key=lambda p: p.name.lower()):
         if item.name in {".thumb_cache", ".trash"}:
             continue
@@ -817,6 +818,11 @@ def index(subpath: str = ""):
                 }
             )
 
+        # Apply scan limit to subfolder browsing (Issue #386).
+        if len(items) >= GALLERY_SCAN_LIMIT:
+            has_more = True
+            break
+
     # Apply category search filter (root only).
     # Issue #51 expects folder/category name substring matching.
     if search_query and not safe_subpath:
@@ -826,7 +832,7 @@ def index(subpath: str = ""):
 
     # Detect scan truncation (Issue #349).
     scanned_count = stats["folders"] + stats["images"]
-    scan_truncated = _apply_scan_limit(has_more=False, scanned_count=scanned_count)
+    scan_truncated = _apply_scan_limit(has_more=has_more, scanned_count=scanned_count)
     scan_limit = GALLERY_SCAN_LIMIT
 
     parent_url = None
