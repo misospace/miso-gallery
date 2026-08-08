@@ -290,7 +290,7 @@ Webhook tasks allow authenticated write-scoped API callers to execute arbitrary 
 | Variable | Recommended Default | Purpose |
 |---|---|---|
 | `WEBHOOK_ENABLED` | `false` | Disable by default; enable only if needed |
-| `WEBHOOK_TASK_TIMEOUT` | `30` | Max seconds per task (range: 1–600) |
+| `WEBHOOK_TASK_TIMEOUT` | `30` | Max seconds per task (range: 1–600). Must not exceed gunicorn's `--timeout` value (130s) in `entrypoint.sh`. See [Timeout Configuration](#timeout-configuration). |
 | `LLM_WRITE_API_KEYS` | unique high-entropy tokens | Required for `/api/llm/task/run`; read-scoped keys are rejected |
 
 ### Enabling Tasks
@@ -314,6 +314,21 @@ docker compose restart gallery
 ```
 
 Tasks can also be disabled per-task by unsetting the `WEBHOOK_TASK_*` variable.
+
+---
+
+## Timeout Configuration
+
+Gunicorn's worker timeout (`--timeout 130`) must be at least the maximum allowed
+`WEBHOOK_TASK_TIMEOUT` value (120s). A 10-second buffer is added to avoid race
+conditions where a task finishes just as the worker timeout fires. If you change
+the `WEBHOOK_TASK_TIMEOUT` cap in `app.py`, update the gunicorn `--timeout` value
+in `entrypoint.sh` accordingly, keeping the buffer.
+
+| Component | Setting | Value | Notes |
+|---|---|---|---|
+| Gunicorn worker timeout | `--timeout` in `entrypoint.sh` | 130 | Must be >= max `WEBHOOK_TASK_TIMEOUT` + buffer |
+| Webhook task timeout cap | `min(120, ...)` in `app.py` | 120 | Hard-coded upper bound for `WEBHOOK_TASK_TIMEOUT` env var |
 
 ---
 
