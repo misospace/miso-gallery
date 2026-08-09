@@ -31,21 +31,7 @@ jobs:
           set -euo pipefail
           TAG="${{ github.event.release.tag_name }}"
           TAG="${TAG#v}"
-          VERSION=$(python3 - <<'PY'
-            import importlib.util
-            import os
-            import sys
-            from pathlib import Path
-
-            sys.path.insert(0, str(Path.cwd()))
-            spec = importlib.util.spec_from_file_location("app", "app.py")
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-            version = module.APP_VERSION
-            os.environ["APP_VERSION"] = version
-            print(version)
-          PY
-          )
+          VERSION=$(python3 scripts/read_app_version.py)
           if [ "$VERSION" != "$TAG" ]; then
             echo "ERROR: APP_VERSION ($VERSION) does not match release tag ($TAG)"
             echo "The APP_VERSION constant in app.py must be bumped to $TAG before releasing."

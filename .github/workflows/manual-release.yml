@@ -77,6 +77,7 @@ jobs:
       - name: Commit and push release branch
         id: branch
         env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
@@ -84,11 +85,22 @@ jobs:
           git config user.name "smurf-bot[bot]"
           git config user.email "smurf-bot[bot]@users.noreply.github.com"
           git add app.py
+          if git diff --cached --quiet; then
+            CURRENT_VERSION=$(python3 scripts/read_app_version.py)
+            if [ "$CURRENT_VERSION" != "$VERSION" ]; then
+              echo "APP_VERSION is $CURRENT_VERSION, expected $VERSION"
+              exit 1
+            fi
+            echo "APP_VERSION is already $VERSION; publishing from current main"
+            echo "publish_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           git commit -m "chore(release): bump version to ${VERSION}"
           git push origin "HEAD:refs/heads/${BRANCH}"
           echo "name=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Open release PR and enable auto-merge
+        if: steps.branch.outputs.name != ''
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           BRANCH: ${{ steps.branch.outputs.name }}
@@ -102,3 +114,16 @@ jobs:
             --body "Version bump for release ${VERSION}. The release will be published after this PR passes the required checks and merges.")
           gh pr merge "$PR_URL" --auto --squash --delete-branch
           echo "Release PR: $PR_URL"
+
+      - name: Publish already-bumped release
+        if: steps.branch.outputs.publish_sha != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.version.outputs.version }}
+          SHA: ${{ steps.branch.outputs.publish_sha }}
+        run: |
+          set -euo pipefail
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" --generate-notes --target "$SHA"
