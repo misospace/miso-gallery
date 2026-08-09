@@ -26,3 +26,10 @@ def test_rejects_inconsistent_defaults(tmp_path):
     )
     with pytest.raises(ValueError, match="consistent semver"):
         MODULE.read_app_version(app)
+
+
+def test_bare_annotation_falls_through_to_not_found(tmp_path):
+    app = tmp_path / "app.py"
+    app.write_text("APP_VERSION: str\n")
+    with pytest.raises(ValueError, match="not found"):
+        MODULE.read_app_version(app)

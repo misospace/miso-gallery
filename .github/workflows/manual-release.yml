@@ -86,13 +86,41 @@ jobs:
           git config user.email "smurf-bot[bot]@users.noreply.github.com"
           git add app.py
           if git diff --cached --quiet; then
-            CURRENT_VERSION=$(python3 scripts/read_app_version.py)
-            if [ "$CURRENT_VERSION" != "$VERSION" ]; then
-              echo "APP_VERSION is $CURRENT_VERSION, expected $VERSION"
+            echo "APP_VERSION is already $VERSION; locating merged release PR"
+            MERGED_PR=$(gh pr list --state merged \
+              --search "\"chore(release): bump version to ${VERSION}\" in:title" \
+              --json number,title,author,headRefName,mergeCommit \
+              --limit 50 | jq -r "
+                [.[] | select(
+                  .author.login == \"smurf-bot[bot]\" and
+                  (.headRefName | startswith(\"chore/release-v${VERSION}-\")) and
+                  .mergeCommit.oid != null and
+                  (.mergeCommit.oid | length) > 0
+                )] | .[0] // empty
+              ")
+            if [ -z "$MERGED_PR" ]; then
+              echo "No merged release PR found for version $VERSION"
               exit 1
             fi
-            echo "APP_VERSION is already $VERSION; publishing from current main"
-            echo "publish_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+            MERGE_SHA=$(echo "$MERGED_PR" | jq -r '.mergeCommit.oid')
+            VERIFY_FILE="${RUNNER_TEMP}/verify_app_${VERSION}.py"
+            if ! git show "${MERGE_SHA}:app.py" > "$VERIFY_FILE" 2>/dev/null; then
+              echo "Failed to read app.py from merge commit $MERGE_SHA"
+              rm -f "$VERIFY_FILE"
+              exit 1
+            fi
+            if ! COMMIT_VERSION=$(python3 scripts/read_app_version.py "$VERIFY_FILE"); then
+              echo "Failed to read APP_VERSION from merge commit $MERGE_SHA"
+              rm -f "$VERIFY_FILE"
+              exit 1
+            fi
+            rm -f "$VERIFY_FILE"
+            if [ "$COMMIT_VERSION" != "$VERSION" ]; then
+              echo "Merge commit $MERGE_SHA reports APP_VERSION=$COMMIT_VERSION, expected $VERSION"
+              exit 1
+            fi
+            echo "Publishing from merged release PR merge commit $MERGE_SHA"
+            echo "publish_sha=$MERGE_SHA" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           git commit -m "chore(release): bump version to ${VERSION}"

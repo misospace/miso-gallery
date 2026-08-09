@@ -17,6 +17,8 @@ def read_app_version(path: Path) -> str:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         if not any(isinstance(target, ast.Name) and target.id == "APP_VERSION" for target in targets):
             continue
+        if isinstance(node, ast.AnnAssign) and node.value is None:
+            continue
         values = {
             child.value
             for child in ast.walk(node.value)
