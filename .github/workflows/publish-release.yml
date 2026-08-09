@@ -69,29 +69,7 @@ jobs:
         id: release
         run: |
           set -euo pipefail
-          VERSION=$(python3 - <<'PY'
-          import importlib.util
-          import os
-          import sys
-
-          # Drop any inherited APP_VERSION so the module's own default is used.
-          os.environ.pop("APP_VERSION", None)
-          for mod in ("app", "app_stub"):
-              sys.modules.pop(mod, None)
-
-          spec = importlib.util.spec_from_file_location("app", "app.py")
-          if spec is None or spec.loader is None:
-              raise SystemExit("Cannot locate app.py module spec")
-          module = importlib.util.module_from_spec(spec)
-          sys.modules["app"] = module
-          spec.loader.exec_module(module)
-
-          version = getattr(module, "APP_VERSION", None)
-          if not isinstance(version, str) or not version.strip():
-              raise SystemExit("APP_VERSION is missing or empty in app.py")
-          print(version.strip())
-          PY
-          )
+          VERSION=$(python3 scripts/read_app_version.py)
           if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
             echo "Invalid APP_VERSION: $VERSION"
             exit 1
