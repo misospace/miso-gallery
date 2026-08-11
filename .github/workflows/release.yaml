@@ -4,9 +4,77 @@ on:
   release:
     types:
       - published
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Existing release tag to rebuild image for (e.g. 0.1.19)'
+        required: true
+        type: string
 
 jobs:
+  resolve-release:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      short_sha: ${{ steps.resolve.outputs.short_sha }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve release tag and validate APP_VERSION
+        id: resolve
+        env:
+          INPUT_TAG: ${{ github.event.inputs.release_tag }}
+          EVENT_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+
+          TAG_REF="${INPUT_TAG:-$EVENT_TAG}"
+          VERSION="${TAG_REF#v}"
+
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG_REF' is not valid semver."
+            exit 1
+          fi
+
+          echo "Fetching tag ref: $TAG_REF"
+          if ! git fetch origin "refs/tags/${TAG_REF}:refs/tags/${TAG_REF}" --force --no-tags; then
+            echo "::error::Tag '$TAG_REF' does not exist on origin."
+            exit 1
+          fi
+
+          SHA=$(git rev-parse "refs/tags/${TAG_REF}^{commit}")
+          if [ -z "$SHA" ]; then
+            echo "::error::Could not resolve commit SHA for tag '$TAG_REF'."
+            exit 1
+          fi
+          SHORT_SHA=$(git rev-parse --short=7 "$SHA")
+
+          echo "Tag $TAG_REF -> commit $SHA (short: $SHORT_SHA)"
+
+          TMPFILE=$(mktemp)
+          git show "${SHA}:app.py" > "$TMPFILE"
+          APP_VER=$(python3 scripts/read_app_version.py "$TMPFILE")
+          rm -f "$TMPFILE"
+
+          if [ "$APP_VER" != "$VERSION" ]; then
+            echo "::error::APP_VERSION ($APP_VER) at tag $TAG_REF does not match normalized version ($VERSION)."
+            exit 1
+          fi
+          echo "OK: APP_VERSION ($APP_VER) matches tag $TAG_REF"
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
   build:
+    needs: resolve-release
     strategy:
       matrix:
         include:
@@ -22,22 +90,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+    env:
+      PREBUILT_TAG: main-${{ needs.resolve-release.outputs.short_sha }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Check APP_VERSION matches release tag
-        run: |
-          set -euo pipefail
-          TAG="${{ github.event.release.tag_name }}"
-          TAG="${TAG#v}"
-          VERSION=$(python3 scripts/read_app_version.py)
-          if [ "$VERSION" != "$TAG" ]; then
-            echo "ERROR: APP_VERSION ($VERSION) does not match release tag ($TAG)"
-            echo "The APP_VERSION constant in app.py must be bumped to $TAG before releasing."
-            exit 1
-          fi
-          echo "OK: APP_VERSION ($VERSION) matches release tag ($TAG)"
+        with:
+          ref: ${{ needs.resolve-release.outputs.sha }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -58,9 +117,9 @@ jobs:
       - name: Check for pre-built image from CI build
         id: prebuilt
         run: |
-          if docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:main-${GITHUB_SHA}" >/dev/null 2>&1; then
+          if docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:${PREBUILT_TAG}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-            echo "Pre-built image main-${GITHUB_SHA} available; skipping rebuild."
+            echo "Pre-built image ${PREBUILT_TAG} available; skipping rebuild."
           else
             echo "exists=false" >> "$GITHUB_OUTPUT"
             echo "No pre-built image; will build from source."
@@ -83,11 +142,11 @@ jobs:
           ARCH="${{ matrix.arch }}"
           mkdir -p ${{ runner.temp }}/digests
           DIGEST=$(docker buildx imagetools inspect --raw \
-            "ghcr.io/${{ github.repository }}:main-${GITHUB_SHA}" 2>/dev/null \
+            "ghcr.io/${{ github.repository }}:${PREBUILT_TAG}" 2>/dev/null \
             | jq -r --arg arch "$ARCH" \
-              '.[] | select(.Descriptor.platform.architecture == $arch) | .Descriptor.digest')
+              '.manifests[] | select(.platform.os == "linux" and .platform.architecture == $arch) | .digest')
           if [ -z "$DIGEST" ] || [ "$DIGEST" = "null" ]; then
-            echo "::error::Could not locate $ARCH digest in pre-built main-${GITHUB_SHA} manifest."
+            echo "::error::Could not locate $ARCH digest in pre-built ${PREBUILT_TAG} manifest."
             exit 1
           fi
           touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
@@ -109,12 +168,12 @@ jobs:
 
   merge:
     runs-on: ubuntu-24.04-arm
-    needs: build
+    needs: [resolve-release, build]
     permissions:
       contents: read
       packages: write
     outputs:
-      version: ${{ steps.meta.outputs.version }}
+      version: ${{ needs.resolve-release.outputs.version }}
     steps:
       - name: Download digests
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -139,7 +198,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |-
-            type=semver,pattern={{version}}
+            type=raw,value=${{ needs.resolve-release.outputs.version }}
             type=raw,value=latest
 
       - name: Create manifest list and push
@@ -152,4 +211,4 @@ jobs:
       - name: Inspect image
         if: github.event_name != 'pull_request'
         run: |
-          docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ steps.meta.outputs.version }}
+          docker buildx imagetools inspect ghcr.io/${{ github.repository }}:${{ needs.resolve-release.outputs.version }}
