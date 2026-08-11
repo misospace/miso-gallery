@@ -92,7 +92,7 @@ jobs:
               --json number,title,author,headRefName,mergeCommit \
               --limit 50 | jq -r "
                 [.[] | select(
-                  .author.login == \"smurf-bot[bot]\" and
+                  .author.is_bot == true and
                   (.headRefName | startswith(\"chore/release-v${VERSION}-\")) and
                   .mergeCommit.oid != null and
                   (.mergeCommit.oid | length) > 0
