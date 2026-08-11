@@ -58,7 +58,7 @@ jobs:
       - name: Check for pre-built image from CI build
         id: prebuilt
         run: |
-          if docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:main-${GITHUB_SHA}" >dev/null 2>&1; then
+          if docker buildx imagetools inspect "ghcr.io/${{ github.repository }}:main-${GITHUB_SHA}" >/dev/null 2>&1; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
             echo "Pre-built image main-${GITHUB_SHA} available; skipping rebuild."
           else
