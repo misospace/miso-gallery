@@ -48,6 +48,7 @@ from auth import (
 )
 from health import health, storage_health, storage_health_read, storage_health_write
 from security import (
+    _client_ip,
     add_security_headers,
     csrf_token,
     is_safe_redirect_url,
@@ -162,11 +163,6 @@ if (os.environ.get("WEBHOOK_ENABLED", "").strip().lower() == "true"
         "The /api/webhook/run endpoint will be unavailable (503) to prevent "
         "unauthenticated command execution."
     )
-
-
-def _client_ip() -> str | None:
-    forwarded = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return forwarded or request.remote_addr
 
 
 def _request_id() -> str:

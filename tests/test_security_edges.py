@@ -521,3 +521,62 @@ def test_refresh_primary_limiter_rebuilds(monkeypatch):
 
     limiter2 = security.refresh_primary_limiter()
     assert limiter2 is not None
+
+
+def test_audit_log_ignores_forged_xff_from_untrusted_source(monkeypatch):
+    """The audit-log ``_client_ip`` must ignore forged ``X-Forwarded-For``.
+
+    Issue #404: app.py used to define its own ``_client_ip`` that trusted
+    ``X-Forwarded-For`` unconditionally, which made every
+    ``log_security_event()`` ``remote_addr`` field attacker-controlled. The
+    audit-log path must resolve the client IP with the same trust rules
+    as ``security._client_ip`` (gated by ``TRUSTED_PROXIES`` /
+    ``TRUST_PROXY``).
+    """
+    import app as app_module
+    import security
+
+    # No TRUSTED_PROXIES / TRUST_PROXY is configured: forged XFF must be ignored.
+    monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
+    monkeypatch.delenv("TRUST_PROXY", raising=False)
+
+    app = app_module.app
+    forged = "198.51.100.42"
+
+    # The audit-log path resolves through the same hardened helper.
+    assert app_module._client_ip is security._client_ip, (
+        "app.py must reuse security._client_ip so audit logs honour the "
+        "trusted-proxy trust model (see issue #404)."
+    )
+
+    with app.test_request_context(
+        "/delete/foo.png",
+        method="POST",
+        headers={"X-Forwarded-For": forged},
+        environ_overrides={"REMOTE_ADDR": "203.0.113.7"},
+    ):
+        resolved = app_module._client_ip()
+        assert resolved == "203.0.113.7"
+        assert resolved != forged
+
+
+def test_audit_log_honours_xff_when_proxy_trusted(monkeypatch):
+    """With TRUSTED_PROXIES configured, XFF is honoured from that source."""
+    import app as app_module
+
+    # Mark the immediate peer (203.0.113.7) as a trusted reverse proxy so
+    # the hardened helper will follow the X-Forwarded-For chain.
+    monkeypatch.setenv("TRUSTED_PROXIES", "203.0.113.7")
+    monkeypatch.delenv("TRUST_PROXY", raising=False)
+
+    app = app_module.app
+    forged = "198.51.100.42"
+
+    with app.test_request_context(
+        "/delete/foo.png",
+        method="POST",
+        headers={"X-Forwarded-For": forged},
+        environ_overrides={"REMOTE_ADDR": "203.0.113.7"},
+    ):
+        resolved = app_module._client_ip()
+        assert resolved == forged
