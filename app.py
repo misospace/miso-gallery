@@ -1784,30 +1784,24 @@ def oidc_refresh():
             reason="no_refresh_token",
             user_id=session.get("user_id"),
         )
-        return jsonify({"error": "no refresh token available"}), 400
+        return jsonify({"error": "no refresh token available"}), 401
 
     try:
-        # Use the OAuth2Session to refresh the token
         from authlib.integrations.requests_client import OAuth2Session
 
         client_id = os.environ.get("OIDC_CLIENT_ID", "")
         client_secret = os.environ.get("OIDC_CLIENT_SECRET", "")
-        token_url = os.environ.get("OIDC_TOKEN_URL") or os.environ.get("OIDC_ISSUER_URL", "").rstrip("/") + "/protocol/openid-connect/token"
+        token_url = os.environ.get("OIDC_TOKEN_URL") or os.environ.get("OIDC_ISSUER", "").rstrip("/") + "/protocol/openid-connect/token"
 
-        oauth_session = OAuth2Session(client_id, token=refresh_token)
-        new_token = oauth_session.refresh_token(token_url, client_secret=client_secret)
+        oauth_session = OAuth2Session(client_id, client_secret, token={"refresh_token": refresh_token})
+        new_token = oauth_session.refresh_token(token_url)
 
-        # Update session with new tokens
-        if new_token.get("access_token"):
-            session["oidc_access_token"] = new_token["access_token"]
         if new_token.get("refresh_token"):
             session["oidc_refresh_token"] = new_token["refresh_token"]
         if new_token.get("expires_in"):
             session["oidc_token_expires_at"] = time.time() + int(new_token["expires_in"])
 
-        # Re-verify OIDC authorization after token refresh
-        resp = oauth.oidc.get("userinfo")
-        user_info = resp.json()
+        user_info = oauth.oidc.userinfo(token={"access_token": new_token["access_token"]})
         allowed, reason = verify_oidc_authorization(user_info)
         if not allowed:
             log_security_event(
