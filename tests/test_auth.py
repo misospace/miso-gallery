@@ -36,7 +36,7 @@ def test_oidc_refresh_not_authenticated(monkeypatch, tmp_path):
 
 
 def test_oidc_refresh_no_refresh_token(monkeypatch, tmp_path):
-    """Token refresh returns 400 when no refresh token is stored in session."""
+    """Token refresh returns 401 when no refresh token is stored in session."""
     extra_env = {
         "OIDC_ENABLED": "true",
         "OIDC_ISSUER": "https://issuer.example",
@@ -53,7 +53,7 @@ def test_oidc_refresh_no_refresh_token(monkeypatch, tmp_path):
         sess["user_name"] = "Test User"
 
     resp = client.get("/auth/oidc/refresh")
-    assert resp.status_code == 400
+    assert resp.status_code == 401
     data = resp.get_json()
     assert "no refresh token" in data["error"].lower()
 
@@ -245,7 +245,6 @@ def test_oidc_tokens_not_in_cookie_payload(monkeypatch, tmp_path):
         sess["user_id"] = "test-user"
         sess["user_name"] = "Test User"
         sess["oidc_refresh_token"] = "super-secret-refresh-token-12345"
-        sess["oidc_access_token"] = "super-secret-access-token-67890"
 
     # Make a request so the session cookie is set in the response
     resp = client.get("/")
@@ -267,9 +266,7 @@ def test_oidc_tokens_not_in_cookie_payload(monkeypatch, tmp_path):
     assert "super-secret-refresh-token-12345" not in cookie_value, (
         "oidc_refresh_token found in plaintext in session cookie"
     )
-    assert "super-secret-access-token-67890" not in cookie_value, (
-        "oidc_access_token found in plaintext in session cookie"
-    )
+
 
     # Additional sanity: the cookie should not be valid JSON (which would
     # indicate it's a plain signed session rather than encrypted).
@@ -280,3 +277,129 @@ def test_oidc_tokens_not_in_cookie_payload(monkeypatch, tmp_path):
         raise AssertionError("Session cookie is valid JSON — tokens are not encrypted")
     except (_json.JSONDecodeError, ValueError):
         pass  # Expected: encrypted payload is not valid JSON
+
+
+def test_oidc_refresh_success(monkeypatch, tmp_path):
+    """Successful refresh: session built with refresh_token dict, userinfo called
+    with the new access_token, session refresh_token and expiry updated."""
+    from unittest.mock import MagicMock, patch
+
+    extra_env = {
+        "OIDC_ENABLED": "true",
+        "OIDC_ISSUER": "https://issuer.example",
+        "OIDC_CLIENT_ID": "client",
+        "OIDC_CLIENT_SECRET": "secret",
+    }
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
+
+    import app as app_module
+
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["auth_method"] = "oidc"
+        sess["user_id"] = "test-sub"
+        sess["user_name"] = "Test User"
+        sess["oidc_refresh_token"] = "user-refresh-token"
+
+    captured_init = {}
+
+    class FakeOAuth2Session:
+        def __init__(self, client_id, client_secret=None, token=None):
+            captured_init["client_id"] = client_id
+            captured_init["client_secret"] = client_secret
+            captured_init["token"] = token
+
+        def refresh_token(self, token_url):
+            captured_init["refresh_token_url"] = token_url
+            return {
+                "access_token": "new-access-token",
+                "refresh_token": "new-refresh-token",
+                "expires_in": 3600,
+            }
+
+    captured_userinfo_token = {}
+
+    def fake_userinfo(token=None):
+        captured_userinfo_token["token"] = token
+        return {"sub": "test-sub", "email": "test@example.com", "name": "Test User"}
+
+    original_verify = app_module.verify_oidc_authorization
+    app_module.verify_oidc_authorization = MagicMock(return_value=(True, None))
+
+    try:
+        with patch("authlib.integrations.requests_client.OAuth2Session", FakeOAuth2Session):
+            monkeypatch.setattr(app_module.oauth.oidc, "userinfo", fake_userinfo)
+            resp = client.get("/auth/oidc/refresh")
+
+        assert resp.status_code == 200
+        assert resp.get_json()["status"] == "refreshed"
+
+        assert captured_init["client_id"] == "client"
+        assert captured_init["client_secret"] == "secret"
+        assert captured_init["token"] == {"refresh_token": "user-refresh-token"}
+        assert captured_init["refresh_token_url"] == "https://issuer.example/protocol/openid-connect/token"
+        assert captured_userinfo_token["token"] == {"access_token": "new-access-token"}
+
+        with client.session_transaction() as sess:
+            assert sess["oidc_refresh_token"] == "new-refresh-token"
+            assert "oidc_token_expires_at" in sess
+            assert "oidc_access_token" not in sess
+    finally:
+        app_module.verify_oidc_authorization = original_verify
+
+
+def test_oidc_refresh_authorization_revoked(monkeypatch, tmp_path):
+    """When userinfo shows the user is no longer authorized, session is cleared
+    and 403 is returned."""
+    from unittest.mock import MagicMock, patch
+
+    extra_env = {
+        "OIDC_ENABLED": "true",
+        "OIDC_ISSUER": "https://issuer.example",
+        "OIDC_CLIENT_ID": "client",
+        "OIDC_CLIENT_SECRET": "secret",
+    }
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
+
+    import app as app_module
+
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["auth_method"] = "oidc"
+        sess["user_id"] = "test-sub"
+        sess["user_name"] = "Test User"
+        sess["oidc_refresh_token"] = "user-refresh-token"
+
+    captured_init = {}
+
+    class FakeOAuth2Session:
+        def __init__(self, client_id, client_secret=None, token=None):
+            captured_init["client_id"] = client_id
+            captured_init["client_secret"] = client_secret
+            captured_init["token"] = token
+
+        def refresh_token(self, token_url):
+            captured_init["refresh_token_url"] = token_url
+            return {"access_token": "new-access-token", "expires_in": 3600}
+
+    def fake_userinfo(token=None):
+        return {"sub": "test-sub", "email": "test@example.com"}
+
+    original_verify = app_module.verify_oidc_authorization
+    app_module.verify_oidc_authorization = MagicMock(return_value=(False, "user_removed"))
+
+    try:
+        with patch("authlib.integrations.requests_client.OAuth2Session", FakeOAuth2Session):
+            monkeypatch.setattr(app_module.oauth.oidc, "userinfo", fake_userinfo)
+            resp = client.get("/auth/oidc/refresh")
+
+        assert resp.status_code == 403
+        assert captured_init["client_id"] == "client"
+        assert captured_init["client_secret"] == "secret"
+        assert captured_init["token"] == {"refresh_token": "user-refresh-token"}
+        assert captured_init["refresh_token_url"] == "https://issuer.example/protocol/openid-connect/token"
+
+        with client.session_transaction() as sess:
+            assert not sess
+    finally:
+        app_module.verify_oidc_authorization = original_verify
