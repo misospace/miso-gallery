@@ -275,3 +275,56 @@ def test_webhook_requires_correct_bearer_token(monkeypatch, tmp_path):
     assert resp.status_code == 401
     payload = resp.get_json()
     assert "secret" in payload["error"].lower()
+
+
+def test_webhook_run_with_auth_enabled_and_bearer_secret(monkeypatch, tmp_path):
+    """With auth enabled, /api/webhook/run must accept a valid bearer secret
+    without a browser session or CSRF token. See issue #401."""
+    extra_env = {
+        "WEBHOOK_ENABLED": "true",
+        "WEBHOOK_SECRET": "test-secret-123",
+        "WEBHOOK_TASK_GENERATE": 'python3 -c "import sys;print(\'ok-\'+sys.argv[1])" {params.name}',
+    }
+    client, _ = build_client(
+        monkeypatch, tmp_path, auth_type="local", extra_env=extra_env,
+    )
+
+    # No session cookie, no X-CSRF-Token header — only the bearer secret.
+    resp = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {"name": "miso"}},
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    payload = resp.get_json()
+    assert payload["success"] is True
+    assert payload["stdout"].strip() == "ok-miso"
+
+
+def test_webhook_run_auth_enabled_rejects_wrong_bearer(monkeypatch, tmp_path):
+    """With auth enabled, a missing/incorrect bearer token still fails closed
+    even though /api/webhook/run is exempt from the session-auth redirect."""
+    extra_env = {
+        "WEBHOOK_ENABLED": "true",
+        "WEBHOOK_SECRET": "test-secret-123",
+        "WEBHOOK_TASK_GENERATE": "echo hi",
+    }
+    client, _ = build_client(
+        monkeypatch, tmp_path, auth_type="local", extra_env=extra_env,
+    )
+
+    # No session, no bearer → must 401, not redirect to /login.
+    resp_missing = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {}},
+    )
+    assert resp_missing.status_code == 401
+
+    # Wrong bearer with auth enabled → also 401.
+    resp_wrong = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {}},
+        headers={"Authorization": "Bearer wrong-secret"},
+    )
+    assert resp_wrong.status_code == 401

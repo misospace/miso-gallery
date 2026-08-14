@@ -737,6 +737,13 @@ def check_auth():
     if request.path.startswith("/api/llm/"):
         return None
 
+    # Webhook run endpoint authenticates via its own bearer-secret check;
+    # it is a machine API and must not be redirected to /login when no
+    # browser session is present. The route's own _verify_webhook_secret
+    # gate handles missing/incorrect secrets.
+    if request.path == "/api/webhook/run":
+        return None
+
     if request.path.startswith("/images/") or request.path.startswith("/view/"):
         return None
 
@@ -1399,7 +1406,6 @@ def maintenance_thumbnails_regenerate():
 
 
 @app.route("/api/webhook/run", methods=["POST"])
-@require_auth
 @rate_limit(max_requests=20, window=60)
 def webhook_run_task():
     # Fail closed: require WEBHOOK_SECRET when webhooks are enabled to prevent
@@ -1421,14 +1427,14 @@ def webhook_run_task():
             }
         ), 503
 
-    # Validate bearer token
+    # Validate bearer token. The webhook is a documented bearer-secret-authenticated
+    # machine API; the bearer secret is the request's own authentication. CSRF is
+    # only meaningful for browser-session flows (where the session cookie is
+    # implicit) and would block legitimate secret-holding machine clients.
     auth_header = request.headers.get("Authorization", "")
     scheme, _, token = auth_header.partition(" ")
     if scheme.lower() != "bearer" or not _verify_webhook_secret(token):
         return jsonify({"error": "Webhook secret required"}), 401
-
-    if is_auth_enabled() and not validate_csrf(request.headers.get("X-CSRF-Token")):
-        return jsonify({"error": "Invalid CSRF token"}), 403
 
     body, status = run_configured_task(request.get_json(silent=True) or {})
     _invalidate_gallery_scan_cache()
