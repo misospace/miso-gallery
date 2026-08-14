@@ -1,6 +1,6 @@
 [project]
 name = "miso-gallery"
-version = "0.1.0"
+version = "0.1.19"
 description = "A lightweight, self-hosted image gallery for AI-generated images"
 readme = "README.md"
 license = {text = "GPL-3.0"}

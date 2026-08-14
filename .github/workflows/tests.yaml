@@ -30,6 +30,16 @@ jobs:
           pip install -r requirements.txt
           pip install pytest requests
 
+      - name: Verify pyproject.toml version matches APP_VERSION
+        run: |
+          APP_VER=$(python3 scripts/read_app_version.py app.py)
+          PYPROJ_VER=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          if [ "$APP_VER" != "$PYPROJ_VER" ]; then
+            echo "::error::pyproject.toml version ($PYPROJ_VER) does not match APP_VERSION ($APP_VER)."
+            exit 1
+          fi
+          echo "OK: pyproject.toml version ($PYPROJ_VER) matches APP_VERSION ($APP_VER)"
+
       - name: Run unit tests
         run: python -m pytest -q
         env:
