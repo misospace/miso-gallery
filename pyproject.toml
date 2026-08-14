@@ -19,6 +19,7 @@ dependencies = [
 dev = [
     "pytest>=9.1,<10",
     "ruff>=0.9,<1",
+    "coverage>=7.5,<8",
 ]
 
 [tool.pytest.ini_options]
@@ -31,3 +32,10 @@ line-length = 120
 [tool.ruff.lint]
 select = ["E", "F", "W", "I"]
 ignore = ["E501"]
+
+[tool.coverage.run]
+source = ["."]
+omit = ["tests/*", "conftest.py"]
+
+[tool.coverage.report]
+fail_under = 80
