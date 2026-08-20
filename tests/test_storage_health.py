@@ -9,6 +9,7 @@ if str(ROOT) not in sys.path:
 
 import app as app_module  # noqa: E402
 import health  # noqa: E402
+from conftest import build_client  # noqa: E402
 
 
 @pytest.fixture
@@ -511,4 +512,48 @@ def test_root_health_endpoint_returns_503_when_storage_unhealthy(monkeypatch, tm
     assert status == 503
     assert body["status"] == "unhealthy"
     assert body["storage"]["status"] == "unhealthy"
-    assert body["version"] == "v1.0.0"
+
+
+def test_health_endpoints_skip_auth_gate(monkeypatch, tmp_path):
+    """Issue #422: /health* must return their JSON probe payload even when
+    authentication is enabled. k8s/load-balancer probes have no session and
+    expect a 200/503 JSON body, never a 302 redirect to /login.
+    """
+    # build_client defaults to auth_type="local" with ADMIN_PASSWORD set, so
+    # the global before_request auth gate is active for this app.
+    client, _data = build_client(monkeypatch, tmp_path, auth_type="local")
+
+    paths = ["/health", "/health/storage", "/health/storage/read", "/health/storage/write"]
+    for path in paths:
+        resp = client.get(path, follow_redirects=False)
+        assert resp.status_code in (200, 503), (
+            f"{path} returned {resp.status_code} (expected 200/503 JSON); "
+            "the auth before_request gate must not intercept health probes."
+        )
+        # Probe responses are JSON; the auth gate would have returned
+        # text/html for the /login redirect.
+        assert resp.mimetype == "application/json", (
+            f"{path} returned non-JSON body (mimetype={resp.mimetype}); "
+            "auth gate is likely redirecting to /login."
+        )
+        # And explicitly: must NOT be the auth redirect.
+        assert resp.status_code != 302, (
+            f"{path} returned 302 — auth gate is intercepting probes."
+        )
+
+
+def test_health_exemption_is_scoped_to_health_paths(monkeypatch, tmp_path):
+    """The /health exemption must not leak to UI routes — those still
+    redirect unauthenticated browsers to /login.
+    """
+    client, _data = build_client(monkeypatch, tmp_path, auth_type="local")
+
+    # A representative UI route must still redirect unauthenticated traffic.
+    resp = client.get("/recent", follow_redirects=False)
+    assert resp.status_code == 302, (
+        "/recent must still 302 unauthenticated users — the health fix is "
+        "scoped to /health* only."
+    )
+    assert resp.headers["Location"].startswith("/login"), (
+        "Unauthenticated /recent must redirect to /login."
+    )

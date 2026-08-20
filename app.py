@@ -744,6 +744,12 @@ def check_auth():
     if request.path == "/api/webhook/run":
         return None
 
+    # Health probes are consumed by k8s liveness/readiness, load balancers,
+    # and uptime monitors — none of which carry a session cookie. They must
+    # always return their JSON 200/503 payload, never a redirect to /login.
+    if request.path == "/health" or request.path.startswith("/health/"):
+        return None
+
     if request.path.startswith("/images/") or request.path.startswith("/view/"):
         return None
 
