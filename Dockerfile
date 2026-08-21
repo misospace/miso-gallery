@@ -19,9 +19,12 @@ RUN groupadd -r appuser && \
 
 EXPOSE 5000
 
-# Worker count is controlled by WEB_CONCURRENCY env var (default: 2).
-# NOTE: The in-memory rate limiter in security.py is NOT shared across workers.
-# With WEB_CONCURRENCY > 1, rate limiting is per-worker and less effective.
-# For accurate cross-worker rate limiting, configure REDIS_URL in security.py.
+# Worker count is controlled by WEB_CONCURRENCY env var.
+# entrypoint.sh defaults to 2 workers when a Redis URL is configured
+# (REDIS_URL / RATE_LIMIT_REDIS_URL) so cross-worker rate limiting is real.
+# Without a Redis URL it defaults to 1 worker, because the in-memory rate
+# limiter in security.py is NOT shared across workers and would otherwise
+# silently multiply the effective request quota by WEB_CONCURRENCY,
+# weakening brute-force and webhook protection (issue #419).
 USER 10001
 ENTRYPOINT ["/bin/sh", "/app/entrypoint.sh"]

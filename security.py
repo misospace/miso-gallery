@@ -143,6 +143,15 @@ return 1
 
 FALLBACK_LIMITER = InMemoryRateLimiter()
 
+
+def _to_positive_int(raw: str, default: int) -> int:
+    """Parse a positive integer from an env var, returning ``default`` on garbage."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
 # Lazy-loaded route overrides and primary limiter so that:
 # - tests can inject mock limiters without module-level patching
 # - environment changes can be picked up via refresh_route_overrides() / refresh_primary_limiter()
@@ -155,19 +164,74 @@ def _build_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
     redis_prefix = os.environ.get("RATE_LIMIT_PREFIX", "miso-gallery:ratelimit")
 
     if not redis_url:
-        logger.warning(
-            "No REDIS_URL or RATE_LIMIT_REDIS_URL configured; "
-            "using in-memory rate limiter (not safe for multi-worker deployments)"
+        # SECURITY: an in-memory limiter is per-process. With WEB_CONCURRENCY > 1 the
+        # effective rate-limit quota is multiplied by the worker count, silently
+        # weakening brute-force and webhook protection. Refuse to start in any
+        # deployment that looks production-shaped so the operator cannot ship the
+        # weak default by accident. The explicit opt-out below is intended only for
+        # local single-worker development (see entrypoint.sh / README).
+        allow_inmemory = os.environ.get("ALLOW_INMEMORY_RATE_LIMIT", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
         )
-        return FALLBACK_LIMITER
+        workers_raw = os.environ.get("WEB_CONCURRENCY", "").strip()
+        workers = _to_positive_int(workers_raw, 1)
+        multi_worker = workers > 1
+
+        if allow_inmemory and not multi_worker:
+            logger.warning(
+                "ALLOW_INMEMORY_RATE_LIMIT=1 with WEB_CONCURRENCY=1; "
+                "using in-memory rate limiter (single-process only)."
+            )
+            return FALLBACK_LIMITER
+
+        if allow_inmemory and multi_worker:
+            raise RuntimeError(
+                "ALLOW_INMEMORY_RATE_LIMIT=1 is set but WEB_CONCURRENCY="
+                f"{workers} > 1. The in-memory rate limiter is per-worker and would "
+                "multiply the effective quota; set WEB_CONCURRENCY=1 or configure "
+                "REDIS_URL / RATE_LIMIT_REDIS_URL."
+            )
+
+        raise RuntimeError(
+            "No REDIS_URL or RATE_LIMIT_REDIS_URL configured. The in-memory rate "
+            "limiter (security.py:InMemoryRateLimiter) is per-process and is NOT "
+            "safe for multi-worker deployments -- with WEB_CONCURRENCY > 1 the "
+            "effective request quota is multiplied by the worker count, weakening "
+            "brute-force and webhook protection. Configure REDIS_URL (or "
+            "RATE_LIMIT_REDIS_URL) before starting the app. For local development "
+            "with a single worker, set ALLOW_INMEMORY_RATE_LIMIT=1 and "
+            "WEB_CONCURRENCY=1."
+        )
 
     try:
         limiter = RedisRateLimiter(redis_url=redis_url, prefix=redis_prefix)
         logger.info("Rate limiter backend: redis")
         return limiter
     except Exception as exc:  # pragma: no cover - runtime fallback
-        logger.warning("Failed to initialize Redis rate limiter (%s); using in-memory fallback", exc)
-        return FALLBACK_LIMITER
+        # The Redis backend failed to initialize. Do NOT silently degrade to the
+        # in-memory fallback: that is exactly the weak configuration this guard
+        # is meant to stop. The operator must fix the Redis configuration or
+        # explicitly opt out for a single-worker dev setup.
+        if os.environ.get("ALLOW_INMEMORY_RATE_LIMIT", "").strip().lower() in (
+            "1",
+            "true",
+            "yes",
+        ):
+            logger.warning(
+                "Failed to initialize Redis rate limiter (%s); "
+                "ALLOW_INMEMORY_RATE_LIMIT=1 set, using in-memory fallback",
+                exc,
+            )
+            return FALLBACK_LIMITER
+        raise RuntimeError(
+            f"Failed to initialize Redis rate limiter ({exc}). Refusing to fall "
+            "back to the per-process in-memory limiter because that is unsafe "
+            "for multi-worker deployments. Fix REDIS_URL / "
+            "RATE_LIMIT_REDIS_URL, or set ALLOW_INMEMORY_RATE_LIMIT=1 together "
+            "with WEB_CONCURRENCY=1 for local development only."
+        ) from exc
 
 
 def get_route_limit_overrides() -> dict[str, RateLimitConfig]:
