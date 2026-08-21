@@ -831,6 +831,8 @@ def service_worker():
 @app.route("/images/<path:filename>")
 def images(filename: str):
     rel_path = sanitize_rel_path(filename)
+    if not is_media_file(DATA_FOLDER / rel_path):
+        abort(404)
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
 
@@ -1046,6 +1048,8 @@ def thumb(filename: str):
 @app.route("/view/<path:filename>")
 def view(filename: str):
     rel_path = sanitize_rel_path(filename)
+    if not is_media_file(DATA_FOLDER / rel_path):
+        abort(404)
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
 

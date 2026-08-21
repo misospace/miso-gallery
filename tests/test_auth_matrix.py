@@ -99,6 +99,16 @@ def test_images_route_is_public_even_with_auth_enabled(monkeypatch, tmp_path):
     assert resp.status_code == 200
 
 
+def test_view_and_images_do_not_serve_non_media_files(monkeypatch, tmp_path):
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="local", extra_env={"ADMIN_PASSWORD": "pass123"})
+    (data_dir / "secret.env").write_text("SECRET=1")
+    (data_dir / "notes.txt").write_text("hello")
+    assert client.get("/view/secret.env").status_code == 404
+    assert client.get("/view/notes.txt").status_code == 404
+    assert client.get("/images/secret.env").status_code == 404
+    assert client.get("/images/notes.txt").status_code == 404
+
+
 def test_root_gallery_renders_inline_details_panel(monkeypatch, tmp_path):
     client = _build_auth_client(monkeypatch, tmp_path, auth_type="none")
     resp = client.get("/")
