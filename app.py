@@ -540,6 +540,13 @@ def _invalidate_gallery_scan_cache() -> None:
     _gallery_scan_cache.clear()
 
 
+# LLM enumeration endpoints (/api/llm/images, /api/llm/folders, /api/llm/recent)
+# must search and page across the whole gallery, not just the first
+# GALLERY_SCAN_LIMIT items (issue #423). They request this higher bound so a
+# very large gallery cannot make a single request walk the tree unboundedly.
+LLM_ENUMERATION_LIMIT = 50_000
+
+
 def iter_gallery_items(
     kind: str = "media",
     limit: int | None = None,
@@ -585,8 +592,13 @@ def iter_gallery_items(
     # returns the sorted-first item rather than an arbitrary filesystem-ordered
     # prefix. The collection cap is the scan safety bound (GALLERY_SCAN_LIMIT);
     # the requested limit only constrains how many we return.
+    # The collection cap is the larger of the requested limit and the scan
+    # safety bound, so callers that ask for more than GALLERY_SCAN_LIMIT
+    # (e.g. the LLM enumeration endpoints, issue #423) are not silently
+    # truncated to the safety bound.
+    collection_cap = max(effective_limit, GALLERY_SCAN_LIMIT)
     for item in scan_root.rglob("*"):
-        if len(results) >= GALLERY_SCAN_LIMIT:
+        if len(results) >= collection_cap:
             break
         try:
             # Skip symlinks to prevent filesystem traversal outside the data root.
@@ -1457,7 +1469,7 @@ def webhook_run_task():
 def llm_images():
     query = request.args.get("q", "").strip().lower()
     page, per_page = _parse_pagination(request.args)
-    all_media = iter_gallery_items(kind="media")
+    all_media = iter_gallery_items(kind="media", limit=LLM_ENUMERATION_LIMIT)
     filtered: list[Path] = []
     for item in all_media:
         rel_path = item.relative_to(DATA_FOLDER).as_posix()
@@ -1493,7 +1505,11 @@ def llm_image(relpath: str):
 @rate_limit(max_requests=60, window=60)
 def llm_recent():
     page, per_page = _parse_pagination(request.args)
-    all_media = sorted(iter_gallery_items(kind="media"), key=lambda p: p.stat().st_mtime, reverse=True)
+    all_media = sorted(
+        iter_gallery_items(kind="media", limit=LLM_ENUMERATION_LIMIT),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     paginated, total, pg, pp, has_more = _paginate(all_media, page=page, per_page=per_page)
     has_more = _apply_scan_limit(has_more, len(all_media))
     tags_by_path = _tag_store().get_tags_for_paths(
@@ -1512,7 +1528,7 @@ def llm_recent():
 def llm_folders():
     page, per_page = _parse_pagination(request.args)
     all_folders = [{"rel_path": "", "name": "", "parent": None}]
-    for folder in iter_gallery_items(kind="folders"):
+    for folder in iter_gallery_items(kind="folders", limit=LLM_ENUMERATION_LIMIT):
         rel_path = folder.relative_to(DATA_FOLDER).as_posix()
         parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
         all_folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
