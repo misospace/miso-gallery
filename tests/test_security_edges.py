@@ -504,6 +504,12 @@ def test_get_primary_limiter_lazy(monkeypatch):
     # Force a fresh build by resetting the module-level cache
     security._primary_limiter = None
 
+    # The single-worker dev opt-in lets us exercise the fallback path without
+    # standing up a Redis instance. The fail-fast guard is covered by
+    # tests/test_security_redis_required.py.
+    monkeypatch.setenv("ALLOW_INMEMORY_RATE_LIMIT", "1")
+    monkeypatch.setenv("WEB_CONCURRENCY", "1")
+
     limiter = security.get_primary_limiter()
     assert limiter is not None
     assert hasattr(limiter, "allow")
@@ -515,6 +521,9 @@ def test_refresh_primary_limiter_rebuilds(monkeypatch):
 
     # Force a fresh build by resetting the module-level cache
     security._primary_limiter = None
+
+    monkeypatch.setenv("ALLOW_INMEMORY_RATE_LIMIT", "1")
+    monkeypatch.setenv("WEB_CONCURRENCY", "1")
 
     limiter1 = security.get_primary_limiter()
     assert limiter1 is not None
