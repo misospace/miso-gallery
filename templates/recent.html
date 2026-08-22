@@ -97,7 +97,7 @@
     <div class="empty">No recent images found</div>
   {% endif %}
 </div>
-<script>
+<script nonce="{{ csp_nonce }}">
   let deferredInstallPrompt = null;
   const installBtn = document.getElementById('installPwaBtn');
   const refreshBtn = document.getElementById('refreshRecentBtn');

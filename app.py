@@ -21,6 +21,7 @@ from flask import (
     Flask,
     abort,
     flash,
+    g,
     jsonify,
     make_response,
     redirect,
@@ -90,6 +91,12 @@ def resolve_secret_key() -> str:
 
 
 app = Flask(__name__)
+
+
+@app.before_request
+def set_csp_nonce():
+    g.csp_nonce = secrets.token_urlsafe(16)
+
 app.secret_key = resolve_secret_key()
 
 # Session persistence configuration for mobile compatibility
