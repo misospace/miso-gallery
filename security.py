@@ -13,7 +13,7 @@ from ipaddress import ip_address, ip_network
 from threading import Lock
 from typing import Any
 
-from flask import jsonify, request, session
+from flask import g, jsonify, request, session
 
 try:
     import redis
@@ -402,12 +402,14 @@ SECURITY_HEADERS = {
     "X-Frame-Options": "DENY",
     "Referrer-Policy": "strict-origin-when-cross-origin",
     "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
-    "Content-Security-Policy": "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'",
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' https: data:; style-src 'self' 'unsafe-inline'; script-src 'self'",
 }
 
 
 def add_security_headers(response):
     for header, value in SECURITY_HEADERS.items():
+        if header == "Content-Security-Policy":
+            value = value.replace("script-src 'self'", f"script-src 'self' 'nonce-{g.csp_nonce}'")
         response.headers[header] = value
     return response
 

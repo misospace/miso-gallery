@@ -236,7 +236,7 @@
     {% endif %}
     <div class="stats">{{ stats.folders }} folders • {{ stats.images }} images</div>
   </div>
-  <script>
+  <script nonce="{{ csp_nonce }}">
     let deferredInstallPrompt = null;
     const installBtn = document.getElementById('installPwaBtn');
 
