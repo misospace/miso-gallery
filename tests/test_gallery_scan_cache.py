@@ -169,3 +169,68 @@ class TestScanCacheDefaultLimit:
         # Cache should have an entry with default limit
         cache_keys = [k for k in app._gallery_scan_cache if k[1] == app.GALLERY_SCAN_LIMIT]
         assert len(cache_keys) == 1
+
+
+class TestScanCacheBound:
+    """Verify the scan cache enforces a bounded number of keys (issue #420)."""
+
+    def test_cache_never_exceeds_max_entries(self, gallery_root):
+        """Repeated distinct queries evict the oldest entry past the cap."""
+        (gallery_root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+
+        cap = app.GALLERY_SCAN_CACHE_MAX_ENTRIES
+        # More distinct roots than the cap; each creates its own cache key.
+        for i in range(cap + 10):
+            root = gallery_root / f"sub{i}"
+            root.mkdir()
+            (root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+            app.iter_gallery_items(kind="media", root=root)
+
+        assert len(app._gallery_scan_cache) <= cap
+
+    def test_oldest_entry_evicted_first(self, gallery_root):
+        """Eviction removes the least-recently-used key, not the newest."""
+        (gallery_root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+
+        cap = app.GALLERY_SCAN_CACHE_MAX_ENTRIES
+        first_root = gallery_root / "first"
+        first_root.mkdir()
+        (first_root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+        app.iter_gallery_items(kind="media", root=first_root)
+
+        for i in range(cap):
+            root = gallery_root / f"sub{i}"
+            root.mkdir()
+            (root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+            app.iter_gallery_items(kind="media", root=root)
+
+        assert len(app._gallery_scan_cache) == cap
+        assert ("media", app.GALLERY_SCAN_LIMIT, str(first_root)) not in app._gallery_scan_cache
+
+    def test_recently_used_key_survives_eviction(self, gallery_root):
+        """A key touched within the TTL is moved to the MRU end and survives."""
+        (gallery_root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+
+        cap = app.GALLERY_SCAN_CACHE_MAX_ENTRIES
+        hot_root = gallery_root / "hot"
+        hot_root.mkdir()
+        (hot_root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+        app.iter_gallery_items(kind="media", root=hot_root)
+
+        for i in range(cap):
+            root = gallery_root / f"sub{i}"
+            root.mkdir()
+            (root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+            app.iter_gallery_items(kind="media", root=root)
+
+        # Re-touch the hot key (cache hit refreshes its LRU position).
+        app.iter_gallery_items(kind="media", root=hot_root)
+
+        for i in range(cap, cap + 5):
+            root = gallery_root / f"sub{i}"
+            root.mkdir()
+            (root / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0")
+            app.iter_gallery_items(kind="media", root=root)
+
+        assert len(app._gallery_scan_cache) <= cap
+        assert ("media", app.GALLERY_SCAN_LIMIT, str(hot_root)) in app._gallery_scan_cache
