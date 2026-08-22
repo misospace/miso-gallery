@@ -20,7 +20,125 @@ import time
 
 import pytest
 
+import trash
 from conftest import build_client
+from trash import dir_size, list_trash, move_to_trash, purge_old_trash, restore_from_trash
+
+
+def test_dir_size_ignores_stat_errors_and_symlinks(tmp_path, monkeypatch):
+    root = tmp_path / "folder"
+    root.mkdir()
+    readable = root / "readable.txt"
+    readable.write_text("ok")
+    (root / "outside-link").symlink_to(tmp_path / "outside.txt")
+    original_stat = trash.Path.stat
+
+    def failing_stat(path, *args, **kwargs):
+        if path == readable:
+            raise OSError("unreadable")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(trash.Path, "stat", failing_stat)
+    assert dir_size(root) == 0
+
+
+def test_move_to_trash_falls_back_to_copy_and_cleans_partial_copy(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    source = data / "album"
+    source.mkdir(parents=True)
+    (source / "photo.txt").write_text("photo")
+    real_rename = trash.Path.rename
+    calls = []
+
+    def cross_device_rename(path, destination):
+        calls.append((path, destination))
+        if path == source:
+            raise OSError("cross-device")
+        return real_rename(path, destination)
+
+    monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+    assert move_to_trash(source, data) is True
+    assert not source.exists()
+    assert calls
+
+    source = data / "broken"
+    source.mkdir()
+    (source / "photo.txt").write_text("photo")
+    original_copytree = trash.shutil.copytree
+
+    def partial_copy(*args, **kwargs):
+        destination = args[1]
+        destination.mkdir()
+        (destination / "partial.txt").write_text("partial")
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+    monkeypatch.setattr(trash.shutil, "copytree", partial_copy)
+    assert move_to_trash(source, data) is False
+    assert source.exists()
+    assert not any(path.name.startswith("broken") for path in trash.trash_dir(data).iterdir())
+    monkeypatch.setattr(trash.shutil, "copytree", original_copytree)
+
+
+def test_list_trash_ignores_corrupt_metadata_and_unreadable_entries(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+    item = td / "item"
+    item.write_text("contents")
+    item.with_name(item.name + trash.META_SUFFIX).write_text("not-json")
+    original_stat = trash.Path.stat
+
+    def failing_stat(path, *args, **kwargs):
+        if path == item:
+            raise OSError("unreadable")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(trash.Path, "stat", failing_stat)
+    with pytest.raises(OSError):
+        list_trash(data)
+
+
+def test_restore_rejects_traversal_and_renames_collisions(tmp_path):
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+    item = td / "deleted.txt"
+    item.write_text("deleted")
+    item.with_name(item.name + trash.META_SUFFIX).write_text(
+        json.dumps({"original": "albums/photo.txt"})
+    )
+    (data / "albums").mkdir()
+    (data / "albums/photo.txt").write_text("existing")
+    assert restore_from_trash(item.name, data) is True
+    assert (data / "albums/photo.txt").read_text() == "existing"
+    restored = list((data / "albums").glob("photo_*.txt"))
+    assert len(restored) == 1
+    assert restored[0].read_text() == "deleted"
+
+    for name in ("../item", "nested/item", "\\\\item"):
+        with pytest.raises(ValueError):
+            restore_from_trash(name, data)
+
+
+def test_restore_rejects_escaping_original_and_purge_falls_back_to_mtime(tmp_path):
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+    item = td / "unsafe"
+    item.write_text("unsafe")
+    item.with_name(item.name + trash.META_SUFFIX).write_text(
+        json.dumps({"original": "../outside.txt"})
+    )
+    with pytest.raises(ValueError):
+        restore_from_trash(item.name, data)
+
+    old = td / "old.txt"
+    old.write_text("old")
+    old_meta = old.with_name(old.name + trash.META_SUFFIX)
+    old_meta.write_text(json.dumps({"deleted_at": "legacy-invalid"}))
+    old_time = time.time() - 3 * 86400
+    import os
+    os.utime(old, (old_time, old_time))
+    assert purge_old_trash(data, retention_days=1) == 1
+    assert not old.exists()
 
 
 class TestMoveToTrashSingleFile:
