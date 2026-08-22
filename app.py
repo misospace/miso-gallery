@@ -225,7 +225,10 @@ GALLERY_SCAN_LIMIT = int(os.environ.get("GALLERY_SCAN_LIMIT", "5000"))
 
 # Shared filesystem scan cache (TTL-based) to avoid redundant rglob passes
 GALLERY_SCAN_CACHE_TTL = max(int(os.environ.get("GALLERY_SCAN_CACHE_TTL", "10") or 10), 1)
-_gallery_scan_cache: dict[str, tuple[float, list[Path]]] = {}
+# LRU cap on distinct (kind, limit, root) keys so repeated scans of many
+# subfolders/limits cannot retain memory indefinitely (issue #420).
+GALLERY_SCAN_CACHE_MAX_ENTRIES = 256
+_gallery_scan_cache: OrderedDict[str, tuple[float, list[Path]]] = OrderedDict()
 
 # Destructive-operation guardrails (issue #199)
 BULK_DELETE_MAX_ITEMS = int(os.environ.get("BULK_DELETE_MAX_ITEMS", "200"))
@@ -584,7 +587,11 @@ def iter_gallery_items(
         if cached is not None:
             ts, cached_results = cached
             if now - ts < GALLERY_SCAN_CACHE_TTL:
+                # Refresh LRU position so hot keys survive eviction.
+                _gallery_scan_cache.move_to_end(cache_key)
                 return cached_results
+            # Expired: drop the stale entry rather than letting it linger.
+            del _gallery_scan_cache[cache_key]
 
     results: list[Path] = []
     # Collect first, sort second, then truncate. Collecting before truncating is
@@ -616,9 +623,12 @@ def iter_gallery_items(
             continue
     sorted_results = sorted(results, key=lambda p: p.relative_to(DATA_FOLDER).as_posix().lower())[:effective_limit]
 
-    # Store in cache (only for larger queries)
+    # Store in cache (only for larger queries), evicting the oldest entry
+    # once the cap is exceeded so the cache stays bounded (issue #420).
     if effective_limit > 1:
         _gallery_scan_cache[cache_key] = (now, sorted_results)
+        while len(_gallery_scan_cache) > GALLERY_SCAN_CACHE_MAX_ENTRIES:
+            _gallery_scan_cache.popitem(last=False)
     return sorted_results
 
 
