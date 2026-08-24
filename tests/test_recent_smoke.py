@@ -77,4 +77,7 @@ def test_recent_view_uses_iter_gallery_items(monkeypatch, tmp_path):
         mock_iter.return_value = []  # Return empty so no items are processed
         resp = client.get("/recent")
         assert resp.status_code == 200
-        mock_iter.assert_called_once_with(kind="media")
+        # /recent must enumerate beyond GALLERY_SCAN_LIMIT so that the newest
+        # media is reachable when it sorts past the first traversal prefix
+        # (issue #436).
+        mock_iter.assert_called_once_with(kind="media", limit=50000)
