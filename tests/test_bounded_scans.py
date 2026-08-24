@@ -485,3 +485,71 @@ class TestSubfolderScanLimit:
         assert resp.status_code == 200
         text = resp.data.decode()
         assert "Gallery scan limit reached" not in text
+
+
+class TestRecentBoundedScan:
+    """Regression tests for issue #436.
+
+    /recent must show the globally newest media even when that file lives
+    beyond the first GALLERY_SCAN_LIMIT items in the recursive traversal.
+    """
+
+    def test_recent_includes_newest_file_beyond_scan_limit(self, tmp_path, monkeypatch):
+        """A file written outside the bounded prefix must still appear in /recent."""
+        import os
+        import time
+        from contextlib import suppress
+
+        from conftest import build_client
+
+        # Force the scan to stop at 50 items so we can deterministically
+        # place the newest file beyond that bound.
+        client, data_dir = build_client(
+            monkeypatch,
+            tmp_path,
+            auth_type="none",
+            extra_env={"GALLERY_SCAN_LIMIT": "50"},
+        )
+
+        # Wipe the default fixture files so we control the layout.
+        for existing in data_dir.rglob("*"):
+            if existing.is_file():
+                existing.unlink()
+        for empty_dir in [d for d in data_dir.rglob("*") if d.is_dir()]:
+            with suppress(OSError):
+                empty_dir.rmdir()
+
+        # Create 100 old files whose path-sorted order puts them all
+        # before the file we are about to add.
+        old_mtime = time.time() - 3600
+        for i in range(100):
+            p = data_dir / f"img{i:04d}.jpg"
+            p.write_bytes(b"\xff\xd8\xff\xe0")
+            os.utime(p, (old_mtime, old_mtime))
+
+        # The newest file lives beyond the bounded prefix: it sorts
+        # alphabetically after every img*.jpg entry.
+        newest_name = "zzz_newest_image.jpg"
+        newest_path = data_dir / newest_name
+        newest_path.write_bytes(b"\xff\xd8\xff\xe0")
+        newest_mtime = time.time()
+        os.utime(newest_path, (newest_mtime, newest_mtime))
+
+        resp = client.get("/recent")
+        assert resp.status_code == 200
+        text = resp.data.decode()
+
+        # The newest file must appear in the rendered /recent page even
+        # though the recursive scan is bounded and would stop before it
+        # without the larger enumeration limit.
+        assert newest_name in text
+
+        # And it must be the first card (newest mtime wins over the 100
+        # older files).
+        first_card_pos = text.find('class="image-card"')
+        newest_pos = text.find(newest_name)
+        assert first_card_pos != -1, "no image-card rendered on /recent"
+        assert newest_pos != -1
+        assert newest_pos < first_card_pos + 2000, (
+            "newest file should appear near the top of /recent"
+        )

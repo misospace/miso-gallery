@@ -556,6 +556,13 @@ def _invalidate_gallery_scan_cache() -> None:
 # very large gallery cannot make a single request walk the tree unboundedly.
 LLM_ENUMERATION_LIMIT = 50_000
 
+# The HTML /recent page has the same bounded-enumeration problem as the LLM
+# endpoints (issue #436): it must show the globally newest media even when
+# the newest file lives beyond the first GALLERY_SCAN_LIMIT items in the
+# recursive traversal. We request this higher bound for the same reason as
+# LLM_ENUMERATION_LIMIT, so a single request walks at most this many files.
+RECENT_ENUMERATION_LIMIT = 50_000
+
 
 def iter_gallery_items(
     kind: str = "media",
@@ -1242,7 +1249,7 @@ def recent_view():
     max_items = 50
     images = []
 
-    for path in iter_gallery_items(kind="media"):
+    for path in iter_gallery_items(kind="media", limit=RECENT_ENUMERATION_LIMIT):
         try:
             stat = path.stat()
             mtime = stat.st_mtime
