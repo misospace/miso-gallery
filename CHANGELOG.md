@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.3.0](https://github.com/misospace/miso-gallery/compare/0.2.0...0.3.0) (2026-08-31)
+
+
+### Features
+
+* **deps:** update dependency authlib (1.7.2 → 1.8.0) ([#441](https://github.com/misospace/miso-gallery/issues/441)) ([d403aae](https://github.com/misospace/miso-gallery/commit/d403aae4ff5eb6836bfa40e81149690d9c57157c))
+* **deps:** update dependency gunicorn (26.1.0 → 26.2.0) ([#437](https://github.com/misospace/miso-gallery/issues/437)) ([8435dde](https://github.com/misospace/miso-gallery/commit/8435dde9bc8955d096859b3415a7aa18c8d7cf04))
+
+
+### Bug Fixes
+
+* **recent:** enumerate beyond GALLERY_SCAN_LIMIT on /recent ([#438](https://github.com/misospace/miso-gallery/issues/438)) ([8b22f9b](https://github.com/misospace/miso-gallery/commit/8b22f9bb781a24f2daffce1f4ee7ecab23e42fad)), closes [#436](https://github.com/misospace/miso-gallery/issues/436)
+
 ## [0.2.0](https://github.com/misospace/miso-gallery/compare/0.1.19...0.2.0) (2026-08-22)
 
 
