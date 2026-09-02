@@ -33,3 +33,29 @@ def test_bare_annotation_falls_through_to_not_found(tmp_path):
     app.write_text("APP_VERSION: str\n")
     with pytest.raises(ValueError, match="not found"):
         MODULE.read_app_version(app)
+
+
+def test_resolves_default_through_constant(tmp_path):
+    app = tmp_path / "app.py"
+    app.write_text(
+        'DEFAULT_APP_VERSION = "2.3.4"\n'
+        'APP_VERSION = (os.environ.get("APP_VERSION") or DEFAULT_APP_VERSION).strip() or DEFAULT_APP_VERSION\n'
+    )
+    assert MODULE.read_app_version(app) == "2.3.4"
+
+
+def test_rejects_half_bumped_constant_and_literal(tmp_path):
+    app = tmp_path / "app.py"
+    app.write_text(
+        'DEFAULT_APP_VERSION = "2.3.4"\n'
+        'APP_VERSION = (os.environ.get("APP_VERSION") or DEFAULT_APP_VERSION).strip() or "2.3.5"\n'
+    )
+    with pytest.raises(ValueError, match="consistent semver"):
+        MODULE.read_app_version(app)
+
+
+def test_unresolvable_name_raises(tmp_path):
+    app = tmp_path / "app.py"
+    app.write_text("APP_VERSION = SOMETHING_ELSE\n")
+    with pytest.raises(ValueError, match="consistent semver"):
+        MODULE.read_app_version(app)

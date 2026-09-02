@@ -59,5 +59,9 @@
     ".": {
       "include-v-in-tag": false
     }
-  }
+  },
+  "extra-files": [
+    { "type": "generic", "path": "app.py" },
+    { "type": "toml", "path": "pyproject.toml", "jsonpath": "$.project.version" }
+  ]
 }

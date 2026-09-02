@@ -216,7 +216,12 @@ FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
 
 PWA_THEME_COLOR = "#0d0d0d"
 PWA_APP_NAME = "Miso Gallery"
-APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.19").strip() or "0.1.19"
+# The bundled default version. release-please bumps the block below in its
+# release PR; scripts/read_app_version.py resolves the indirection.
+# x-release-please-start-version
+DEFAULT_APP_VERSION = "0.1.19"
+# x-release-please-end
+APP_VERSION = (os.environ.get("APP_VERSION") or DEFAULT_APP_VERSION).strip() or DEFAULT_APP_VERSION
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
 _VALID_TASK_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
