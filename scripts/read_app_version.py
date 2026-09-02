@@ -11,6 +11,16 @@ SEMVER = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.-]+)?$")
 
 def read_app_version(path: Path) -> str:
     tree = ast.parse(path.read_text(), filename=str(path))
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        if (
+            isinstance(node, ast.Assign)
+            and len(node.targets) == 1
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            constants[node.targets[0].id] = node.value.value
     for node in tree.body:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)):
             continue
@@ -26,6 +36,11 @@ def read_app_version(path: Path) -> str:
             and isinstance(child.value, str)
             and SEMVER.fullmatch(child.value)
         }
+        for child in ast.walk(node.value):
+            if isinstance(child, ast.Name):
+                value = constants.get(child.id)
+                if value is not None and SEMVER.fullmatch(value):
+                    values.add(value)
         if len(values) != 1:
             raise ValueError("APP_VERSION must contain one consistent semver default")
         return values.pop()

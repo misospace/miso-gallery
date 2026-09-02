@@ -359,26 +359,29 @@ in `entrypoint.sh` accordingly, keeping the buffer.
 
 ### Publishing a New Release
 
-1. Bump `APP_VERSION` in `app.py` (line 133):
+Releases are cut by the standing release-please PR. Do not bump versions by hand.
+
+1. When ready to ship, merge the open `release: X.Y.Z` PR. If none is open, any new
+   conventional commit on `main` makes release-please open one.
+2. The release PR bumps `CHANGELOG.md`, `.release-please-manifest.json`,
+   `pyproject.toml`, and the marked default block in `app.py` (via `extra-files`):
    ```python
-   APP_VERSION = (os.environ.get("APP_VERSION") or "0.1.18").strip() or "0.1.18"
+   # x-release-please-start-version
+   DEFAULT_APP_VERSION = "0.3.1"
+   # x-release-please-end
+   APP_VERSION = (os.environ.get("APP_VERSION") or DEFAULT_APP_VERSION).strip() or DEFAULT_APP_VERSION
    ```
+3. On merge, release-please tags the merge commit (plain semver, no `v` prefix) and
+   creates the GitHub release. `release.yaml` then resolves the tag, verifies that the
+   `APP_VERSION` read by `scripts/read_app_version.py` matches the tag, builds the
+   multi-arch image, and publishes it to GHCR.
 
-2. Run the Manual Release workflow from the GitHub Actions tab, or tag and push:
-   ```bash
-   sed -i 's|"0\.1\.18"|"0.1.x"|g' app.py
-   git add app.py
-   git commit -m "chore: bump APP_VERSION to 0.1.x"
-   git tag 0.1.x
-   git push origin main --tags
-   ```
+**Version invariant:** the build fails when the tag and `APP_VERSION` disagree. The
+Tests workflow additionally fails any PR where `pyproject.toml` and `APP_VERSION`
+drift apart.
 
-3. The release workflow builds the Docker image, runs tests, and publishes to GHCR.
-
-4. **Version invariant check:** The release workflow now validates that `APP_VERSION` matches the release tag. If they do not match, the build fails with a clear error directing you to run:
-   ```bash
-   sed -i 's|"0\.1\.18"|"<TAG>"|g' app.py
-   ```
+> The old "Manual Release" / "Publish Release" workflows predate release-please and
+> are superseded — a `chore/release-v*` PR they expect is never opened in this flow.
 
 ---
 
