@@ -367,7 +367,7 @@ Releases are cut by the standing release-please PR. Do not bump versions by hand
    `pyproject.toml`, and the marked default block in `app.py` (via `extra-files`):
    ```python
    # x-release-please-start-version
-   DEFAULT_APP_VERSION = "0.3.1"
+    DEFAULT_APP_VERSION = "0.2.0"
    # x-release-please-end
    APP_VERSION = (os.environ.get("APP_VERSION") or DEFAULT_APP_VERSION).strip() or DEFAULT_APP_VERSION
    ```

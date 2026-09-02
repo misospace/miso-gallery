@@ -1,28 +1,6 @@
 # Changelog
 
-## [0.3.1](https://github.com/misospace/miso-gallery/compare/0.3.0...0.3.1) (2026-09-02)
-
-
-### Bug Fixes
-
-* **release:** bump app.py/pyproject in release PRs ([cf4e247](https://github.com/misospace/miso-gallery/commit/cf4e247813b799893a94d93e73301250babaa74f))
-* **release:** bump app.py/pyproject in release PRs ([17ffaf0](https://github.com/misospace/miso-gallery/commit/17ffaf092e41c9a05ba4bea9e7d3f7ffeba5a8c6))
-* **security:** reject symlinks resolving outside DATA_FOLDER in media routes ([#456](https://github.com/misospace/miso-gallery/issues/456)) ([719f201](https://github.com/misospace/miso-gallery/commit/719f2010627af6ab6e4240ae296eecc6119c7b89)), closes [#442](https://github.com/misospace/miso-gallery/issues/442)
-
-## [0.3.0](https://github.com/misospace/miso-gallery/compare/0.2.0...0.3.0) (2026-08-31)
-
-
-### Features
-
-* **deps:** update dependency authlib (1.7.2 → 1.8.0) ([#441](https://github.com/misospace/miso-gallery/issues/441)) ([d403aae](https://github.com/misospace/miso-gallery/commit/d403aae4ff5eb6836bfa40e81149690d9c57157c))
-* **deps:** update dependency gunicorn (26.1.0 → 26.2.0) ([#437](https://github.com/misospace/miso-gallery/issues/437)) ([8435dde](https://github.com/misospace/miso-gallery/commit/8435dde9bc8955d096859b3415a7aa18c8d7cf04))
-
-
-### Bug Fixes
-
-* **recent:** enumerate beyond GALLERY_SCAN_LIMIT on /recent ([#438](https://github.com/misospace/miso-gallery/issues/438)) ([8b22f9b](https://github.com/misospace/miso-gallery/commit/8b22f9bb781a24f2daffce1f4ee7ecab23e42fad)), closes [#436](https://github.com/misospace/miso-gallery/issues/436)
-
-## [0.2.0](https://github.com/misospace/miso-gallery/compare/0.1.19...0.2.0) (2026-08-22)
+## [0.2.0](https://github.com/misospace/miso-gallery/compare/0.1.19...0.2.0) (2026-09-02)
 
 
 ### ⚠ BREAKING CHANGES
@@ -34,6 +12,8 @@
 
 * **deps:** Update dependency Pillow (11.3.0 → 12.3.0) ([#369](https://github.com/misospace/miso-gallery/issues/369)) ([103dbab](https://github.com/misospace/miso-gallery/commit/103dbab663220d1feb1eb5d82a14317db9f8b3d9))
 * **deps:** Update dependency pytest (8.4.2 → 9.1.1) ([#370](https://github.com/misospace/miso-gallery/issues/370)) ([13b84a1](https://github.com/misospace/miso-gallery/commit/13b84a10e2d20ca0d2b4f5384c2a65e18adfb061))
+* **deps:** update dependency authlib (1.7.2 → 1.8.0) ([#441](https://github.com/misospace/miso-gallery/issues/441)) ([d403aae](https://github.com/misospace/miso-gallery/commit/d403aae4ff5eb6836bfa40e81149690d9c57157c))
+* **deps:** update dependency gunicorn (26.1.0 → 26.2.0) ([#437](https://github.com/misospace/miso-gallery/issues/437)) ([8435dde](https://github.com/misospace/miso-gallery/commit/8435dde9bc8955d096859b3415a7aa18c8d7cf04f))
 
 
 ### Bug Fixes
@@ -52,6 +32,8 @@
 * **security:** restrict /view and /images routes to media files ([#430](https://github.com/misospace/miso-gallery/issues/430)) ([ef4f2fc](https://github.com/misospace/miso-gallery/commit/ef4f2fc5821a881240e814235e6a74d41a9e0d8c)), closes [#418](https://github.com/misospace/miso-gallery/issues/418)
 * **security:** sort CSP integration imports ([#434](https://github.com/misospace/miso-gallery/issues/434)) ([c30b807](https://github.com/misospace/miso-gallery/commit/c30b807227d145f82b248755c8938c4751f0e108)), closes [#421](https://github.com/misospace/miso-gallery/issues/421)
 * set gunicorn --timeout to 130s to accommodate webhook tasks up to 120s ([#393](https://github.com/misospace/miso-gallery/issues/393)) ([3970224](https://github.com/misospace/miso-gallery/commit/39702242b990ddb43c990540bc00c0c682c32e67)), closes [#385](https://github.com/misospace/miso-gallery/issues/385)
+* **recent:** enumerate beyond GALLERY_SCAN_LIMIT on /recent ([#438](https://github.com/misospace/miso-gallery/issues/438)) ([8b22f9b](https://github.com/misospace/miso-gallery/commit/8b22f9bb781a24f2daffce1f4ee7ecab23e42fad)), closes [#436](https://github.com/misospace/miso-gallery/issues/436)
+* **security:** reject symlinks resolving outside DATA_FOLDER in media routes ([#456](https://github.com/misospace/miso-gallery/issues/456)) ([719f201](https://github.com/misospace/miso-gallery/commit/719f2010627af6ab6e4240ae296eecc6119c7b89)), closes [#442](https://github.com/misospace/miso-gallery/issues/442)
 
 
 ### Documentation
