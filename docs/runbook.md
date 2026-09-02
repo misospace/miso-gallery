@@ -380,8 +380,9 @@ Releases are cut by the standing release-please PR. Do not bump versions by hand
 Tests workflow additionally fails any PR where `pyproject.toml` and `APP_VERSION`
 drift apart.
 
-> The old "Manual Release" / "Publish Release" workflows predate release-please and
-> are superseded — a `chore/release-v*` PR they expect is never opened in this flow.
+> The legacy "Manual Release" / "Publish Release" workflows were removed; they predate
+> release-please and could never complete under the current flow. Use the release-please
+> flow above.
 
 ---
 
