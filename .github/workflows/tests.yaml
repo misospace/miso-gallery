@@ -30,15 +30,20 @@ jobs:
           pip install -r requirements.txt
           pip install pytest requests coverage
 
-      - name: Verify pyproject.toml version matches APP_VERSION
+      - name: Verify app.py, pyproject.toml, and release-please manifest versions match
         run: |
           APP_VER=$(python3 scripts/read_app_version.py app.py)
           PYPROJ_VER=$(python3 -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])")
+          MANIFEST_VER=$(python3 -c "import json; print(json.load(open('.release-please-manifest.json'))['.'])")
           if [ "$APP_VER" != "$PYPROJ_VER" ]; then
             echo "::error::pyproject.toml version ($PYPROJ_VER) does not match APP_VERSION ($APP_VER)."
             exit 1
           fi
-          echo "OK: pyproject.toml version ($PYPROJ_VER) matches APP_VERSION ($APP_VER)"
+          if [ "$APP_VER" != "$MANIFEST_VER" ]; then
+            echo "::error::app.py APP_VERSION ($APP_VER) does not match .release-please-manifest.json version ($MANIFEST_VER)."
+            exit 1
+          fi
+          echo "OK: app.py, pyproject.toml, and .release-please-manifest.json all report version $APP_VER"
 
       - name: Run unit tests
         run: |
