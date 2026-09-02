@@ -43,16 +43,15 @@ Default agent for `misospace/miso-gallery`. Role: Senior Software Engineer speci
 - **Version contract**: `app.py` `APP_VERSION`, `pyproject.toml` `[project].version`, and `.release-please-manifest.json` `"."` must all carry the same version. The CI check in `.github/workflows/tests.yaml` ("Verify app.py, pyproject.toml, and release-please manifest versions match") fails when any of the three diverges. Version bumps are made by release-please release PRs, which update all three together — never bump one file by hand.
 
 ### Release Process
-Releases are started manually and completed by GitHub Actions. Branch protection remains enabled: the workflow opens an `app.py` version-bump PR and enables auto-merge instead of pushing directly to `main`.
+Releases are cut by the standing release-please PR. Merging that PR is the release decision — nothing merges on its own.
 
 #### Steps
 
-1. Open **Actions → Manual Release → Run workflow**.
-2. Enter a plain semver version such as `0.1.19` (`v0.1.19` is also accepted).
-3. Follow the linked release PR. It auto-merges after the required checks pass.
-4. `Publish Release` verifies `APP_VERSION`, tags the merge commit, and creates the GitHub release.
+1. Merge the open `release: X.Y.Z` PR (release-please opens and updates it on pushes to `main`).
+2. On merge, release-please tags the merge commit and creates the GitHub release.
+3. The published release triggers the `Release` workflow (`.github/workflows/release.yaml`): it validates `APP_VERSION` matches the tag, then builds multi-arch Docker images and pushes them to GHCR.
 
-The tag push also triggers the `Release` workflow (`.github/workflows/release.yaml`): multi-arch Docker image build + push to GHCR.
+The legacy `manual-release.yml` / `publish-release.yml` workflows were removed — they predate release-please and could never complete under this flow.
 
 #### Version source of truth
 
