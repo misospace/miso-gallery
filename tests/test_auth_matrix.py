@@ -8,6 +8,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+_MINIMAL_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+    "0000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082"
+)
+
 
 def _extract_csrf(html: str) -> str:
     m = re.search(r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']', html)
@@ -107,6 +112,34 @@ def test_view_and_images_do_not_serve_non_media_files(monkeypatch, tmp_path):
     assert client.get("/view/notes.txt").status_code == 404
     assert client.get("/images/secret.env").status_code == 404
     assert client.get("/images/notes.txt").status_code == 404
+
+
+def test_view_and_images_reject_symlinks_outside_data_folder(monkeypatch, tmp_path):
+    """#442: /view/ and /images/ must not follow symlinks that point outside DATA_FOLDER."""
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "passwd"
+    secret.write_bytes(b"root:x:0:0:root:/root:/bin/bash")
+    (data_dir / "foo.png").symlink_to(secret)
+
+    for route in ("/view/foo.png", "/images/foo.png"):
+        resp = client.get(route)
+        assert resp.status_code == 404
+        assert b"root:x:0:0" not in resp.data
+
+
+def test_view_serves_symlink_inside_data_folder(monkeypatch, tmp_path):
+    """#442: symlinks that resolve back inside DATA_FOLDER are still served."""
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    (data_dir / "other").mkdir()
+    (data_dir / "other" / "real.png").write_bytes(_MINIMAL_PNG)
+    (data_dir / "link.png").symlink_to(data_dir / "other" / "real.png")
+
+    resp = client.get("/view/link.png")
+    assert resp.status_code == 200
+    assert resp.content_type.startswith("image/")
+    assert resp.data == _MINIMAL_PNG
 
 
 def test_root_gallery_renders_inline_details_panel(monkeypatch, tmp_path):
