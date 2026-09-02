@@ -40,6 +40,7 @@ Default agent for `misospace/miso-gallery`. Role: Senior Software Engineer speci
 ### Version Management
 - In-app version is sourced from `app.py`
 - Release automation must keep `app.py` version aligned with release tag
+- **Version contract**: `app.py` `APP_VERSION`, `pyproject.toml` `[project].version`, and `.release-please-manifest.json` `"."` must all carry the same version. The CI check in `.github/workflows/tests.yaml` ("Verify app.py, pyproject.toml, and release-please manifest versions match") fails when any of the three diverges. Version bumps are made by release-please release PRs, which update all three together — never bump one file by hand.
 
 ### Release Process
 Releases are started manually and completed by GitHub Actions. Branch protection remains enabled: the workflow opens an `app.py` version-bump PR and enables auto-merge instead of pushing directly to `main`.
