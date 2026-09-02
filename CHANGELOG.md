@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.3.1](https://github.com/misospace/miso-gallery/compare/0.3.0...0.3.1) (2026-09-02)
+
+
+### Bug Fixes
+
+* **release:** bump app.py/pyproject in release PRs ([cf4e247](https://github.com/misospace/miso-gallery/commit/cf4e247813b799893a94d93e73301250babaa74f))
+* **release:** bump app.py/pyproject in release PRs ([17ffaf0](https://github.com/misospace/miso-gallery/commit/17ffaf092e41c9a05ba4bea9e7d3f7ffeba5a8c6))
+* **security:** reject symlinks resolving outside DATA_FOLDER in media routes ([#456](https://github.com/misospace/miso-gallery/issues/456)) ([719f201](https://github.com/misospace/miso-gallery/commit/719f2010627af6ab6e4240ae296eecc6119c7b89)), closes [#442](https://github.com/misospace/miso-gallery/issues/442)
+
 ## [0.3.0](https://github.com/misospace/miso-gallery/compare/0.2.0...0.3.0) (2026-08-31)
 
 
