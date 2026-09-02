@@ -493,7 +493,15 @@ def format_size(size: int) -> str:
 
 
 def is_media_file(path: Path) -> bool:
-    return path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
+    if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS + VIDEO_EXTENSIONS:
+        return False
+    # Reject symlinks that resolve outside DATA_FOLDER (e.g. foo.png -> /etc/passwd).
+    # Symlinks that stay inside DATA_FOLDER are still served.
+    try:
+        path.resolve().relative_to(DATA_FOLDER.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def is_excluded_gallery_path(path: Path) -> bool:

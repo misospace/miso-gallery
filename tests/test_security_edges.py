@@ -302,6 +302,21 @@ def test_thumb_route_rejects_path_traversal(monkeypatch, tmp_path):
     assert resp.content_type.startswith("image/")
 
 
+def test_thumb_route_rejects_symlink_outside_data_folder(monkeypatch, tmp_path):
+    """#442: /thumb/ must not follow symlinks that point outside DATA_FOLDER."""
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "hostname"
+    target.write_bytes(b"test-host")
+    (data_dir / "bar.jpg").symlink_to(target)
+
+    resp = client.get("/thumb/bar.jpg")
+    assert resp.status_code == 404
+    assert b"test-host" not in resp.data
+
+
 # ---------------------------------------------------------------------------
 # 5. CF-Connecting-IP fallback (now also ignores untrusted headers)
 # ---------------------------------------------------------------------------
