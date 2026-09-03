@@ -31,4 +31,21 @@
   {% endif %}
 
   <p class="note">This page intentionally avoids showing secrets or raw environment variables.</p>
-</div></body></html>
+</div>
+<script nonce="{{ csp_nonce }}">
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('/service-worker.js').catch(() => undefined);
+      // Purge SW caches when the auth state changes (Issue #453).
+      const authed = {{ 'true' if session.get('authenticated') else 'false' }};
+      const prev = localStorage.getItem('miso-auth-state');
+      if (prev !== null && prev !== String(authed)) {
+        navigator.serviceWorker.getRegistration().then((reg) => {
+          if (reg && reg.active) reg.active.postMessage({ type: 'auth_changed' });
+        }).catch(() => undefined);
+      }
+      localStorage.setItem('miso-auth-state', String(authed));
+    });
+  }
+</script>
+</body></html>
