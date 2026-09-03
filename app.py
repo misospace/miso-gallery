@@ -1420,6 +1420,8 @@ def auth():
         session["authenticated"] = True
         session["auth_method"] = "local"
         log_security_event("login", "success", auth_method="local")
+        # The landing page posts { type: "auth_changed" } to the active
+        # service worker, which purges all caches (Issue #453).
         return redirect(next_url)
 
     log_security_event("login", "failure", auth_method="local", reason="invalid_password")
@@ -1430,6 +1432,9 @@ def auth():
 def logout():
     log_security_event("logout", "success")
     session.clear()
+    # The /login page posts { type: "auth_changed" } to the active
+    # service worker, which purges all caches so a subsequent user
+    # cannot receive this user's cached content (Issue #453).
     return redirect(url_for("login", next="/"))
 
 
