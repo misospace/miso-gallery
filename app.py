@@ -362,6 +362,10 @@ def batch_remove_thumbnails(rel_paths: list[str]) -> None:
         for rel_path in rel_paths
     }
     for cached_file in THUMBNAIL_CACHE_DIR.iterdir():
+        if cached_file.is_symlink():
+            # #445: never unlink through a symlink (a stale bind-mount / NFS
+            # target would be deleted as the app user).
+            continue
         name = cached_file.name
         if any(name.startswith(prefix) for prefix in prefixes):
             with contextlib.suppress(OSError):
@@ -390,6 +394,10 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
     stats = {"checked": 0, "regenerated": 0, "failed": 0}
 
     for item in DATA_FOLDER.rglob("*"):
+        if item.is_symlink():
+            # #445: never generate a thumbnail from a symlink target
+            # (arbitrary file content outside DATA_FOLDER).
+            continue
         if not item.is_file() or item.suffix.lower() not in IMAGE_EXTENSIONS:
             continue
         if item.name.startswith("."):
