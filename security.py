@@ -432,5 +432,20 @@ def is_safe_redirect_url(url: str | None) -> bool:
         return True
     from urllib.parse import urlsplit
 
-    split = urlsplit(url)
-    return split.netloc == "" and split.scheme == "" and not url.startswith("//")
+    # A leading backslash is never a legitimate relative path. Browsers
+    # (WHATWG URL spec) normalize "\\evil.com" to "//evil.com"
+    # (protocol-relative), so reject any URL starting with a backslash.
+    if url.startswith("\\"):
+        return False
+
+    # Normalize remaining backslashes to "/" before parsing, so that
+    # mid-URL backslashes (e.g. "/path\\evil.com") are also caught.
+    normalized = url.replace("\\", "/")
+    split = urlsplit(normalized)
+    if split.netloc != "" or split.scheme != "":
+        return False
+    if normalized.startswith("//"):
+        return False
+    # A bare dot-prefixed path (".evil.com") is not a normal relative path;
+    # reject it while still allowing "./foo" and "../foo".
+    return not (normalized.startswith(".") and not normalized.startswith(("./", "../")))
