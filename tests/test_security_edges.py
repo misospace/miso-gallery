@@ -604,3 +604,137 @@ def test_audit_log_honours_xff_when_proxy_trusted(monkeypatch):
     ):
         resolved = app_module._client_ip()
         assert resolved == forged
+
+
+# ---------------------------------------------------------------------------
+# is_safe_redirect_url — backslash / dot-prefixed open-redirect bypasses
+# (issue #452)
+# ---------------------------------------------------------------------------
+
+
+
+
+class TestIsSafeRedirectUrl:
+    """Unit tests for security.is_safe_redirect_url covering the
+    backslash parser-differential and dot-prefixed bypass vectors (issue #452)."""
+
+    def _is_safe(self, url):
+        from security import is_safe_redirect_url
+        return is_safe_redirect_url(url)
+
+    # --- backslash-prefixed payloads (the core of issue #452) ---
+
+    def test_single_backslash_external(self):
+        assert self._is_safe(r"\evil.com/phish") is False
+
+    def test_double_backslash_external(self):
+        assert self._is_safe("\\\\evil.com") is False
+
+    def test_backslash_with_path(self):
+        assert self._is_safe("\\\\evil.com/phish") is False
+
+    def test_backslash_with_port(self):
+        assert self._is_safe(r"\evil.com:8080/x") is False
+
+    def test_backslash_mid_url(self):
+        # Mid-URL backslashes normalize to "/" giving a safe relative path.
+        assert self._is_safe(r"/path\to\evil.com") is True
+
+    # --- dot-prefixed payloads ---
+
+    def test_dot_external(self):
+        assert self._is_safe(".evil.com") is False
+
+    def test_dot_slash_relative_allowed(self):
+        # "./evil.com" is a legitimate relative path — must be accepted.
+        assert self._is_safe("./evil.com") is True
+
+    def test_dotdot_slash_allowed(self):
+        assert self._is_safe("../foo") is True
+
+    # --- combination payloads ---
+
+    def test_backslash_dot_external(self):
+        assert self._is_safe(r"\.evil.com") is False
+
+    def test_double_backslash_dot_external(self):
+        assert self._is_safe("\\\\.evil.com") is False
+
+    # --- already-blocked vectors must stay blocked ---
+
+    def test_protocol_relative(self):
+        assert self._is_safe("//evil.com") is False
+
+    def test_http_scheme(self):
+        assert self._is_safe("http://evil.com") is False
+
+    def test_https_scheme(self):
+        assert self._is_safe("https://evil.com") is False
+
+    def test_javascript_scheme(self):
+        assert self._is_safe("javascript:alert(1)") is False
+
+    def test_data_scheme(self):
+        assert self._is_safe("data:text/html,<script>alert(1)</script>") is False
+
+    # --- legitimate relative paths must stay accepted ---
+
+    def test_relative_path(self):
+        assert self._is_safe("/path") is True
+
+    def test_relative_dashboard(self):
+        assert self._is_safe("/dashboard") is True
+
+    def test_relative_with_query(self):
+        assert self._is_safe("/search?q=cat") is True
+
+    def test_empty_string(self):
+        assert self._is_safe("") is True
+
+    def test_none(self):
+        assert self._is_safe(None) is True
+
+
+class TestAuthNextRedirect:
+    """Integration tests: POST /auth with malicious next= must not 302 to
+    an attacker-controlled Location (issue #452)."""
+
+    def _post_auth(self, monkeypatch, tmp_path, next_value):
+        client, _ = build_client(monkeypatch, tmp_path, auth_type="local")
+        _seed_csrf(client)
+        return _auth_post(
+            client,
+            data={"username": "admin", "password": "pass123", "next": next_value},
+        )
+
+    def test_auth_next_single_backslash_falls_back(self, monkeypatch, tmp_path):
+        resp = self._post_auth(monkeypatch, tmp_path, r"\evil.com/phish")
+        assert resp.status_code in (200, 302)
+        if resp.status_code == 302:
+            location = resp.headers.get("Location", "")
+            assert "evil.com" not in location, (
+                f"302 Location leaked attacker domain: {location!r}"
+            )
+
+    def test_auth_next_double_backslash_falls_back(self, monkeypatch, tmp_path):
+        resp = self._post_auth(monkeypatch, tmp_path, "\\\\evil.com")
+        assert resp.status_code in (200, 302)
+        if resp.status_code == 302:
+            location = resp.headers.get("Location", "")
+            assert "evil.com" not in location, (
+                f"302 Location leaked attacker domain: {location!r}"
+            )
+
+    def test_auth_next_dot_external_falls_back(self, monkeypatch, tmp_path):
+        resp = self._post_auth(monkeypatch, tmp_path, ".evil.com")
+        assert resp.status_code in (200, 302)
+        if resp.status_code == 302:
+            location = resp.headers.get("Location", "")
+            assert "evil.com" not in location, (
+                f"302 Location leaked attacker domain: {location!r}"
+            )
+
+    def test_auth_next_legit_relative_still_works(self, monkeypatch, tmp_path):
+        resp = self._post_auth(monkeypatch, tmp_path, "/dashboard")
+        assert resp.status_code == 302
+        assert resp.headers.get("Location", "").endswith("/dashboard")
