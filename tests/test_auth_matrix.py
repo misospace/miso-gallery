@@ -649,21 +649,27 @@ def test_oidc_callback_rate_limited(monkeypatch, tmp_path):
 
 
 def test_oidc_refresh_rate_limited(monkeypatch, tmp_path):
-    """/auth/oidc/refresh must return 429 after 10 requests in a 60s window.
+    """/auth/oidc/refresh must return 429 after 5 requests in a 300s window.
 
     Even an authenticated session with a stale refresh token cannot spam the
-    OIDC provider's token endpoint without bound.
+    OIDC provider's token endpoint without bound. The limit matches /auth
+    (Issue #454).
     """
     client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
 
+    # The route is POST-only and CSRF-protected; seed a valid token so the
+    # requests reach the auth check.
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "test-csrf"
+
     # Unauthenticated: each request is rejected with 401, but still counts
     # against the rate limit.
-    for _i in range(10):
-        resp = client.get("/auth/oidc/refresh")
+    for _i in range(5):
+        resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
         assert resp.status_code == 401
 
-    # The 11th request is rate-limited.
-    resp = client.get("/auth/oidc/refresh")
+    # The 6th request is rate-limited.
+    resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
     assert resp.status_code == 429
     payload = resp.get_json()
     assert payload["error"] == "Rate limit exceeded"
