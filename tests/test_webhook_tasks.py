@@ -1,4 +1,15 @@
+import threading
+import time
+
 from conftest import build_client
+
+
+def setup_function():
+    """Reset the in-memory rate limiter before each test to avoid cross-test
+    pollution: the webhook endpoint is rate-limited at 20 req / 60 s, and
+    the test file fires more than 20 webhook calls across its cases."""
+    from security import FALLBACK_LIMITER
+    FALLBACK_LIMITER.reset()
 
 
 def _build_webhook_client(
@@ -328,3 +339,152 @@ def test_webhook_run_auth_enabled_rejects_wrong_bearer(monkeypatch, tmp_path):
         headers={"Authorization": "Bearer wrong-secret"},
     )
     assert resp_wrong.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #448: per-worker webhook task concurrency cap
+# ---------------------------------------------------------------------------
+#
+# `run_configured_task()` used to invoke the configured command via
+# `subprocess.run(...)` synchronously in the request thread. With
+# WEBHOOK_TASK_TIMEOUT capped at 120s and gunicorn --timeout set to 130s, a
+# single webhook call could occupy a worker for up to two minutes. With the
+# shipped default 2-worker pool, a webhook-secret holder (or anyone with a
+# write-scoped LLM API key) could submit enough concurrent long-running task
+# requests to saturate the pool and stall every other route — a
+# worker-exhaustion DoS that requires no credentials beyond the legitimate
+# webhook secret or write API key.
+#
+# The fix caps concurrent in-flight task invocations at 1 per gunicorn worker
+# via a module-level BoundedSemaphore. Concurrent requests that arrive while
+# a task is in flight are rejected with 503 instead of blocking the worker
+# (or the gunicorn pool) indefinitely.
+
+
+def test_webhook_task_rejects_concurrent_when_pool_saturated(monkeypatch, tmp_path):
+    """Three concurrent webhook tasks must not all block the same worker.
+
+    The first task acquires the per-worker slot and runs for ~1.5s. The two
+    concurrent follow-up requests must be rejected with 503 immediately
+    rather than queued behind it, so the worker stays responsive for other
+    routes. The whole batch must complete well under WEBHOOK_TASK_TIMEOUT —
+    saturation rejection is not allowed to block.
+    """
+    # Task sleeps 1.5s so the first request still holds the slot when the
+    # other two concurrent requests arrive.
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd=(
+            'python3 -c "import time, sys; '
+            'time.sleep(1.5); print(\'done-\' + sys.argv[1])" {params.name}'
+        ),
+    )
+
+    statuses: list[int] = []
+    bodies: list[dict] = []
+    lock = threading.Lock()
+
+    def fire(label: str) -> None:
+        resp = client.post(
+            "/api/webhook/run",
+            json={"task": "generate", "params": {"name": label}},
+            headers={"Authorization": "Bearer test-secret-123"},
+        )
+        with lock:
+            statuses.append(resp.status_code)
+            bodies.append(resp.get_json())
+
+    threads = [
+        threading.Thread(target=fire, args=(f"t{i}",)) for i in range(3)
+    ]
+    start = time.monotonic()
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=15)
+    elapsed = time.monotonic() - start
+
+    # Sanity: the worker must NOT block until WEBHOOK_TASK_TIMEOUT (default
+    # 30s here) — saturation rejection returns ~immediately.
+    assert elapsed < 10, (
+        f"Concurrent requests blocked the worker for {elapsed:.1f}s; "
+        "saturation rejection did not short-circuit the queue."
+    )
+
+    # Exactly one task wins the slot and runs to completion; the other two
+    # are rejected with 503 instead of being queued.
+    assert statuses.count(200) == 1, statuses
+    assert statuses.count(503) == 2, statuses
+
+    # The 503 responses explain the saturation so callers can retry.
+    for code, body in zip(statuses, bodies, strict=True):
+        if code == 503:
+            assert "saturated" in body["error"].lower(), body
+
+
+def test_webhook_task_slot_released_after_completion(monkeypatch, tmp_path):
+    """After an in-flight task completes, the slot must be released so
+    subsequent requests can run. Without slot release a single bad task
+    would permanently disable webhook tasks in this worker.
+    """
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd=(
+            'python3 -c "import time, sys; '
+            'time.sleep(0.3); print(\'done-\' + sys.argv[1])" {params.name}'
+        ),
+    )
+
+    # Three sequential tasks must all succeed — each acquires the slot,
+    # runs, releases the slot, then the next request acquires it.
+    for i in range(3):
+        resp = client.post(
+            "/api/webhook/run",
+            json={"task": "generate", "params": {"name": f"t{i}"}},
+            headers={"Authorization": "Bearer test-secret-123"},
+        )
+        assert resp.status_code == 200, resp.get_json()
+        payload = resp.get_json()
+        assert payload["success"] is True
+        assert payload["stdout"].strip() == f"done-t{i}"
+
+
+def test_webhook_task_slot_released_after_timeout(monkeypatch, tmp_path):
+    """A timed-out task must still release the slot. Otherwise a single
+    misconfigured task with a hung subprocess would permanently disable
+    webhook tasks in this worker (the slot would never become available
+    again).
+    """
+    # The configured command blocks far longer than the per-task timeout,
+    # so subprocess.run() raises TimeoutExpired. Reset the timeout for the
+    # second request so it can complete normally.
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd=(
+            'python3 -c "import time, sys; '
+            'time.sleep(5); print(\'done-\' + sys.argv[1])" {params.name}'
+        ),
+    )
+    # Force the per-task timeout to a short, predictable value so the first
+    # request times out quickly.
+    monkeypatch.setenv("WEBHOOK_TASK_TIMEOUT", "1")
+
+    # First task hits the 1s timeout and returns 504.
+    resp_timeout = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {"name": "hung"}},
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+    assert resp_timeout.status_code == 504
+    assert "timed out" in resp_timeout.get_json()["error"].lower()
+
+    # Restore the timeout so the follow-up task can finish within budget,
+    # and verify the slot was released by the `finally` clause.
+    monkeypatch.setenv("WEBHOOK_TASK_TIMEOUT", "10")
+    resp_ok = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {"name": "ok"}},
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+    assert resp_ok.status_code == 200, resp_ok.get_json()
+    assert resp_ok.get_json()["stdout"].strip() == "done-ok"
