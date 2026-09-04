@@ -912,7 +912,11 @@ def index(subpath: str = ""):
 
     has_more = False
     for item in sorted(folder_path.iterdir(), key=lambda p: p.name.lower()):
-        if item.name in {".thumb_cache", ".trash"}:
+        # Skip symlinks to prevent filesystem traversal outside the data root,
+        # and use the same hidden-segment exclusion as iter_gallery_items() so
+        # dotfiles / dot-folders (e.g. `.git/HEAD`, `.DS_Store`) cannot surface
+        # in the gallery UI. See issue #444.
+        if item.is_symlink() or is_excluded_gallery_path(item):
             continue
 
         rel_path = f"{safe_subpath}/{item.name}".lstrip("/") if safe_subpath else item.name

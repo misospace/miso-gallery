@@ -154,6 +154,36 @@ def test_root_gallery_renders_inline_details_panel(monkeypatch, tmp_path):
     assert "fetchpriority=\"low\"" in html
 
 
+def test_index_excludes_hidden_files_and_symlinks(monkeypatch, tmp_path):
+    """#444: index() must apply the same hidden-segment + symlink exclusions
+    that iter_gallery_items() uses, so dotfiles and symlinks cannot surface in
+    the gallery UI even when an authenticated user has shell-like write
+    access to DATA_FOLDER.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    # Hidden / dot-prefixed artifacts that would currently leak.
+    (data_dir / ".DS_Store").write_bytes(b"\x00")
+    (data_dir / ".git").mkdir()
+    (data_dir / ".git" / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+    # Symlinks -- one a file, one a directory -- pointing outside DATA_FOLDER.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "real.png").write_bytes(_MINIMAL_PNG)
+    (data_dir / "link.png").symlink_to(outside / "real.png")
+    outside_dir = tmp_path / "outside_dir"
+    outside_dir.mkdir()
+    (outside_dir / "leak.png").write_bytes(_MINIMAL_PNG)
+    (data_dir / "linkdir").symlink_to(outside_dir)
+
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    for forbidden in (".git", "HEAD", ".DS_Store", "link.png", "linkdir"):
+        assert forbidden not in body, (
+            f"index() must not surface {forbidden!r} in the gallery UI"
+        )
+
+
 def test_bulk_delete_redirects_with_feedback(monkeypatch, tmp_path):
     client = _build_auth_client(monkeypatch, tmp_path, auth_type="none")
 
