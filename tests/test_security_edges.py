@@ -738,3 +738,101 @@ class TestAuthNextRedirect:
         resp = self._post_auth(monkeypatch, tmp_path, "/dashboard")
         assert resp.status_code == 302
         assert resp.headers.get("Location", "").endswith("/dashboard")
+
+
+# ---------------------------------------------------------------------------
+# Issue #444: index() folder view must skip hidden segments (dotfiles, dot-
+# dirs) and symlinks -- the same exclusions iter_gallery_items() applies.
+# Defense in depth: the gallery UI never surfaces operator-shell-created
+# artifacts (`.git/HEAD`, `.DS_Store`) nor symlinks that point outside
+# DATA_FOLDER.
+# ---------------------------------------------------------------------------
+
+
+def test_index_hides_dotdir_git(tmp_path, monkeypatch):
+    """`DATA/.git/HEAD` (and the `.git` directory itself) must not be rendered."""
+    client, _data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    # build_client creates `.thumb_cache/`, `sample.png`, `copy.png`, `cats/`.
+    # Add a hidden `.git/` containing HEAD.
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_bytes(b"ref: refs/heads/main\n")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert ".git" not in body, "index() must not render the .git/ folder"
+    assert "HEAD" not in body, "index() must not render files inside .git/"
+
+
+def test_index_hides_dotfile_ds_store(tmp_path, monkeypatch):
+    """`DATA/.DS_Store` must not be rendered as a gallery item."""
+    client, _data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    (tmp_path / ".DS_Store").write_bytes(b"\x00\x01\x02bogus")
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    assert ".DS_Store" not in body
+
+
+def test_index_hides_file_symlink(tmp_path, monkeypatch):
+    """A symlinked file under DATA_FOLDER must not be rendered.
+
+    `DATA/foo.png -> /tmp/whatever.png` -- iterdir follows the link and
+    reports it as a regular file with a matching extension, but index() must
+    skip symlinks to avoid surfacing operator-shell artifacts.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    # Target needs a valid PNG suffix so the *unfixed* index() would render it.
+    target = tmp_path.parent / "sibling_target.png"
+    # 1x1 transparent PNG so suffix-valid file exists outside DATA_FOLDER.
+    target.write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4"
+        b"\x89\x00\x00\x00\rIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18"
+        b"\xd8\xa2\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    link = data_dir / "foo.png"
+    link.symlink_to(target)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    # Neither the basename nor the relpath should appear in the listing.
+    assert "foo.png" not in body, (
+        "index() must not render symlinked files; got a card with name 'foo.png'"
+    )
+    # And the thumb/view URL for the symlink must not exist (404), even if
+    # the underlying file does.
+    thumb = client.get("/thumb/foo.png")
+    assert thumb.status_code == 404
+    target.unlink(missing_ok=True)
+
+
+def test_index_hides_directory_symlink(tmp_path, monkeypatch):
+    """A symlinked directory under DATA_FOLDER must not be rendered as a
+    subfolder, and clicking through to it must not enumerate the target.
+
+    `DATA/dir -> /tmp/whatever` would otherwise be navigated as `dir/` and
+    iterdir()'d in the target.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    target = tmp_path.parent / "sibling_target_dir"
+    target.mkdir()
+    (target / "secret.png").write_bytes(
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4"
+        b"\x89\x00\x00\x00\rIDATx\x9cc\xf8\x0f\x00\x00\x01\x01\x00\x05\x18"
+        b"\xd8\xa2\x00\x00\x00\x00IEND\xaeB`\x82"
+    )
+    link = data_dir / "dir"
+    link.symlink_to(target)
+    resp = client.get("/")
+    assert resp.status_code == 200
+    body = resp.get_data(as_text=True)
+    # The symlinked folder must not appear as a folder card. We check the
+    # checkbox relpath so a literal "dir" substring elsewhere in the page
+    # (e.g. <html dir="ltr">) does not produce a false positive.
+    assert 'value="dir/"' not in body, (
+        "directory symlink must not appear as a checkbox-able subfolder entry"
+    )
+    assert 'class="folder-name">dir<' not in body, (
+        "index() must not render directory symlinks as subfolders"
+    )
