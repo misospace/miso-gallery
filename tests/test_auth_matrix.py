@@ -568,3 +568,102 @@ def test_find_matching_key_write_falls_back_to_legacy(monkeypatch, tmp_path):
     matched, hint, key_class = auth._find_matching_key("legacy-key-99", "write")
     assert matched is True
     assert key_class == "write"
+
+
+# ---------------------------------------------------------------------------
+# OIDC route rate limiting (issue #446)
+# ---------------------------------------------------------------------------
+
+def setup_function():
+    """Reset the in-memory rate limiter before each test to avoid cross-test pollution."""
+    from security import FALLBACK_LIMITER
+    FALLBACK_LIMITER.reset()
+
+
+def test_oidc_login_rate_limited(monkeypatch, tmp_path):
+    """/auth/oidc must return 429 after 20 requests in a 60s window.
+
+    A single real login (one authorize_redirect) stays well under the limit,
+    but an unauthenticated attacker spamming the route is cut off before it
+    can force repeated state generation and session writes.
+    """
+    import flask
+
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
+    import app as app_module
+
+    calls = {"n": 0}
+
+    def fake_authorize_redirect(*args, **kwargs):
+        calls["n"] += 1
+        return flask.Response("redirected")
+
+    monkeypatch.setattr(app_module.oauth.oidc, "authorize_redirect", fake_authorize_redirect)
+
+    # The first 20 requests (a real user logging in once is far below this) pass.
+    for _i in range(20):
+        resp = client.get("/auth/oidc", follow_redirects=False)
+        assert resp.status_code == 200
+    assert calls["n"] == 20
+
+    # The 21st request is rate-limited and never reaches the provider.
+    resp = client.get("/auth/oidc", follow_redirects=False)
+    assert resp.status_code == 429
+    payload = resp.get_json()
+    assert payload["error"] == "Rate limit exceeded"
+    assert calls["n"] == 20  # authorize_redirect was NOT called again
+
+
+def test_oidc_callback_rate_limited(monkeypatch, tmp_path):
+    """/auth/oidc/callback must return 429 after 20 requests in a 60s window.
+
+    The callback is the route that forces a token-endpoint round trip to the
+    external OIDC provider per call, so it must be bounded even for
+    unauthenticated callers.
+    """
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
+    import app as app_module
+
+    calls = {"n": 0}
+
+    def fake_authorize_access_token(*args, **kwargs):
+        calls["n"] += 1
+        raise RuntimeError("mock provider failure")
+
+    monkeypatch.setattr(app_module.oauth.oidc, "authorize_access_token", fake_authorize_access_token)
+
+    # The first 20 requests reach the handler (each fails the mock token
+    # exchange and redirects to the login page with error=oidc_failed).
+    for _i in range(20):
+        resp = client.get("/auth/oidc/callback", query_string={"code": "x", "state": "y"}, follow_redirects=False)
+        assert resp.status_code == 302
+        assert "error=oidc_failed" in resp.headers["Location"]
+    assert calls["n"] == 20
+
+    # The 21st request is rate-limited and never reaches the provider.
+    resp = client.get("/auth/oidc/callback", query_string={"code": "x", "state": "y"}, follow_redirects=False)
+    assert resp.status_code == 429
+    payload = resp.get_json()
+    assert payload["error"] == "Rate limit exceeded"
+    assert calls["n"] == 20  # authorize_access_token was NOT called again
+
+
+def test_oidc_refresh_rate_limited(monkeypatch, tmp_path):
+    """/auth/oidc/refresh must return 429 after 10 requests in a 60s window.
+
+    Even an authenticated session with a stale refresh token cannot spam the
+    OIDC provider's token endpoint without bound.
+    """
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
+
+    # Unauthenticated: each request is rejected with 401, but still counts
+    # against the rate limit.
+    for _i in range(10):
+        resp = client.get("/auth/oidc/refresh")
+        assert resp.status_code == 401
+
+    # The 11th request is rate-limited.
+    resp = client.get("/auth/oidc/refresh")
+    assert resp.status_code == 429
+    payload = resp.get_json()
+    assert payload["error"] == "Rate limit exceeded"
