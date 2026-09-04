@@ -1773,6 +1773,7 @@ def about_view():
 
 
 @app.route("/auth/oidc")
+@rate_limit(max_requests=20, window=60)
 def oidc_login():
     """Initiate OIDC authentication flow."""
     if not is_oidc_configured():
@@ -1791,6 +1792,7 @@ def oidc_login():
 
 
 @app.route("/auth/oidc/callback")
+@rate_limit(max_requests=20, window=60)
 def oidc_callback():
     """Handle OIDC callback."""
     if not is_oidc_configured():
@@ -1854,6 +1856,7 @@ def oidc_callback():
 
 
 @app.route("/auth/oidc/refresh")
+@rate_limit(max_requests=10, window=60)
 def oidc_refresh():
     """Refresh OIDC access token using stored refresh token."""
     if not is_oidc_configured():
