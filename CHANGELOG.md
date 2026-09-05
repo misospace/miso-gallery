@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.2.1](https://github.com/misospace/miso-gallery/compare/0.2.0...0.2.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* **auth:** resolve OIDC token refresh URL from discovery metadata ([545c36a](https://github.com/misospace/miso-gallery/commit/545c36a07aed62ceabd4593dbb7bba3fa028abf0))
+* **auth:** resolve OIDC token refresh URL from discovery metadata ([69d640a](https://github.com/misospace/miso-gallery/commit/69d640a4da879e540c023328817114c9ea7c7dcc)), closes [#450](https://github.com/misospace/miso-gallery/issues/450)
+* **recent:** compare scan truncation against the enumeration bound actually used ([b91e9ad](https://github.com/misospace/miso-gallery/commit/b91e9ad50555c1a29ba737f379ed80383d8fd7ce))
+* **recent:** truthful truncation banner + single-lstat bounded recent scan ([5e14f50](https://github.com/misospace/miso-gallery/commit/5e14f50e4d4ed0b1b34bdab26365477a1ec7131c))
+* **security:** exclude dotfiles and symlinks from index() listing ([a9c31d0](https://github.com/misospace/miso-gallery/commit/a9c31d0a8a6d0216a975fcf8a25f5e4e812ee132))
+* **security:** exclude dotfiles and symlinks from index() listing ([5b86765](https://github.com/misospace/miso-gallery/commit/5b86765bcf84030e8b79b19ecec6bf9aac328be1)), closes [#444](https://github.com/misospace/miso-gallery/issues/444)
+* **security:** make /auth/oidc/refresh POST-only with CSRF and rate limiting ([6e8aa05](https://github.com/misospace/miso-gallery/commit/6e8aa0549f428b75d633ae937c7af9d489cc6d15))
+* **security:** make /auth/oidc/refresh POST-only with CSRF and rate limiting ([b560358](https://github.com/misospace/miso-gallery/commit/b5603581559b4d0ae8076a13b34a9cef9239b6d8)), closes [#454](https://github.com/misospace/miso-gallery/issues/454)
+* **security:** rate-limit the OIDC routes to stop provider spam ([218d0f2](https://github.com/misospace/miso-gallery/commit/218d0f243b9bc52ad65a496c3bc32c1bf3d55129))
+* **security:** rate-limit the OIDC routes to stop provider spam ([7339aff](https://github.com/misospace/miso-gallery/commit/7339aff2e99e63dc873d1c705d490dbb22f771a3)), closes [#446](https://github.com/misospace/miso-gallery/issues/446)
+* **security:** reject backslash and dot-prefixed open redirect URLs ([6fe09b8](https://github.com/misospace/miso-gallery/commit/6fe09b8c81159489f46c3dca1387c8c6b288b6dd))
+* **security:** reject backslash and dot-prefixed open redirect URLs ([1f5894d](https://github.com/misospace/miso-gallery/commit/1f5894d89ae31e4de7f518ebf68419f19e443d11)), closes [#452](https://github.com/misospace/miso-gallery/issues/452)
+* **service-worker:** stop caching authenticated navigation responses and purge caches on auth-state change ([f7ac88e](https://github.com/misospace/miso-gallery/commit/f7ac88e51f3493d7e63283500eee88caf5ec2d76))
+* **service-worker:** stop caching authenticated navigation responses and purge caches on auth-state change ([3ff7f05](https://github.com/misospace/miso-gallery/commit/3ff7f0503ea3e45d18cdc0f38d84dd868c4250bc)), closes [#453](https://github.com/misospace/miso-gallery/issues/453)
+* **thumbnails:** skip symlinks in integrity check and batch thumbnail removal ([dcea0f3](https://github.com/misospace/miso-gallery/commit/dcea0f36d9b36660d1c9ab1c8766eab90cfec33b))
+* **thumbnails:** skip symlinks in integrity check and batch thumbnail removal ([d0ba421](https://github.com/misospace/miso-gallery/commit/d0ba421d4c5b115aea9a429d6d70c6e1dc19e20b)), closes [#445](https://github.com/misospace/miso-gallery/issues/445)
+* **trash:** refuse to restore trashed items containing symlinks ([77f066a](https://github.com/misospace/miso-gallery/commit/77f066abb0df9b81f63742a606f561bc466f0c13))
+* **trash:** refuse to restore trashed items containing symlinks ([1097e45](https://github.com/misospace/miso-gallery/commit/1097e4527b7c383dd4039bf3e0fa6dbaf382b2b5)), closes [#455](https://github.com/misospace/miso-gallery/issues/455)
+* **webhook:** cap concurrent task invocations per worker ([d403b61](https://github.com/misospace/miso-gallery/commit/d403b616ca89421df6e836ea234ee4ba220a251c))
+* **webhook:** cap concurrent task invocations per worker ([be33796](https://github.com/misospace/miso-gallery/commit/be33796f60ca1ac2b4117c96933b42ce42e5cf2a)), closes [#448](https://github.com/misospace/miso-gallery/issues/448)
+
+
+### Performance Improvements
+
+* **recent:** single-lstat bounded walk with heap selection and result caching ([f2b6d84](https://github.com/misospace/miso-gallery/commit/f2b6d84eff0474854d3cdad9cc481cd47cb24c46))
+
 ## [0.2.0](https://github.com/misospace/miso-gallery/compare/0.1.19...0.2.0) (2026-09-02)
 
 

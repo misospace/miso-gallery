@@ -222,7 +222,7 @@ PWA_APP_NAME = "Miso Gallery"
 # The bundled default version. release-please bumps the block below in its
 # release PR; scripts/read_app_version.py resolves the indirection.
 # x-release-please-start-version
-DEFAULT_APP_VERSION = "0.2.0"
+DEFAULT_APP_VERSION = "0.2.1"
 # x-release-please-end
 APP_VERSION = (os.environ.get("APP_VERSION") or DEFAULT_APP_VERSION).strip() or DEFAULT_APP_VERSION
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
