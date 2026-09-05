@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import heapq
 import html
 import json
 import logging
@@ -10,6 +11,7 @@ import os
 import re
 import secrets
 import shlex
+import stat
 import subprocess
 import threading
 import time
@@ -686,6 +688,106 @@ def iter_gallery_items(
     return sorted_results
 
 
+# Media suffix lookup for recent_gallery_entries; IMAGE_EXTENSIONS and
+# VIDEO_EXTENSIONS are already lowercase.
+_RECENT_MEDIA_SUFFIXES = frozenset(IMAGE_EXTENSIONS + VIDEO_EXTENSIONS)
+
+
+def recent_gallery_entries(
+    max_items: int,
+    root: Path | None = None,
+) -> tuple[list[tuple[str, float, int]], bool]:
+    """Return the globally newest media as (rel_path, mtime, size), newest first.
+
+    Backs the HTML /recent page (issue #436). Unlike iter_gallery_items +
+    per-path Path.stat(), this walk costs a single lstat per file and
+    heap-selects the newest max_items entries during the walk instead of
+    materialising the whole enumeration, so large galleries stay cheap to
+    serve. The walk is safety-bounded by RECENT_ENUMERATION_LIMIT media files
+    and applies the same exclusions as iter_gallery_items (symlinks,
+    dot-files/dot-dirs, .thumb_cache, .trash).
+
+    Args:
+        max_items: Number of newest entries to return.
+        root: Optional root directory to scan. Defaults to DATA_FOLDER.
+
+    Returns:
+        (entries, scan_truncated) where scan_truncated is True only when the
+        walk stopped at RECENT_ENUMERATION_LIMIT while more media remained
+        (Issue #349). Results are cached in _gallery_scan_cache, sharing the
+        TTL and the _invalidate_gallery_scan_cache() invalidation with
+        iter_gallery_items.
+    """
+    scan_root = root if root is not None else DATA_FOLDER
+    max_items = max(1, max_items)
+    cache_key = ("recent", max_items, str(scan_root))
+    now = time.time()
+    cached = _gallery_scan_cache.get(cache_key)
+    if cached is not None:
+        ts, payload = cached
+        if now - ts < GALLERY_SCAN_CACHE_TTL:
+            _gallery_scan_cache.move_to_end(cache_key)
+            return payload
+        del _gallery_scan_cache[cache_key]
+
+    pruned_dir_names = {THUMBNAIL_CACHE_DIR.name, ".trash"}
+    data_root = str(scan_root)
+    # Min-heap of (mtime, lowercase rel path, rel path, size): the root is the
+    # worst kept entry (oldest, ties by path), so a newer candidate evicts it.
+    # The lowercase rel path as second field reproduces iter_gallery_items'
+    # path ordering as the mtime tie-break.
+    heap: list[tuple[float, str, str, int]] = []
+    scanned = 0
+    scan_truncated = False
+
+    for dirpath, dirnames, filenames in os.walk(data_root):
+        # Prune excluded directories instead of walking into them and
+        # filtering per entry — everything below them is excluded too, so
+        # this matches is_excluded_gallery_path while skipping whole subtrees.
+        dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in pruned_dir_names]
+        for name in filenames:
+            if scanned >= RECENT_ENUMERATION_LIMIT:
+                # A further media file exists beyond the bound: the newest
+                # items may hide past it (Issue #349).
+                scan_truncated = True
+                break
+            if name.startswith(".") or name in pruned_dir_names:
+                continue
+            if os.path.splitext(name)[1].lower() not in _RECENT_MEDIA_SUFFIXES:
+                continue
+            entry_path = os.path.join(dirpath, name)
+            try:
+                # Single lstat per file: the mode also rejects symlinks
+                # (including to-file links that escape DATA_FOLDER), FIFOs
+                # and sockets, matching the symlink skip in iter_gallery_items.
+                st = os.lstat(entry_path)
+            except OSError:
+                # Vanished mid-walk / NFS attribute cache inconsistency.
+                continue
+            if not stat.S_ISREG(st.st_mode):
+                continue
+            scanned += 1
+            rel = os.path.relpath(entry_path, data_root).replace(os.sep, "/")
+            key = (st.st_mtime, rel.lower())
+            if len(heap) < max_items:
+                heapq.heappush(heap, (*key, rel, st.st_size))
+            elif key > heap[0][:2]:
+                heapq.heapreplace(heap, (*key, rel, st.st_size))
+        else:
+            continue
+        break  # scan bound hit: stop the walk entirely
+
+    entries = [
+        (rel, mtime, size)
+        for mtime, _order, rel, size in sorted(heap, key=lambda item: (-item[0], item[1]))
+    ]
+    payload = (entries, scan_truncated)
+    _gallery_scan_cache[cache_key] = (now, payload)
+    while len(_gallery_scan_cache) > GALLERY_SCAN_CACHE_MAX_ENTRIES:
+        _gallery_scan_cache.popitem(last=False)
+    return payload
+
+
 def file_sha256(path: Path) -> str:
     digest = hashlib.sha256()
     handle = path.open("rb")
@@ -1323,22 +1425,10 @@ def add_tag():
 def recent_view():
     """Show recently added images sorted by modification time (newest first)."""
     max_items = 50
+    entries, scan_truncated = recent_gallery_entries(max_items)
+
     images = []
-
-    for path in iter_gallery_items(kind="media", limit=RECENT_ENUMERATION_LIMIT):
-        try:
-            stat = path.stat()
-            mtime = stat.st_mtime
-            size = stat.st_size
-        except (OSError, PermissionError):
-            # Skip items that become inaccessible during NFS attribute cache inconsistency
-            continue
-
-        try:
-            rel_path_str = path.relative_to(DATA_FOLDER).as_posix()
-        except (OSError, ValueError):
-            continue
-
+    for rel_path_str, mtime, size in entries:
         date_str = time.strftime("%Y-%m-%d %H:%M", time.localtime(mtime))
 
         # Get folder path for navigation
@@ -1346,36 +1436,24 @@ def recent_view():
         folder_url = url_for("index", subpath=folder_path) if folder_path else url_for("index")
 
         images.append({
-            "name": path.name,
+            "name": os.path.basename(rel_path_str),
             "rel_path": rel_path_str,
             "url": url_for("view", filename=rel_path_str),
             "thumb": url_for("thumb", filename=rel_path_str),
             "added": date_str,
             "size": format_size(size),
-            "mtime": mtime,
             "folder_url": folder_url,
         })
 
-    images.sort(key=lambda x: x["mtime"], reverse=True)
-
-    # Detect scan truncation (Issue #349). /recent enumerates up to
-    # RECENT_ENUMERATION_LIMIT media files (issue #436), not GALLERY_SCAN_LIMIT,
-    # so the comparison must use the bound actually applied — comparing against
-    # GALLERY_SCAN_LIMIT flagged any gallery larger than 5000 files as
-    # truncated even though the walk had covered every file.
-    scan_truncated = len(images) >= RECENT_ENUMERATION_LIMIT
-    scan_limit = RECENT_ENUMERATION_LIMIT
-
-    images = images[:max_items]
-
-    for img in images:
-        del img["mtime"]
-
+    # Detect scan truncation (Issue #349). recent_gallery_entries reports True
+    # only when the walk stopped at RECENT_ENUMERATION_LIMIT (issue #436) with
+    # media left unseen, so libraries larger than GALLERY_SCAN_LIMIT no longer
+    # raise a false warning.
     return render_template(
         "recent.html",
         items=images,
         scan_truncated=scan_truncated,
-        scan_limit=scan_limit,
+        scan_limit=RECENT_ENUMERATION_LIMIT,
         theme_color=PWA_THEME_COLOR,
     )
 
