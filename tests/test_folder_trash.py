@@ -497,6 +497,121 @@ class TestRestorePathTraversal:
             restore_from_trash("fake2.txt", data_dir)
 
 
+class TestRestoreSymlinkSafety:
+    """Regression tests for symlink inlining on restore (#455).
+
+    shutil.copytree defaults to symlinks=False, which follows symlinks and
+    copies target contents as regular files. A trashed directory containing a
+    symlink (e.g. passwd_link.png -> /etc/passwd) must therefore be refused
+    on restore so external-target bytes never land under DATA_FOLDER.
+    """
+
+    def test_restore_refuses_directory_containing_symlink(self, monkeypatch, tmp_path):
+        from trash import list_trash, move_to_trash, restore_from_trash
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        # External secret that a symlink inside the trashed dir would expose
+        secret = tmp_path / "secret_target.txt"
+        secret.write_text("TOP_SECRET_BYTES")
+
+        folder = data_dir / "photos"
+        folder.mkdir()
+        (folder / "real.jpg").write_bytes(b"\xff\xd8\xff\xe0real")
+        (folder / "passwd_link.png").symlink_to(secret)
+
+        assert move_to_trash(folder, data_dir) is True
+        assert not folder.exists()
+
+        trash_items = list_trash(data_dir)
+        trash_entry = trash_items[0]["name"]
+
+        with pytest.raises(ValueError, match="contains symlinks"):
+            restore_from_trash(trash_entry, data_dir)
+
+        # Nothing may have been restored into DATA_FOLDER
+        assert not folder.exists()
+        for path in data_dir.rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                assert path.read_bytes() != b"TOP_SECRET_BYTES"
+
+        # The trashed item must remain in trash (not consumed by the refusal)
+        assert any(t["name"] == trash_entry for t in list_trash(data_dir))
+
+    def test_restore_refuses_symlinked_directory_item(self, monkeypatch, tmp_path):
+        """A trashed item that is itself a symlink must also be refused."""
+        from trash import restore_from_trash, trash_dir
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        external = tmp_path / "external_dir"
+        external.mkdir()
+        (external / "leak.png").write_bytes(b"EXTERNAL")
+
+        td = trash_dir(data_dir)
+        link = td / "linked_dir"
+        link.symlink_to(external)
+        link.with_name(link.name + trash.META_SUFFIX).write_text(
+            json.dumps({"original": "linked_dir"})
+        )
+
+        with pytest.raises(ValueError, match="contains symlinks"):
+            restore_from_trash("linked_dir", data_dir)
+
+        assert not (data_dir / "linked_dir").exists()
+
+    def test_restore_symlink_free_directory_still_works(self, monkeypatch, tmp_path):
+        """Legitimate symlink-free restores must not regress."""
+        from trash import move_to_trash, restore_from_trash
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        folder = data_dir / "clean"
+        folder.mkdir()
+        (folder / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0a")
+        (folder / "sub").mkdir()
+        (folder / "sub" / "b.jpg").write_bytes(b"\xff\xd8\xff\xe0b")
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = [t["name"] for t in trash.list_trash(data_dir)][0]
+
+        assert restore_from_trash(entry, data_dir) is True
+        assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert (folder / "sub" / "b.jpg").read_bytes() == b"\xff\xd8\xff\xe0b"
+
+    def test_cross_device_trash_fallback_preserves_symlinks(self, monkeypatch, tmp_path):
+        """The copytree fallback in move_to_trash must not inline symlink targets."""
+        from trash import move_to_trash, trash_dir
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        secret = tmp_path / "secret.txt"
+        secret.write_text("SECRET")
+        source = data_dir / "album"
+        source.mkdir()
+        (source / "photo.txt").write_text("photo")
+        (source / "link.txt").symlink_to(secret)
+
+        real_rename = trash.Path.rename
+
+        def cross_device_rename(path, destination):
+            if path == source:
+                raise OSError("cross-device")
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+        assert move_to_trash(source, data_dir) is True
+
+        trashed = next(
+            p for p in trash_dir(data_dir).iterdir()
+            if p.is_dir() and not p.name.endswith(trash.META_SUFFIX)
+        )
+        link = trashed / "link.txt"
+        assert link.is_symlink(), "fallback copy must preserve symlinks as links"
+        # The link must still point at the external target, not a copied file
+        assert link.resolve() == secret.resolve()
+
+
 class TestTrashListIncludesDirs:
     """Verify trash listing correctly shows directories with sizes."""
 

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import shutil
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 TRASH_DIR_NAME = ".trash"
 META_SUFFIX = ".meta.json"
@@ -97,7 +100,9 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
             try:
                 file_path.rename(dest)
             except OSError:
-                shutil.copytree(file_path, dest)
+                # symlinks=True keeps links as links (matching rename) so the
+                # copy cannot inline symlink-target contents into the trash tree.
+                shutil.copytree(file_path, dest, symlinks=True)
                 shutil.rmtree(file_path)
         except OSError:
             # Clean up partial copy on failure
@@ -150,6 +155,24 @@ def _is_safe_relative_path(path_str: str) -> bool:
     return all(part != ".." for part in path_str.replace("\\", "/").split("/"))
 
 
+def _find_symlinks(root: Path) -> list[Path]:
+    """Return all symlinks inside *root* (including *root* itself if it is one).
+
+    Walks without following symlinks so external targets are never read.
+    """
+    found: list[Path] = []
+    if root.is_symlink():
+        found.append(root)
+        return found
+    try:
+        for entry in root.rglob("*"):
+            if entry.is_symlink():
+                found.append(entry)
+    except OSError:
+        pass
+    return found
+
+
 def restore_from_trash(item_name: str, data_folder: Path) -> bool:
     """Restore an item from trash to its original location.
 
@@ -164,6 +187,23 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
     item = td / item_name
     if not item.exists():
         return False
+
+    # Refuse items that are symlinks or contain symlinks: shutil.copytree
+    # defaults to symlinks=False and would inline symlink-target contents
+    # into DATA_FOLDER, making external files reachable via /images/ etc.
+    if item.is_symlink() or (item.is_dir() and _find_symlinks(item)):
+        symlinks = [item] if item.is_symlink() else _find_symlinks(item)
+        for link in symlinks:
+            logger.warning(
+                "Refusing to restore trash item %r: contains symlink %s",
+                item_name,
+                link,
+            )
+        raise ValueError(
+            f"Cannot restore {item_name!r}: the trashed item contains "
+            f"symlinks (e.g. {symlinks[0]}). "
+            "Remove the item from trash to discard it."
+        )
 
     # Verify resolved path stays within the trash directory
     try:
