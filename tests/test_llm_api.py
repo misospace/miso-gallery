@@ -40,6 +40,27 @@ def test_llm_images_search_metadata_recent_and_folders(monkeypatch, tmp_path):
     assert any(folder["rel_path"] == "cats" for folder in folders.get_json()["folders"])
 
 
+def test_llm_image_rejects_symlink_outside_data_folder(monkeypatch, tmp_path):
+    """#447: a symlink under DATA_FOLDER pointing outside must return 404."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    (data_dir / "foo.png").symlink_to("/etc/passwd")
+
+    resp = client.get("/api/llm/image/foo.png", headers=auth_header())
+    assert resp.status_code == 404
+
+
+def test_llm_image_serves_symlink_inside_data_folder(monkeypatch, tmp_path):
+    """#447: a symlink resolving back inside DATA_FOLDER is still served."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    (data_dir / "foo.png").symlink_to(data_dir / "cats" / "cat.jpg")
+
+    resp = client.get("/api/llm/image/foo.png", headers=auth_header())
+    assert resp.status_code == 200
+    assert resp.get_json()["name"] == "foo.png"
+
+
 def test_llm_delete_and_bulk_delete_do_not_require_csrf(monkeypatch, tmp_path):
     client, data_dir = build_client(monkeypatch, tmp_path)
 

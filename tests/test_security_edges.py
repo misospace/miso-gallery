@@ -14,7 +14,7 @@ import json
 import logging
 import re
 
-from conftest import TEST_SECRET, build_client
+from conftest import TEST_SECRET, auth_header, build_client
 
 
 def setup_function():
@@ -315,6 +315,35 @@ def test_thumb_route_rejects_symlink_outside_data_folder(monkeypatch, tmp_path):
     resp = client.get("/thumb/bar.jpg")
     assert resp.status_code == 404
     assert b"test-host" not in resp.data
+
+
+def test_llm_image_rejects_symlink_outside_data_folder(monkeypatch, tmp_path):
+    """#447: /api/llm/image/ must not follow symlinks that point outside DATA_FOLDER.
+
+    A read-scoped API key holder who can drop a file under DATA_FOLDER must not
+    be able to obtain media_metadata() for an arbitrary filesystem target.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    (data_dir / "foo.png").symlink_to("/etc/passwd")
+
+    resp = client.get("/api/llm/image/foo.png", headers=auth_header())
+    assert resp.status_code == 404
+    body = resp.get_json()
+    assert body is None or "size" not in body
+
+
+def test_llm_image_serves_symlink_inside_data_folder(monkeypatch, tmp_path):
+    """#447: a symlink that resolves back inside DATA_FOLDER is still served."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    (data_dir / "foo.png").symlink_to(data_dir / "cats" / "cat.jpg")
+
+    resp = client.get("/api/llm/image/foo.png", headers=auth_header())
+    assert resp.status_code == 200
+    body = resp.get_json()
+    assert body["name"] == "foo.png"
+    assert "size" in body
 
 
 # ---------------------------------------------------------------------------
