@@ -673,3 +673,184 @@ def test_oidc_refresh_rate_limited(monkeypatch, tmp_path):
     assert resp.status_code == 429
     payload = resp.get_json()
     assert payload["error"] == "Rate limit exceeded"
+
+
+# ---------------------------------------------------------------------------
+# resolved_auth_mode() must not claim "oidc" without OIDC env (issue #449)
+# ---------------------------------------------------------------------------
+
+def test_resolved_auth_mode_oidc_without_env_returns_none(monkeypatch, tmp_path):
+    """AUTH_TYPE=oidc but OIDC env vars missing → resolved mode is "none".
+
+    Previously the function short-circuited on AUTH_TYPE and returned "oidc",
+    which made the about page lie about the auth mode while the only form
+    actually rendered was the local password login. Without ADMIN_PASSWORD
+    the app must not be mislabelled as OIDC, so the effective mode is
+    "none" and the gallery is publicly accessible.
+    """
+    _reload_auth(monkeypatch, extra_env={
+        "AUTH_TYPE": "oidc",
+        "ADMIN_PASSWORD": "",
+        "OIDC_ENABLED": "false",
+        "OIDC_ISSUER": "",
+        "OIDC_CLIENT_ID": "",
+        "OIDC_CLIENT_SECRET": "",
+    })
+    import auth
+    assert auth.resolved_auth_mode() == "none"
+    assert auth.is_auth_enabled() is False
+
+
+def test_resolved_auth_mode_oidc_without_env_falls_back_to_local(monkeypatch, tmp_path):
+    """AUTH_TYPE=oidc with missing OIDC env but ADMIN_PASSWORD set → "local".
+
+    Operators who misconfigure OIDC must not be locked out: if they have
+    set ADMIN_PASSWORD, the local password form is what the login page
+    actually offers, and resolved_auth_mode() must agree so the about page
+    does not report auth_mode=oidc while only the local form is reachable.
+    """
+    _reload_auth(monkeypatch, extra_env={
+        "AUTH_TYPE": "oidc",
+        "ADMIN_PASSWORD": "pass123",
+        "OIDC_ENABLED": "false",
+        "OIDC_ISSUER": "",
+        "OIDC_CLIENT_ID": "",
+        "OIDC_CLIENT_SECRET": "",
+    })
+    import auth
+    assert auth.resolved_auth_mode() == "local"
+    # is_oidc_configured() must still be False — the about page contract
+    # is that auth_mode agrees with oidc_configured.
+    assert auth.is_oidc_configured() is False
+
+
+def test_resolved_auth_mode_oidc_partial_env_falls_back(monkeypatch, tmp_path):
+    """AUTH_TYPE=oidc with a partial OIDC env (missing one of the four) → not "oidc"."""
+    # OIDC_ENABLED=true but the rest missing — is_oidc_configured() returns False.
+    _reload_auth(monkeypatch, extra_env={
+        "AUTH_TYPE": "oidc",
+        "ADMIN_PASSWORD": "pass123",
+        "OIDC_ENABLED": "true",
+        "OIDC_ISSUER": "",
+        "OIDC_CLIENT_ID": "",
+        "OIDC_CLIENT_SECRET": "",
+    })
+    import auth
+    assert auth.is_oidc_configured() is False
+    assert auth.resolved_auth_mode() == "local"
+
+
+def test_resolved_auth_mode_oidc_fully_configured_returns_oidc(monkeypatch, tmp_path):
+    """AUTH_TYPE=oidc with the full OIDC env still resolves to "oidc"."""
+    _reload_auth(monkeypatch, extra_env={
+        "AUTH_TYPE": "oidc",
+        "ADMIN_PASSWORD": "",
+        "OIDC_ENABLED": "true",
+        "OIDC_ISSUER": "https://issuer.example",
+        "OIDC_CLIENT_ID": "client",
+        "OIDC_CLIENT_SECRET": "secret",
+    })
+    import auth
+    assert auth.resolved_auth_mode() == "oidc"
+    assert auth.is_oidc_configured() is True
+
+
+def test_resolved_auth_mode_local_with_oidc_env_returns_oidc(monkeypatch, tmp_path):
+    """AUTH_TYPE=local with OIDC env vars fully set still resolves to "oidc".
+
+    This preserves the pre-#449 behaviour: operators who set OIDC env vars
+    but leave AUTH_TYPE at the default "local" get OIDC if it is configured.
+    """
+    _reload_auth(monkeypatch, extra_env={
+        "AUTH_TYPE": "local",
+        "ADMIN_PASSWORD": "",
+        "OIDC_ENABLED": "true",
+        "OIDC_ISSUER": "https://issuer.example",
+        "OIDC_CLIENT_ID": "client",
+        "OIDC_CLIENT_SECRET": "secret",
+    })
+    import auth
+    assert auth.resolved_auth_mode() == "oidc"
+
+
+def test_about_page_does_not_show_contradictory_auth_state_when_oidc_misconfigured(monkeypatch, tmp_path):
+    """/about must not show auth_mode=oidc alongside oidc_configured=false.
+
+    When AUTH_TYPE=oidc is set but the OIDC env is missing, the about page
+    must show the resolved mode ("local" if ADMIN_PASSWORD is set,
+    otherwise "none") rather than the misleading combination auth_mode=oidc
+    + oidc_configured=false (Issue #449).
+    """
+    # NOTE: build_client deletes ADMIN_PASSWORD when auth_type != "local",
+    # so we build with auth_type="local" and override AUTH_TYPE=oidc through
+    # extra_env — the env vars read at module-import time win regardless.
+    extra_env = {
+        "AUTH_TYPE": "oidc",
+        "OIDC_ENABLED": "false",
+        "OIDC_ISSUER": "",
+        "OIDC_CLIENT_ID": "",
+        "OIDC_CLIENT_SECRET": "",
+    }
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="local", extra_env=extra_env)
+
+    # Authenticate via the local form so we can reach /about.
+    login_page = client.get("/login")
+    csrf = _extract_csrf(login_page.get_data(as_text=True))
+    ok = client.post(
+        "/auth",
+        data={"password": "pass123", "next": "/about", "csrf_token": csrf},
+        follow_redirects=False,
+    )
+    assert ok.status_code == 302
+
+    resp = client.get("/about")
+    assert resp.status_code == 200
+    html = resp.get_data(as_text=True)
+    # auth_mode must reflect the actual local fallback, not the misconfigured "oidc".
+    assert "<div>local</div>" in html
+    # oidc_configured is genuinely false (no OIDC env) — the two must agree.
+    assert "<div>False</div>" in html
+
+
+def test_auth_type_oidc_without_env_local_password_login_works(monkeypatch, tmp_path):
+    """AUTH_TYPE=oidc with missing OIDC env still offers the local form.
+
+    Operators who misconfigured OIDC but set ADMIN_PASSWORD must be able
+    to log in with their local password — the previous behaviour did this
+    in the UI but then session["auth_method"] disagreed with the resolved
+    auth mode (Issue #449).
+    """
+    # See note above about why auth_type="local" + AUTH_TYPE=oidc in extra_env.
+    extra_env = {
+        "AUTH_TYPE": "oidc",
+        "OIDC_ENABLED": "false",
+        "OIDC_ISSUER": "",
+        "OIDC_CLIENT_ID": "",
+        "OIDC_CLIENT_SECRET": "",
+    }
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="local", extra_env=extra_env)
+
+    # Unauthenticated root → redirect to /login because auth mode is now "local"
+    # (resolved_auth_mode fell back), not "none".
+    resp = client.get("/", follow_redirects=False)
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+
+    # The local password form is rendered (no OIDC button — OIDC isn't configured).
+    login_page = client.get("/login")
+    html = login_page.get_data(as_text=True)
+    assert 'name="password"' in html
+    assert "OIDC" not in html  # no OIDC login button when OIDC isn't configured
+
+    # Logging in with the local password succeeds and lands on the gallery.
+    csrf = _extract_csrf(html)
+    ok = client.post(
+        "/auth",
+        data={"password": "pass123", "next": "/", "csrf_token": csrf},
+        follow_redirects=False,
+    )
+    assert ok.status_code == 302
+    assert ok.headers["Location"].endswith("/")
+    with client.session_transaction() as sess:
+        # The session records the auth method it actually used.
+        assert sess["auth_method"] == "local"
