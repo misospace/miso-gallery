@@ -673,3 +673,120 @@ def test_oidc_refresh_rate_limited(monkeypatch, tmp_path):
     assert resp.status_code == 429
     payload = resp.get_json()
     assert payload["error"] == "Rate limit exceeded"
+
+
+# ---------------------------------------------------------------------------
+# OIDC token refresh URL resolution (issue #450)
+# ---------------------------------------------------------------------------
+
+def test_refresh_token_url_from_discovery_metadata_when_env_unset(monkeypatch, tmp_path):
+    """#450: with OIDC_TOKEN_URL unset, the refresh handler must use the
+    token_endpoint from the OIDC discovery document (Authlib server_metadata),
+    not the hard-coded Authentik-style path."""
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
+    import app as app_module
+
+    monkeypatch.delenv("OIDC_TOKEN_URL", raising=False)
+    # Simulate the discovery document having been fetched (as it is during
+    # authorize_redirect / authorize_access_token in a real login).
+    app_module.oauth.oidc.server_metadata["token_endpoint"] = "https://issuer.example/oauth/token"
+
+    captured = {}
+
+    class _FakeOAuth2Session:
+        def __init__(self, client_id, client_secret, token=None):
+            pass
+
+        def refresh_token(self, token_url, *args, **kwargs):
+            captured["token_url"] = token_url
+            return {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600}
+
+    import authlib.integrations.requests_client as requests_client
+    monkeypatch.setattr(requests_client, "OAuth2Session", _FakeOAuth2Session)
+    monkeypatch.setattr(app_module.oauth.oidc, "userinfo", lambda token=None: {"email": "alice@example.com"})
+
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "test-csrf"
+        sess["authenticated"] = True
+        sess["auth_method"] = "oidc"
+        sess["user_id"] = "alice@example.com"
+        sess["oidc_refresh_token"] = "old-refresh"
+
+    resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "refreshed"}
+    assert captured["token_url"] == "https://issuer.example/oauth/token"
+    assert "/protocol/openid-connect/token" not in captured["token_url"]
+
+
+def test_refresh_token_url_env_override_used_when_metadata_missing(monkeypatch, tmp_path):
+    """#450: when the discovery document has not been fetched, the
+    OIDC_TOKEN_URL env var is used as the token endpoint."""
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
+    import app as app_module
+
+    monkeypatch.setenv("OIDC_TOKEN_URL", "https://issuer.example/custom/token")
+    # No discovery metadata fetched — the env var must be used.
+    assert "token_endpoint" not in app_module.oauth.oidc.server_metadata
+
+    captured = {}
+
+    class _FakeOAuth2Session:
+        def __init__(self, client_id, client_secret, token=None):
+            pass
+
+        def refresh_token(self, token_url, *args, **kwargs):
+            captured["token_url"] = token_url
+            return {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600}
+
+    import authlib.integrations.requests_client as requests_client
+    monkeypatch.setattr(requests_client, "OAuth2Session", _FakeOAuth2Session)
+    monkeypatch.setattr(app_module.oauth.oidc, "userinfo", lambda token=None: {"email": "alice@example.com"})
+
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "test-csrf"
+        sess["authenticated"] = True
+        sess["auth_method"] = "oidc"
+        sess["user_id"] = "alice@example.com"
+        sess["oidc_refresh_token"] = "old-refresh"
+
+    resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
+    assert resp.status_code == 200
+    assert resp.get_json() == {"status": "refreshed"}
+    assert captured["token_url"] == "https://issuer.example/custom/token"
+
+
+def test_refresh_token_url_falls_back_to_authentik_path(monkeypatch, tmp_path):
+    """#450: only when both OIDC_TOKEN_URL and discovery metadata are missing
+    does the handler fall back to the Authentik-style issuer path."""
+    client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
+    import app as app_module
+
+    monkeypatch.delenv("OIDC_TOKEN_URL", raising=False)
+    # No discovery metadata fetched — empty server_metadata.
+    assert "token_endpoint" not in app_module.oauth.oidc.server_metadata
+
+    captured = {}
+
+    class _FakeOAuth2Session:
+        def __init__(self, client_id, client_secret, token=None):
+            pass
+
+        def refresh_token(self, token_url, *args, **kwargs):
+            captured["token_url"] = token_url
+            return {"access_token": "new-access", "refresh_token": "new-refresh", "expires_in": 3600}
+
+    import authlib.integrations.requests_client as requests_client
+    monkeypatch.setattr(requests_client, "OAuth2Session", _FakeOAuth2Session)
+    monkeypatch.setattr(app_module.oauth.oidc, "userinfo", lambda token=None: {"email": "alice@example.com"})
+
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "test-csrf"
+        sess["authenticated"] = True
+        sess["auth_method"] = "oidc"
+        sess["user_id"] = "alice@example.com"
+        sess["oidc_refresh_token"] = "old-refresh"
+
+    resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
+    assert resp.status_code == 200
+    assert captured["token_url"] == "https://issuer.example/protocol/openid-connect/token"
