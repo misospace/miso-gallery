@@ -897,6 +897,12 @@ def images(filename: str):
 @app.route("/<path:subpath>")
 @require_auth
 def index(subpath: str = ""):
+    # The catch-all must not shadow the /auth/* routes: without this guard a
+    # GET to a POST-only auth endpoint (e.g. /auth/oidc/refresh) would match
+    # this route and 404 instead of letting Flask return 405 (Issue #454).
+    if subpath.startswith("auth/"):
+        return "Not found", 404
+
     # Search query for filtering items
     search_query = request.args.get('q', '').strip().lower()
     bulk_state = request.args.get('bulk_state', '').strip().lower()
@@ -1855,10 +1861,24 @@ def oidc_callback():
 
 
 
-@app.route("/auth/oidc/refresh")
-@rate_limit(max_requests=10, window=60)
+@app.route("/auth/oidc/refresh", methods=["POST"])
+@rate_limit(max_requests=5, window=300)
 def oidc_refresh():
     """Refresh OIDC access token using stored refresh token."""
+    # This endpoint mutates session state (rotates the OIDC refresh token and
+    # expiry), so it is POST-only and requires a CSRF token: a cross-site GET
+    # (e.g. an <img src> or <a href> on a hostile page) must not be able to
+    # trigger a token round-trip or rotate the victim's refresh token
+    # (Issue #454).
+    if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event(
+            "token_refresh", "denied",
+            auth_method="oidc",
+            reason="invalid_csrf",
+            user_id=session.get("user_id"),
+        )
+        return jsonify({"error": "Invalid CSRF token"}), 403
+
     if not is_oidc_configured():
         return jsonify({"error": "OIDC not configured"}), 400
 

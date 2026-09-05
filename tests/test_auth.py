@@ -11,11 +11,79 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 
+def setup_function():
+    """Reset the in-memory rate limiter before each test to avoid cross-test pollution."""
+    from security import FALLBACK_LIMITER
+    FALLBACK_LIMITER.reset()
+
+
+def test_oidc_refresh_get_rejected(monkeypatch, tmp_path):
+    """Cross-site GET attempts (e.g. <img src> / <a href>) must be rejected with 405.
+
+    The refresh endpoint mutates session state (rotates the OIDC refresh token),
+    so it is POST-only (Issue #454).
+    """
+    extra_env = {
+        "OIDC_ENABLED": "true",
+        "OIDC_ISSUER": "https://issuer.example",
+        "OIDC_CLIENT_ID": "client",
+        "OIDC_CLIENT_SECRET": "secret",
+    }
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
+
+    # Simulate an authenticated OIDC session so the request would have been
+    # actionable if the route still accepted GET.
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["auth_method"] = "oidc"
+        sess["user_id"] = "test-user"
+        sess["oidc_refresh_token"] = "user-refresh-token"
+
+    resp = client.get("/auth/oidc/refresh")
+    # The route is POST-only, so a GET must be rejected (405, or 404 when the
+    # catch-all gallery route shadows it) — never a successful refresh.
+    assert resp.status_code in (404, 405)
+
+    # The session must be untouched: no token rotation happened.
+    with client.session_transaction() as sess:
+        assert sess["oidc_refresh_token"] == "user-refresh-token"
+
+
+def test_oidc_refresh_missing_csrf_rejected(monkeypatch, tmp_path):
+    """POST without a valid CSRF token is rejected with 403 (Issue #454)."""
+    extra_env = {
+        "OIDC_ENABLED": "true",
+        "OIDC_ISSUER": "https://issuer.example",
+        "OIDC_CLIENT_ID": "client",
+        "OIDC_CLIENT_SECRET": "secret",
+    }
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
+
+    with client.session_transaction() as sess:
+        sess["authenticated"] = True
+        sess["auth_method"] = "oidc"
+        sess["user_id"] = "test-user"
+        sess["oidc_refresh_token"] = "user-refresh-token"
+
+    resp = client.post("/auth/oidc/refresh")
+    assert resp.status_code == 403
+    assert "csrf" in resp.get_json()["error"].lower()
+
+    # A forged token that does not match the session token is also rejected.
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "session-csrf"
+    resp = client.post("/auth/oidc/refresh", data={"csrf_token": "attacker-csrf"})
+    assert resp.status_code == 403
+
+
 def test_oidc_refresh_not_configured(monkeypatch, tmp_path):
     """Token refresh endpoint returns 400 when OIDC is not configured."""
     client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc")
 
-    resp = client.get("/auth/oidc/refresh")
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "test-csrf"
+
+    resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
     assert resp.status_code == 400
     data = resp.get_json()
     assert "OIDC not configured" in data["error"]
@@ -31,7 +99,10 @@ def test_oidc_refresh_not_authenticated(monkeypatch, tmp_path):
     }
     client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
 
-    resp = client.get("/auth/oidc/refresh")
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "test-csrf"
+
+    resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
     assert resp.status_code == 401
 
 
@@ -51,8 +122,9 @@ def test_oidc_refresh_no_refresh_token(monkeypatch, tmp_path):
         sess["auth_method"] = "oidc"
         sess["user_id"] = "test-user"
         sess["user_name"] = "Test User"
+        sess["csrf_token"] = "test-csrf"
 
-    resp = client.get("/auth/oidc/refresh")
+    resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
     assert resp.status_code == 401
     data = resp.get_json()
     assert "no refresh token" in data["error"].lower()
@@ -300,6 +372,7 @@ def test_oidc_refresh_success(monkeypatch, tmp_path):
         sess["user_id"] = "test-sub"
         sess["user_name"] = "Test User"
         sess["oidc_refresh_token"] = "user-refresh-token"
+        sess["csrf_token"] = "test-csrf"
 
     captured_init = {}
 
@@ -329,7 +402,7 @@ def test_oidc_refresh_success(monkeypatch, tmp_path):
     try:
         with patch("authlib.integrations.requests_client.OAuth2Session", FakeOAuth2Session):
             monkeypatch.setattr(app_module.oauth.oidc, "userinfo", fake_userinfo)
-            resp = client.get("/auth/oidc/refresh")
+            resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
 
         assert resp.status_code == 200
         assert resp.get_json()["status"] == "refreshed"
@@ -369,6 +442,7 @@ def test_oidc_refresh_authorization_revoked(monkeypatch, tmp_path):
         sess["user_id"] = "test-sub"
         sess["user_name"] = "Test User"
         sess["oidc_refresh_token"] = "user-refresh-token"
+        sess["csrf_token"] = "test-csrf"
 
     captured_init = {}
 
@@ -391,7 +465,7 @@ def test_oidc_refresh_authorization_revoked(monkeypatch, tmp_path):
     try:
         with patch("authlib.integrations.requests_client.OAuth2Session", FakeOAuth2Session):
             monkeypatch.setattr(app_module.oauth.oidc, "userinfo", fake_userinfo)
-            resp = client.get("/auth/oidc/refresh")
+            resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
 
         assert resp.status_code == 403
         assert captured_init["client_id"] == "client"
