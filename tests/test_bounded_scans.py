@@ -401,7 +401,12 @@ class TestRecentViewScanTruncation:
     def test_recent_view_with_truncation(self, tmp_path, monkeypatch):
         from conftest import build_client
         client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none", extra_env={"GALLERY_SCAN_LIMIT": "50"})
-        # Remove default fixture files and create 51 files to exceed limit of 50
+        import app as app_module
+        # /recent walks up to RECENT_ENUMERATION_LIMIT media files (issue #436),
+        # so truncation is flagged against that bound — GALLERY_SCAN_LIMIT only
+        # governs folder browsing. Patch the bound low and exceed it.
+        monkeypatch.setattr(app_module, "RECENT_ENUMERATION_LIMIT", 50)
+        # Remove default fixture files and create 51 files to exceed the bound
         for f in data_dir.iterdir():
             if f.is_file() and f.name not in (".thumb_cache",):
                 f.unlink()
