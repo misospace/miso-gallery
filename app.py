@@ -1358,9 +1358,13 @@ def recent_view():
 
     images.sort(key=lambda x: x["mtime"], reverse=True)
 
-    # Detect scan truncation (Issue #349).
-    scan_truncated = _apply_scan_limit(has_more=False, scanned_count=len(images))
-    scan_limit = GALLERY_SCAN_LIMIT
+    # Detect scan truncation (Issue #349). /recent enumerates up to
+    # RECENT_ENUMERATION_LIMIT media files (issue #436), not GALLERY_SCAN_LIMIT,
+    # so the comparison must use the bound actually applied — comparing against
+    # GALLERY_SCAN_LIMIT flagged any gallery larger than 5000 files as
+    # truncated even though the walk had covered every file.
+    scan_truncated = len(images) >= RECENT_ENUMERATION_LIMIT
+    scan_limit = RECENT_ENUMERATION_LIMIT
 
     images = images[:max_items]
 

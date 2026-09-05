@@ -81,3 +81,38 @@ def test_recent_view_uses_iter_gallery_items(monkeypatch, tmp_path):
         # media is reachable when it sorts past the first traversal prefix
         # (issue #436).
         mock_iter.assert_called_once_with(kind="media", limit=50000)
+
+
+def test_recent_banner_hidden_when_gallery_exceeds_gallery_scan_limit(monkeypatch, tmp_path):
+    """Regression: /recent walks RECENT_ENUMERATION_LIMIT (issue #436), so a
+    gallery larger than GALLERY_SCAN_LIMIT must not show the truncation banner
+    — the old code compared the enumerated count against GALLERY_SCAN_LIMIT
+    and flagged every library over 5000 files as truncated."""
+    client = _build_client(monkeypatch, tmp_path)
+    data_dir = tmp_path / "data"
+    import app as app_module  # after _build_client: conftest re-imports the module
+
+    monkeypatch.setattr(app_module, "GALLERY_SCAN_LIMIT", 2)
+    for i in range(5):
+        img = Image.new("RGB", (8, 8), color="blue")
+        img.save(data_dir / f"img_{i}.png")
+
+    html = client.get("/recent").get_data(as_text=True)
+    assert "Gallery scan limit reached" not in html
+
+
+def test_recent_banner_shown_when_enumeration_bound_hit(monkeypatch, tmp_path):
+    """The truncation banner must still fire — naming the real bound — when the
+    enumeration stops at RECENT_ENUMERATION_LIMIT with media left unseen."""
+    client = _build_client(monkeypatch, tmp_path)
+    data_dir = tmp_path / "data"
+    import app as app_module  # after _build_client: conftest re-imports the module
+
+    monkeypatch.setattr(app_module, "RECENT_ENUMERATION_LIMIT", 3)
+    for i in range(5):
+        img = Image.new("RGB", (8, 8), color="green")
+        img.save(data_dir / f"img_{i}.png")
+
+    html = client.get("/recent").get_data(as_text=True)
+    assert "Gallery scan limit reached" in html
+    assert "first 3 items" in html
