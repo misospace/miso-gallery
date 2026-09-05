@@ -11,6 +11,7 @@ import re
 import secrets
 import shlex
 import subprocess
+import threading
 import time
 from base64 import urlsafe_b64encode
 from collections import OrderedDict
@@ -224,6 +225,24 @@ DEFAULT_APP_VERSION = "0.2.0"
 APP_VERSION = (os.environ.get("APP_VERSION") or DEFAULT_APP_VERSION).strip() or DEFAULT_APP_VERSION
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
 _VALID_TASK_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
+
+# Per-process concurrency cap for webhook task subprocesses (issue #448).
+#
+# `run_configured_task()` invokes a configured command via `subprocess.run(...)`
+# synchronously in the request thread. With `WEBHOOK_TASK_TIMEOUT` capped at 120s
+# and gunicorn `--timeout` set to 130s, a single webhook call can occupy a worker
+# for up to two minutes. The shipped default worker count is 2
+# (entrypoint.sh, Dockerfile); a webhook-secret holder (or anyone with a
+# write-scoped LLM API key) can submit enough concurrent long-running task
+# requests to saturate the worker pool and stall every other route.
+#
+# Capping concurrent in-flight task invocations at 1 per gunicorn worker
+# ensures any concurrent request that arrives while a task is already running
+# is rejected with 503 immediately rather than blocking the worker (or the
+# gunicorn pool) indefinitely. Each gunicorn worker process gets its own
+# semaphore instance because module-level state is per-process.
+WEBHOOK_TASK_MAX_CONCURRENT = 1
+_webhook_task_slot = threading.BoundedSemaphore(WEBHOOK_TASK_MAX_CONCURRENT)
 AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
 FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
@@ -759,31 +778,57 @@ def run_configured_task(payload: dict[str, object]) -> tuple[dict[str, object], 
     except ValueError:
         timeout = 30
 
-    try:
-        completed = subprocess.run(
-            argv,
-            cwd=str(DATA_FOLDER),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
+    # Per-worker concurrency cap (issue #448): refuse with 503 if a task is
+    # already in flight in this gunicorn worker. Blocking until the slot is
+    # free would let a single slow task pin the worker (or, with concurrent
+    # request threads, the entire worker pool) for up to WEBHOOK_TASK_TIMEOUT
+    # seconds — the very worker-exhaustion DoS this guard prevents.
+    if not _webhook_task_slot.acquire(blocking=False):
+        log_security_event(
+            "webhook_task",
+            "rejected",
+            task=task,
+            reason="pool_saturated",
+            max_concurrent=WEBHOOK_TASK_MAX_CONCURRENT,
         )
-    except subprocess.TimeoutExpired:
-        log_security_event("webhook_task", "error", task=task, reason="timeout", timeout=timeout)
-        return {"task": task, "success": False, "error": f"task timed out after {timeout}s"}, 504
-    except OSError as exc:
-        log_security_event("webhook_task", "error", task=task, reason="spawn_failed", error=str(exc))
-        return {"task": task, "success": False, "error": f"failed to execute task: {exc}"}, 500
+        return {
+            "task": task,
+            "success": False,
+            "error": (
+                "webhook task pool saturated: at most "
+                f"{WEBHOOK_TASK_MAX_CONCURRENT} task(s) may run concurrently per "
+                "worker. Retry after the in-flight task completes."
+            ),
+        }, 503
 
-    success = completed.returncode == 0
-    log_security_event("webhook_task", "success" if success else "error", task=task, exit_code=completed.returncode)
-    return {
-        "task": task,
-        "success": success,
-        "exitCode": completed.returncode,
-        "stdout": completed.stdout,
-        "stderr": completed.stderr,
-    }, 200
+    try:
+        try:
+            completed = subprocess.run(
+                argv,
+                cwd=str(DATA_FOLDER),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            log_security_event("webhook_task", "error", task=task, reason="timeout", timeout=timeout)
+            return {"task": task, "success": False, "error": f"task timed out after {timeout}s"}, 504
+        except OSError as exc:
+            log_security_event("webhook_task", "error", task=task, reason="spawn_failed", error=str(exc))
+            return {"task": task, "success": False, "error": f"failed to execute task: {exc}"}, 500
+
+        success = completed.returncode == 0
+        log_security_event("webhook_task", "success" if success else "error", task=task, exit_code=completed.returncode)
+        return {
+            "task": task,
+            "success": success,
+            "exitCode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }, 200
+    finally:
+        _webhook_task_slot.release()
 
 
 @app.before_request
