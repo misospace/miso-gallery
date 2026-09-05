@@ -234,10 +234,12 @@ If OIDC login is broken:
    ```bash
    curl -s https://your-oidc-provider/.well-known/openid-configuration | python3 -m json.tool
    ```
+   The token endpoint used by `/auth/oidc/refresh` is read from this discovery document (`token_endpoint`), so any conformant provider (Authentik, Keycloak, Auth0, Okta, ...) works without extra configuration. If the discovery document is unreachable or you need to override the endpoint, set `OIDC_TOKEN_URL` to your provider's token endpoint (e.g. `https://auth.example.com/oauth/token` for Auth0, `https://<org>.okta.com/oauth2/v1/token` for Okta).
 
 5. **Common issues:**
    - **Redirect URI mismatch:** Ensure `OIDC_CALLBACK_URL` matches the callback registered in your OIDC provider. If not set, it defaults to `<base-url>/auth/oidc/callback`.
    - **Client secret rotation:** Regenerate the client secret in your OIDC provider and update `OIDC_CLIENT_SECRET`.
+   - **Token refresh failing on a non-Authentik provider:** Confirm the discovery document is reachable (step 4). If it is, no extra env var is needed. If it is not, set `OIDC_TOKEN_URL` to the provider's token endpoint.
 
 ### API Key Rotation
 

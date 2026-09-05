@@ -1988,6 +1988,32 @@ def oidc_callback():
 
 
 
+def resolve_oidc_token_url() -> str:
+    """Resolve the OIDC token endpoint used by /auth/oidc/refresh.
+
+    Resolution order (Issue #450):
+    1. ``token_endpoint`` from the OIDC discovery document (Authlib caches it
+       in ``oauth.oidc.server_metadata`` once fetched) — the standard path,
+       which works for any conformant provider (Keycloak, Auth0, Okta, ...).
+    2. ``OIDC_TOKEN_URL`` env var — explicit operator override for providers
+       whose discovery document is unreachable or incomplete.
+    3. Authentik-style ``<OIDC_ISSUER>/protocol/openid-connect/token`` —
+       last-resort fallback when both are missing.
+    """
+    try:
+        metadata = oauth.oidc.server_metadata
+    except Exception:
+        metadata = None
+    if isinstance(metadata, dict):
+        token_endpoint = metadata.get("token_endpoint")
+        if token_endpoint:
+            return token_endpoint
+    override = os.environ.get("OIDC_TOKEN_URL", "").strip()
+    if override:
+        return override
+    return os.environ.get("OIDC_ISSUER", "").rstrip("/") + "/protocol/openid-connect/token"
+
+
 @app.route("/auth/oidc/refresh", methods=["POST"])
 @rate_limit(max_requests=5, window=300)
 def oidc_refresh():
@@ -2027,7 +2053,7 @@ def oidc_refresh():
 
         client_id = os.environ.get("OIDC_CLIENT_ID", "")
         client_secret = os.environ.get("OIDC_CLIENT_SECRET", "")
-        token_url = os.environ.get("OIDC_TOKEN_URL") or os.environ.get("OIDC_ISSUER", "").rstrip("/") + "/protocol/openid-connect/token"
+        token_url = resolve_oidc_token_url()
 
         oauth_session = OAuth2Session(client_id, client_secret, token={"refresh_token": refresh_token})
         new_token = oauth_session.refresh_token(token_url)

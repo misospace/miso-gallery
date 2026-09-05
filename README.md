@@ -94,6 +94,9 @@ docker run -d \
 | `OIDC_CLIENT_ID` | If OIDC | - | OIDC client ID |
 | `OIDC_CLIENT_SECRET` | If OIDC | - | OIDC client secret |
 | `OIDC_CALLBACK_URL` | If OIDC | - | Callback URL for OIDC |
+| `OIDC_TOKEN_URL` | No | - | Explicit token endpoint for OIDC token refresh. Normally not needed: the app reads `token_endpoint` from the provider's discovery document (`<OIDC_ISSUER>/.well-known/openid-configuration`). Set this only if your provider's discovery document is unreachable or you need to override the endpoint. |
+
+Any conformant OIDC provider works (Authentik, Keycloak, Auth0, Okta, ...): the token endpoint used by `/auth/oidc/refresh` is resolved from the provider's discovery document, so non-Authentik providers need no extra configuration.
 
 #### Rate Limiting
 
