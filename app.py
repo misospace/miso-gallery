@@ -1682,6 +1682,16 @@ def llm_image(relpath: str):
     if not sanitize_path(relpath):
         return {"error": "Invalid path"}, 400
     media_path = source_file_path(relpath)
+    # Reject symlinks under DATA_FOLDER that resolve outside it (e.g.
+    # foo.png -> /etc/passwd), mirroring the guard in folder_cover_rel_path().
+    # This is defense-in-depth: is_media_file() also enforces the rule, so a
+    # read-scoped LLM API key holder cannot obtain media_metadata() for an
+    # arbitrary filesystem target (#447).
+    if media_path.is_symlink():
+        try:
+            media_path.resolve().relative_to(DATA_FOLDER.resolve())
+        except ValueError:
+            return {"error": "Image not found"}, 404
     if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
         return {"error": "Image not found"}, 404
     return media_metadata(media_path)
