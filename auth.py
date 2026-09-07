@@ -83,14 +83,38 @@ def is_oidc_configured() -> bool:
 
 
 def resolved_auth_mode() -> AuthMode:
-    """Resolve effective auth mode based on configured env vars."""
+    """Resolve effective auth mode based on configured env vars.
+
+    AUTH_TYPE=oidc is honoured only when OIDC is actually configured
+    (``is_oidc_configured()``). When ``AUTH_TYPE=oidc`` is set but the
+    OIDC environment is incomplete, we fall back to the same path used
+    when ``AUTH_TYPE`` is unset: ``local`` if ``ADMIN_PASSWORD`` is set,
+    otherwise ``none``. The previous behaviour claimed "oidc" while only
+    the local password form was actually available, which made the about
+    page report contradictory ``auth_mode`` / ``oidc_configured`` values
+    and silently broke OIDC refresh (Issue #449).
+    """
     if AUTH_TYPE == "none":
         return "none"
 
-    if AUTH_TYPE == "oidc" or is_oidc_configured():
+    if AUTH_TYPE == "oidc":
+        if is_oidc_configured():
+            return "oidc"
+        # AUTH_TYPE=oidc but the OIDC environment is not fully configured.
+        # Log so operators notice the misconfiguration, then fall through
+        # to the local/none decision below so we don't lock them out if
+        # ADMIN_PASSWORD is also set.
+        logger.warning(
+            "AUTH_TYPE=oidc but OIDC is not fully configured "
+            "(need OIDC_ENABLED=true and OIDC_ISSUER, OIDC_CLIENT_ID, "
+            "OIDC_CLIENT_SECRET); falling back to local/none auth mode"
+        )
+
+    elif is_oidc_configured():
+        # AUTH_TYPE unset/local but OIDC env vars present → use OIDC.
         return "oidc"
 
-    # default/local
+    # default/local fallback (also reached when AUTH_TYPE=oidc was incomplete)
     if ADMIN_PASSWORD:
         return "local"
     return "none"

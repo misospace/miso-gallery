@@ -84,7 +84,7 @@ docker run -d \
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `AUTH_TYPE` | No | `local` | Auth method: `local`, `oidc`, or `none` |
+| `AUTH_TYPE` | No | `local` | Auth method: `local`, `oidc`, or `none`. When `oidc` is set, the OIDC env vars below must also be fully configured (`OIDC_ENABLED=true` plus `OIDC_ISSUER`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`); otherwise the app falls back to local password auth if `ADMIN_PASSWORD` is set, or to no auth (issue #449). |
 | `ADMIN_PASSWORD` | If local | - | Password for local auth (plaintext or Werkzeug hash: `pbkdf2:` / `scrypt:`) |
 | `SECRET_KEY` | Yes | - | Flask secret for sessions. Generate with: `python -c "import secrets; print(secrets.token_urlsafe(48))"` |
 | `LLM_READ_API_KEYS` | No | - | Comma-separated Bearer tokens with **read scope** (list, view, thumbnails). Write-scoped keys are also accepted here. |
