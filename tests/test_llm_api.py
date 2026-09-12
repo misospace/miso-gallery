@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from conftest import auth_header, build_client
 
 
@@ -571,3 +573,100 @@ def test_tag_store_enables_wal_mode(tmp_path):
         assert journal_mode == "wal", (
             f"Expected journal_mode=WAL for concurrent worker access, got {journal_mode}"
         )
+
+
+# --- Issue #480: a single unreadable file must not 500 the LLM read endpoints ---
+#
+# The bounded walk (iter_gallery_items) swallows OSError, but the post-walk
+# Path.stat() / relative_to() / media_metadata() calls in /api/llm/recent,
+# /api/llm/images and /api/llm/folders did not. These tests simulate a file
+# that vanishes between the walk and the sort/metadata step by monkeypatching
+# Path.stat (the walk uses os.path.*-based is_file/is_symlink/is_dir, so it is
+# unaffected and still includes the file; only the post-walk stat() raises).
+
+
+def _patch_stat_for(monkeypatch, target: Path):
+    """Make Path.stat raise OSError for `target` only; other paths stat normally."""
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self == target:
+            raise OSError("simulated vanished file")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", stat)
+
+
+def test_llm_recent_survives_unreadable_file_between_walk_and_sort(monkeypatch, tmp_path):
+    """#480: /api/llm/recent returns 200 with surviving entries when one file's
+    stat() fails between the bounded walk and the mtime sort."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+    target = data_dir / "cats" / "cat.jpg"
+    _patch_stat_for(monkeypatch, target)
+
+    resp = client.get("/api/llm/recent", headers=auth_header())
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["skipped_count"] == 1
+    assert payload["count"] == 2
+    assert payload["total"] == 2
+    rel_paths = [img["rel_path"] for img in payload["images"]]
+    assert "cats/cat.jpg" not in rel_paths
+    assert set(rel_paths) == {"sample.png", "copy.png"}
+
+
+def test_llm_images_skips_unreadable_file_instead_of_500(monkeypatch, tmp_path):
+    """#480: /api/llm/images skips a file whose stat() fails in media_metadata()
+    instead of returning 500 for the whole request."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+    target = data_dir / "cats" / "cat.jpg"
+    _patch_stat_for(monkeypatch, target)
+
+    resp = client.get("/api/llm/images", headers=auth_header())
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["skipped_count"] == 1
+    assert payload["count"] == 2
+    assert payload["total"] == 3
+    rel_paths = [img["rel_path"] for img in payload["images"]]
+    assert "cats/cat.jpg" not in rel_paths
+    assert set(rel_paths) == {"sample.png", "copy.png"}
+
+
+def test_llm_folders_skips_folder_whose_relative_to_fails(monkeypatch, tmp_path):
+    """#480: /api/llm/folders skips a folder whose relative_to() no longer
+    resolves (e.g. replaced by a symlink mid-walk) and continues with the rest."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+    # "cats" is the broken folder; "cats/sub" is its child. "dogs" and
+    # "dogs/puppy" are an unaffected sibling subtree that must survive.
+    (data_dir / "cats" / "sub").mkdir()
+    (data_dir / "dogs" / "puppy").mkdir(parents=True)
+
+    real_relative_to = Path.relative_to
+    bad = data_dir / "cats"
+
+    def relative_to(self, *args, **kwargs):
+        if self == bad:
+            raise ValueError("simulated: folder no longer under DATA_FOLDER")
+        return real_relative_to(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "relative_to", relative_to)
+
+    resp = client.get("/api/llm/folders", headers=auth_header())
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    # "cats" is excluded during the walk (its own relative_to fails); its child
+    # "cats/sub" is included by the walk but skipped in the loop because its
+    # parent's relative_to fails. So exactly one folder is skipped.
+    assert payload["skipped_count"] == 1
+    rel_paths = [folder["rel_path"] for folder in payload["folders"]]
+    # The root entry is always present; the broken subtree is gone.
+    assert "" in rel_paths
+    assert "cats" not in rel_paths
+    assert "cats/sub" not in rel_paths
+    # The unaffected sibling subtree is still returned.
+    assert "dogs" in rel_paths
+    assert "dogs/puppy" in rel_paths

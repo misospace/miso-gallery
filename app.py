@@ -582,6 +582,21 @@ def media_metadata(path: Path, tags: list[str] | None = None) -> dict[str, objec
 
 
 
+def _safe_mtime(path: Path) -> float | None:
+    """Return the file's mtime, or None if it vanished or is unreadable.
+
+    The LLM enumeration endpoints sort by mtime after the bounded walk has
+    already returned (issue #480). A file that disappears between the walk and
+    the sort raises an uncaught OSError from Path.stat(), turning a single
+    unreadable file into a 500 for the whole request. Callers skip entries
+    whose mtime is None instead of failing the request.
+    """
+    try:
+        return path.stat().st_mtime
+    except (OSError, ValueError):
+        return None
+
+
 def _invalidate_gallery_scan_cache() -> None:
     """Clear the shared filesystem scan cache.
 
@@ -1658,8 +1673,16 @@ def llm_images():
     page, per_page = _parse_pagination(request.args)
     all_media = iter_gallery_items(kind="media", limit=LLM_ENUMERATION_LIMIT)
     filtered: list[Path] = []
+    skipped_count = 0
     for item in all_media:
-        rel_path = item.relative_to(DATA_FOLDER).as_posix()
+        # A file can vanish or become unreadable between the bounded walk and
+        # this loop (issue #480); skip it instead of raising ValueError/OSError
+        # and failing the whole request.
+        try:
+            rel_path = item.relative_to(DATA_FOLDER).as_posix()
+        except (OSError, ValueError):
+            skipped_count += 1
+            continue
         if query and query not in rel_path.lower() and query not in item.name.lower():
             continue
         filtered.append(item)
@@ -1668,11 +1691,24 @@ def llm_images():
     tags_by_path = _tag_store().get_tags_for_paths(
         [relative_media_path(item) for item in paginated]
     )
-    images = [
-        media_metadata(item, tags_by_path.get(relative_media_path(item), []))
-        for item in paginated
-    ]
-    return {"images": images, "count": len(images), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    images = []
+    for item in paginated:
+        # media_metadata() calls path.stat() and path.relative_to() outside the
+        # walk's try/except; guard them so one unreadable file is skipped
+        # instead of returning 500 (issue #480).
+        try:
+            images.append(media_metadata(item, tags_by_path.get(relative_media_path(item), [])))
+        except (OSError, ValueError):
+            skipped_count += 1
+    return {
+        "images": images,
+        "count": len(images),
+        "total": total,
+        "page": pg,
+        "per_page": pp,
+        "has_more": has_more,
+        "skipped_count": skipped_count,
+    }
 
 
 @app.route("/api/llm/image/<path:relpath>")
@@ -1702,21 +1738,41 @@ def llm_image(relpath: str):
 @rate_limit(max_requests=60, window=60)
 def llm_recent():
     page, per_page = _parse_pagination(request.args)
-    all_media = sorted(
-        iter_gallery_items(kind="media", limit=LLM_ENUMERATION_LIMIT),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    # The bounded walk already returned; a file can vanish or become unreadable
+    # before the sort, so stat() each item defensively and drop the ones that
+    # fail instead of returning 500 for the whole request (issue #480).
+    walked = iter_gallery_items(kind="media", limit=LLM_ENUMERATION_LIMIT)
+    all_media = [
+        (mtime, item)
+        for item in walked
+        if (mtime := _safe_mtime(item)) is not None
+    ]
+    all_media.sort(key=lambda pair: pair[0], reverse=True)
+    all_media = [item for _, item in all_media]
+    skipped_count = len(walked) - len(all_media)
     paginated, total, pg, pp, has_more = _paginate(all_media, page=page, per_page=per_page)
     has_more = _apply_scan_limit(has_more, len(all_media))
     tags_by_path = _tag_store().get_tags_for_paths(
         [relative_media_path(item) for item in paginated]
     )
-    images = [
-        media_metadata(item, tags_by_path.get(relative_media_path(item), []))
-        for item in paginated
-    ]
-    return {"images": images, "count": len(images), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    images = []
+    for item in paginated:
+        # media_metadata() calls path.stat() and path.relative_to() outside the
+        # walk's try/except; guard them so one unreadable file is skipped
+        # instead of returning 500 (issue #480).
+        try:
+            images.append(media_metadata(item, tags_by_path.get(relative_media_path(item), [])))
+        except (OSError, ValueError):
+            skipped_count += 1
+    return {
+        "images": images,
+        "count": len(images),
+        "total": total,
+        "page": pg,
+        "per_page": pp,
+        "has_more": has_more,
+        "skipped_count": skipped_count,
+    }
 
 
 @app.route("/api/llm/folders")
@@ -1725,13 +1781,29 @@ def llm_recent():
 def llm_folders():
     page, per_page = _parse_pagination(request.args)
     all_folders = [{"rel_path": "", "name": "", "parent": None}]
+    skipped_count = 0
     for folder in iter_gallery_items(kind="folders", limit=LLM_ENUMERATION_LIMIT):
-        rel_path = folder.relative_to(DATA_FOLDER).as_posix()
-        parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
+        # A folder can be moved or replaced by a symlink between the bounded
+        # walk and this loop, making relative_to() raise ValueError (issue
+        # #480); skip it and continue with the rest of the page.
+        try:
+            rel_path = folder.relative_to(DATA_FOLDER).as_posix()
+            parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
+        except (OSError, ValueError):
+            skipped_count += 1
+            continue
         all_folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
     paginated, total, pg, pp, has_more = _paginate(all_folders, page=page, per_page=per_page)
     has_more = _apply_scan_limit(has_more, len(all_folders) - 1)  # -1 for root entry
-    return {"folders": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    return {
+        "folders": paginated,
+        "count": len(paginated),
+        "total": total,
+        "page": pg,
+        "per_page": pp,
+        "has_more": has_more,
+        "skipped_count": skipped_count,
+    }
 
 
 @app.route("/api/llm/tags", methods=["POST"])
