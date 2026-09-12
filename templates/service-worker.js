@@ -4,10 +4,11 @@ const STATIC_CACHE = "miso-gallery-static-v2";
 // Only unauthenticated static assets are pre-cached. Authenticated
 // navigation responses (/, /recent, /trash, /settings, /about) are
 // never written to the cache (Issue #453).
+// Only URLs that actually exist in the repo are listed: cache.addAll() is
+// all-or-nothing, so a single 404 here rejects the whole install step and
+// the SW never installs (Issue #479).
 const CORE_ASSETS = [
   "/manifest.webmanifest",
-  "/assets/style.css",
-  "/assets/app.js",
   "/favicon.ico",
   "/service-worker.js",
 ];

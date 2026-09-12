@@ -50,6 +50,22 @@ def test_authenticated_pages_not_precached(sw_source):
         assert page not in core.group(1)
 
 
+def test_core_assets_resolve_from_running_app(client, sw_source):
+    """Every URL in CORE_ASSETS must return 200 from the running app.
+
+    cache.addAll() is all-or-nothing: a single 404 in the list rejects the
+    whole install step, so the SW never installs, never activates, and never
+    claims clients (Issue #479).
+    """
+    core = re.search(r"const CORE_ASSETS = \[(.*?)\];", sw_source, re.DOTALL)
+    assert core, "CORE_ASSETS missing from service worker"
+    urls = re.findall(r'"([^"]+)"', core.group(1))
+    assert urls, "CORE_ASSETS is empty"
+    for url in urls:
+        resp = client.get(url)
+        assert resp.status_code == 200, f"CORE_ASSETS entry {url} returned {resp.status_code}"
+
+
 def test_images_are_not_cached(sw_source):
     image_block = re.search(
         r'request\.destination === "image".*?return;', sw_source, re.DOTALL
