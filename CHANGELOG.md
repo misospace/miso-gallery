@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.2.2](https://github.com/misospace/miso-gallery/compare/0.2.1...0.2.2) (2026-09-12)
+
+
+### Bug Fixes
+
+* **auth:** reject AUTH_TYPE=oidc when OIDC env is incomplete ([b2231f9](https://github.com/misospace/miso-gallery/commit/b2231f9922ad12ac758575cb3809ea87564d2d77))
+* **auth:** reject AUTH_TYPE=oidc when OIDC env is incomplete ([c5b5c5b](https://github.com/misospace/miso-gallery/commit/c5b5c5bd1bd38532f02619c949a19669d798ecec)), closes [#449](https://github.com/misospace/miso-gallery/issues/449)
+* **security:** reject symlinks resolving outside DATA_FOLDER in llm_image() ([5e86b4d](https://github.com/misospace/miso-gallery/commit/5e86b4d959de62773ffc7ddbfa7aa8e4f14e05dd)), closes [#447](https://github.com/misospace/miso-gallery/issues/447)
+* **service-worker:** drop nonexistent /assets/style.css and /assets/app.js from CORE_ASSETS ([598c19e](https://github.com/misospace/miso-gallery/commit/598c19e03827314814db52f31d44ac8228a8758a))
+* **service-worker:** drop nonexistent /assets/style.css and /assets/app.js from CORE_ASSETS ([54c4c48](https://github.com/misospace/miso-gallery/commit/54c4c48b0860fe5a6ba75aab2de724e28b4a1290)), closes [#479](https://github.com/misospace/miso-gallery/issues/479)
+
 ## [0.2.1](https://github.com/misospace/miso-gallery/compare/0.2.0...0.2.1) (2026-09-05)
 
 
