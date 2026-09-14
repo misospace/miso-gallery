@@ -1,4 +1,18 @@
+import sys
+import time
+from pathlib import Path
+
 from conftest import auth_header, build_client
+
+
+def _fresh_app():
+    """The freshly re-imported ``app`` module that the LLM routes actually run in.
+
+    ``build_client`` pops and re-imports ``app`` (re-pointing its ``DATA_FOLDER``
+    at the test's tmp dir), so a top-level ``import app`` would be stale; this
+    grabs the live module the routes share globals with.
+    """
+    return sys.modules["app"]
 
 
 def test_llm_api_requires_configured_valid_bearer_token(monkeypatch, tmp_path):
@@ -37,7 +51,11 @@ def test_llm_images_search_metadata_recent_and_folders(monkeypatch, tmp_path):
 
     folders = client.get("/api/llm/folders", headers=auth_header())
     assert folders.status_code == 200
-    assert any(folder["rel_path"] == "cats" for folder in folders.get_json()["folders"])
+    folders_payload = folders.get_json()
+    assert any(folder["rel_path"] == "cats" for folder in folders_payload["folders"])
+    # The fixture has one real subfolder ("cats"); the synthetic root must
+    # not be counted in ``total`` (issue #480 review).
+    assert folders_payload["total"] == 1
 
 
 def test_llm_image_rejects_symlink_outside_data_folder(monkeypatch, tmp_path):
@@ -571,3 +589,124 @@ def test_tag_store_enables_wal_mode(tmp_path):
         assert journal_mode == "wal", (
             f"Expected journal_mode=WAL for concurrent worker access, got {journal_mode}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #480: /api/llm/recent, /api/llm/images and
+# /api/llm/folders must stay 200 when a single file under DATA_FOLDER becomes
+# unreadable between the bounded walk and the post-walk sort/metadata step.
+# ---------------------------------------------------------------------------
+
+
+def test_llm_recent_survives_file_vanishing_between_walk_and_sort(monkeypatch, tmp_path):
+    """/api/llm/recent: one file that is gone by the time the sort runs must not
+    500 the request — the surviving files are returned and the unreadable count
+    is reported in ``skipped_count``.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path)
+    app = _fresh_app()
+
+    # Seed a deterministic scan snapshot (the walk returns it as-is; the
+    # endpoint then stats each entry, which is where the vanished file would
+    # have raised an uncaught OSError before the fix).
+    app._gallery_scan_cache.clear()
+    a = data_dir / "a.png"
+    b = data_dir / "b.png"
+    a.write_bytes(b"\x89PNG")
+    b.write_bytes(b"\x89PNG")
+    app._gallery_scan_cache[("media", app.LLM_ENUMERATION_LIMIT, str(data_dir))] = (
+        time.time(),
+        [a, b],
+    )
+
+    # The race: a.png has vanished (or is unreadable) by the time the endpoint
+    # walks the snapshot.
+    a.unlink()
+
+    resp = client.get("/api/llm/recent", headers=auth_header())
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    payload = resp.get_json()
+    assert payload["skipped_count"] == 1
+    assert payload["count"] == 1
+    assert [img["rel_path"] for img in payload["images"]] == ["b.png"]
+
+
+def test_llm_images_survives_file_vanishing_between_walk_and_metadata(monkeypatch, tmp_path):
+    """/api/llm/images: an unreadable file must be skipped from the page instead
+    of 500-ing the whole request (media_metadata's stat/relative_to guard).
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path)
+    app = _fresh_app()
+
+    a = data_dir / "a.png"
+    b = data_dir / "b.png"
+    a.write_bytes(b"\x89PNG")
+    b.write_bytes(b"\x89PNG")
+
+    # Patch Path.stat so that only a.png's stat raises — this exercises the
+    # post-walk metadata step's guard (the walk itself is bypassed via the
+    # seeded cache below) without relying on an OS-specific read failure.
+    original_stat = Path.stat
+
+    def flaky_stat(self, *args, **kwargs):
+        if self == a:
+            raise OSError("simulated unreadable file (NFS attr-cache blip)")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    # Deterministic snapshot: walk returns these paths; metadata then stats them.
+    app._gallery_scan_cache.clear()
+    app._gallery_scan_cache[("media", app.LLM_ENUMERATION_LIMIT, str(data_dir))] = (
+        time.time(),
+        [a, b],
+    )
+
+    resp = client.get("/api/llm/images", headers=auth_header())
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    payload = resp.get_json()
+    assert payload["count"] == 1
+    assert [img["rel_path"] for img in payload["images"]] == ["b.png"]
+
+
+def test_llm_folders_survives_relative_to_no_longer_resolving(monkeypatch, tmp_path):
+    """/api/llm/folders: a folder whose relative_to no longer resolves must be
+    skipped and the rest of the page returned instead of a 500.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path)
+    app = _fresh_app()
+
+    # A directory that is NOT under DATA_FOLDER; its relative_to(DATA_FOLDER)
+    # raises ValueError — exactly the mid-walk "replaced by a symlink / moved"
+    # race the issue describes.
+    stray = tmp_path / "stray"
+    stray.mkdir(exist_ok=True)
+
+    original_relative_to = Path.relative_to
+
+    def flaky_relative_to(self, other):
+        if self == stray:
+            raise ValueError("simulated path no longer relative to DATA_FOLDER")
+        return original_relative_to(self, other)
+
+    monkeypatch.setattr(Path, "relative_to", flaky_relative_to)
+
+    # Deterministic snapshot: the stray folder is in the returned list.
+    app._gallery_scan_cache.clear()
+    app._gallery_scan_cache[("folders", app.LLM_ENUMERATION_LIMIT, str(data_dir))] = (
+        time.time(),
+        [stray],
+    )
+
+    resp = client.get("/api/llm/folders", headers=auth_header())
+    assert resp.status_code == 200, resp.get_data(as_text=True)
+    payload = resp.get_json()
+    # The root entry is always present; the stray folder must have been skipped.
+    assert [f["rel_path"] for f in payload["folders"]] == [""]
+    # total/has_more must reflect the user-visible folder count, not include
+    # the synthetic root. Under heavy mid-walk churn (every walked folder
+    # unreadable) the response would otherwise report total=1 (just the
+    # root) while has_more's math used 0 visible folders — misleading
+    # machine clients (issue #480 review).
+    assert payload["total"] == 0
+    assert payload["has_more"] is False

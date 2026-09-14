@@ -546,9 +546,23 @@ def is_excluded_gallery_path(path: Path) -> bool:
     return any(part in {THUMBNAIL_CACHE_DIR.name, ".trash"} or part.startswith(".") for part in rel_parts)
 
 
-def relative_media_path(path: Path) -> str:
-    """Return the stable gallery-relative identifier used by API metadata."""
-    return path.relative_to(DATA_FOLDER).as_posix()
+def _gallery_item_rel_path(item: Path) -> str | None:
+    """Gallery-relative POSIX path for a walked item, or ``None`` if it is
+    no longer usable.
+
+    ``iter_gallery_items`` swallows ``OSError``/``PermissionError`` *during* the
+    bounded walk, but the post-walk steps (the ``/api/llm/recent`` sort key, the
+    ``/api/llm/images`` ``media_metadata`` page, and the ``/api/llm/folders``
+    ``relative_to`` calls) run after the walk has returned. A file that vanished
+    or became unreadable between the walk and those steps raises ``OSError`` or
+    ``ValueError`` from ``Path.stat``/``relative_to`` — which, unguarded, returns
+    500 for the whole request even though only one file is bad. These helpers
+    let callers drop the unreadable item instead (issue #480).
+    """
+    try:
+        return item.relative_to(DATA_FOLDER).as_posix()
+    except (OSError, ValueError):
+        return None
 
 
 def _tag_store() -> TagStore:
@@ -1658,21 +1672,45 @@ def llm_images():
     page, per_page = _parse_pagination(request.args)
     all_media = iter_gallery_items(kind="media", limit=LLM_ENUMERATION_LIMIT)
     filtered: list[Path] = []
+    # Guard the post-walk relative_to() calls (issue #480): a path that no longer
+    # resolves against DATA_FOLDER is dropped rather than raising ValueError and
+    # returning 500 for the whole request.
     for item in all_media:
-        rel_path = item.relative_to(DATA_FOLDER).as_posix()
+        rel_path = _gallery_item_rel_path(item)
+        if rel_path is None:
+            continue
         if query and query not in rel_path.lower() and query not in item.name.lower():
             continue
         filtered.append(item)
     paginated, total, pg, pp, has_more = _paginate(filtered, page=page, per_page=per_page)
     has_more = _apply_scan_limit(has_more, len(all_media))
-    tags_by_path = _tag_store().get_tags_for_paths(
-        [relative_media_path(item) for item in paginated]
-    )
-    images = [
-        media_metadata(item, tags_by_path.get(relative_media_path(item), []))
-        for item in paginated
-    ]
-    return {"images": images, "count": len(images), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    # Re-resolve each page item; drop any that no longer resolve against
+    # DATA_FOLDER (issue #480) so a vanished file cannot raise here.
+    page_rel: dict[Path, str] = {}
+    for item in paginated:
+        rel_path = _gallery_item_rel_path(item)
+        if rel_path is not None:
+            page_rel[item] = rel_path
+    tags_by_path = _tag_store().get_tags_for_paths(list(page_rel.values()))
+    # Guard the per-item media_metadata() stat/relative_to calls (issue #480):
+    # drop items that vanish between the walk and metadata so the page stays 200.
+    images: list[dict[str, object]] = []
+    for item in paginated:
+        rel_path = page_rel.get(item)
+        if rel_path is None:
+            continue
+        try:
+            images.append(media_metadata(item, tags_by_path.get(rel_path, [])))
+        except (OSError, ValueError):
+            continue
+    return {
+        "images": images,
+        "count": len(images),
+        "total": total,
+        "page": pg,
+        "per_page": pp,
+        "has_more": has_more,
+    }
 
 
 @app.route("/api/llm/image/<path:relpath>")
@@ -1702,21 +1740,52 @@ def llm_image(relpath: str):
 @rate_limit(max_requests=60, window=60)
 def llm_recent():
     page, per_page = _parse_pagination(request.args)
-    all_media = sorted(
-        iter_gallery_items(kind="media", limit=LLM_ENUMERATION_LIMIT),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    # Guard the post-walk sort key (issue #480): iter_gallery_items swallows
+    # OSError during the walk, but the sort's stat() runs afterwards, so a file
+    # that vanished (or hit an NFS attr-cache blip) between the walk and the sort
+    # raised an uncaught OSError, returning 500 for the whole request. Capture the
+    # mtime in the guarded loop instead: a file whose stat raises here is dropped
+    # and counted, and the sort uses the captured value so no second stat can race.
+    all_media: list[tuple[float, Path]] = []
+    skipped = 0
+    for item in iter_gallery_items(kind="media", limit=LLM_ENUMERATION_LIMIT):
+        try:
+            mtime = item.stat().st_mtime
+        except (OSError, ValueError):
+            skipped += 1
+            continue
+        all_media.append((mtime, item))
+    all_media.sort(key=lambda entry: entry[0], reverse=True)
     paginated, total, pg, pp, has_more = _paginate(all_media, page=page, per_page=per_page)
     has_more = _apply_scan_limit(has_more, len(all_media))
-    tags_by_path = _tag_store().get_tags_for_paths(
-        [relative_media_path(item) for item in paginated]
-    )
-    images = [
-        media_metadata(item, tags_by_path.get(relative_media_path(item), []))
-        for item in paginated
-    ]
-    return {"images": images, "count": len(images), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    # Re-resolve each page item; drop any that no longer resolve against
+    # DATA_FOLDER (issue #480) so a vanished file cannot raise here.
+    page_rel: dict[Path, str] = {}
+    for _mtime, item in paginated:
+        rel_path = _gallery_item_rel_path(item)
+        if rel_path is not None:
+            page_rel[item] = rel_path
+    tags_by_path = _tag_store().get_tags_for_paths(list(page_rel.values()))
+    # Guard the per-item media_metadata() stat/relative_to calls (issue #480):
+    # drop items that vanish between the walk and metadata so the page stays 200.
+    images: list[dict[str, object]] = []
+    for _mtime, item in paginated:
+        rel_path = page_rel.get(item)
+        if rel_path is None:
+            continue
+        try:
+            images.append(media_metadata(item, tags_by_path.get(rel_path, [])))
+        except (OSError, ValueError):
+            continue
+    return {
+        "images": images,
+        "count": len(images),
+        "total": total,
+        "page": pg,
+        "per_page": pp,
+        "has_more": has_more,
+        "skipped_count": skipped,
+    }
 
 
 @app.route("/api/llm/folders")
@@ -1725,13 +1794,40 @@ def llm_recent():
 def llm_folders():
     page, per_page = _parse_pagination(request.args)
     all_folders = [{"rel_path": "", "name": "", "parent": None}]
+    # Guard the post-walk relative_to() calls (issue #480): folder.relative_to and
+    # its parent's relative_to raise ValueError if the directory is no longer
+    # relative to DATA_FOLDER (e.g. moved or replaced by a symlink mid-walk).
+    # Without this guard a single such folder returns 500 for the whole request;
+    # skip it and continue with the rest of the page instead.
     for folder in iter_gallery_items(kind="folders", limit=LLM_ENUMERATION_LIMIT):
-        rel_path = folder.relative_to(DATA_FOLDER).as_posix()
-        parent = folder.parent.relative_to(DATA_FOLDER).as_posix() if folder.parent != DATA_FOLDER else ""
+        try:
+            rel_path = folder.relative_to(DATA_FOLDER).as_posix()
+            parent = (
+                ""
+                if folder.parent == DATA_FOLDER
+                else folder.parent.relative_to(DATA_FOLDER).as_posix()
+            )
+        except (OSError, ValueError):
+            continue
         all_folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
     paginated, total, pg, pp, has_more = _paginate(all_folders, page=page, per_page=per_page)
-    has_more = _apply_scan_limit(has_more, len(all_folders) - 1)  # -1 for root entry
-    return {"folders": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    # Exclude the synthetic root entry ({"rel_path": "", ...}) from the
+    # user-visible total/has_more counts — it is a navigation helper, not a
+    # real folder. Without this, ``total`` would include the root while
+    # ``has_more`` already excluded it (``len(all_folders) - 1``), so under
+    # heavy mid-walk churn — e.g. every walked folder unreadable — the
+    # response reported ``total=1`` (just the root) alongside ``has_more``
+    # math that used 0 visible folders, misleading machine clients
+    # (issue #480 review).
+    visible_count = len(all_folders) - 1  # -1 for synthetic root entry
+    return {
+        "folders": paginated,
+        "count": len(paginated),
+        "total": visible_count,
+        "page": pg,
+        "per_page": pp,
+        "has_more": _apply_scan_limit(has_more, visible_count),
+    }
 
 
 @app.route("/api/llm/tags", methods=["POST"])
