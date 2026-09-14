@@ -51,7 +51,11 @@ def test_llm_images_search_metadata_recent_and_folders(monkeypatch, tmp_path):
 
     folders = client.get("/api/llm/folders", headers=auth_header())
     assert folders.status_code == 200
-    assert any(folder["rel_path"] == "cats" for folder in folders.get_json()["folders"])
+    folders_payload = folders.get_json()
+    assert any(folder["rel_path"] == "cats" for folder in folders_payload["folders"])
+    # The fixture has one real subfolder ("cats"); the synthetic root must
+    # not be counted in ``total`` (issue #480 review).
+    assert folders_payload["total"] == 1
 
 
 def test_llm_image_rejects_symlink_outside_data_folder(monkeypatch, tmp_path):
@@ -699,3 +703,10 @@ def test_llm_folders_survives_relative_to_no_longer_resolving(monkeypatch, tmp_p
     payload = resp.get_json()
     # The root entry is always present; the stray folder must have been skipped.
     assert [f["rel_path"] for f in payload["folders"]] == [""]
+    # total/has_more must reflect the user-visible folder count, not include
+    # the synthetic root. Under heavy mid-walk churn (every walked folder
+    # unreadable) the response would otherwise report total=1 (just the
+    # root) while has_more's math used 0 visible folders — misleading
+    # machine clients (issue #480 review).
+    assert payload["total"] == 0
+    assert payload["has_more"] is False

@@ -1811,8 +1811,23 @@ def llm_folders():
             continue
         all_folders.append({"rel_path": rel_path, "name": folder.name, "parent": parent})
     paginated, total, pg, pp, has_more = _paginate(all_folders, page=page, per_page=per_page)
-    has_more = _apply_scan_limit(has_more, len(all_folders) - 1)  # -1 for root entry
-    return {"folders": paginated, "count": len(paginated), "total": total, "page": pg, "per_page": pp, "has_more": has_more}
+    # Exclude the synthetic root entry ({"rel_path": "", ...}) from the
+    # user-visible total/has_more counts — it is a navigation helper, not a
+    # real folder. Without this, ``total`` would include the root while
+    # ``has_more`` already excluded it (``len(all_folders) - 1``), so under
+    # heavy mid-walk churn — e.g. every walked folder unreadable — the
+    # response reported ``total=1`` (just the root) alongside ``has_more``
+    # math that used 0 visible folders, misleading machine clients
+    # (issue #480 review).
+    visible_count = len(all_folders) - 1  # -1 for synthetic root entry
+    return {
+        "folders": paginated,
+        "count": len(paginated),
+        "total": visible_count,
+        "page": pg,
+        "per_page": pp,
+        "has_more": _apply_scan_limit(has_more, visible_count),
+    }
 
 
 @app.route("/api/llm/tags", methods=["POST"])
