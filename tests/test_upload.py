@@ -177,7 +177,7 @@ def test_upload_rejects_invalid_video_content(monkeypatch, tmp_path):
     assert not (data_dir / "input" / "evil.mp4").exists()
 
 
-def test_upload_skips_symlink_destination(monkeypatch, tmp_path):
+def test_upload_does_not_follow_symlink_destination(monkeypatch, tmp_path):
     client, data_dir = _local_client(monkeypatch, tmp_path)
     csrf = _login(client)
     input_dir = data_dir / "input"
@@ -190,8 +190,11 @@ def test_upload_skips_symlink_destination(monkeypatch, tmp_path):
         data={"csrf_token": csrf, "files": (io.BytesIO(_PNG), "target.png")},
         content_type="multipart/form-data",
     )
-    assert resp.status_code == 422
+    assert resp.status_code == 302
     assert not outside.exists()
+    uploaded = [path for path in input_dir.iterdir() if not path.is_symlink()]
+    assert len(uploaded) == 1
+    assert uploaded[0].read_bytes() == _PNG
 
 
 def test_upload_sanitizes_traversal_and_null_byte_names(monkeypatch, tmp_path):
