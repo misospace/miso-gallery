@@ -36,6 +36,7 @@ from flask import (
     url_for,
 )
 from flask.sessions import SecureCookieSessionInterface
+from werkzeug.utils import secure_filename
 from PIL import Image, UnidentifiedImageError
 
 from auth import (
@@ -82,6 +83,12 @@ DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
 THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
 TAG_DATABASE = Path(os.environ.get("TAG_DATABASE", str(DATA_FOLDER / ".miso-gallery-tags.sqlite3")))
 
+# In-browser upload (issue #485): browser uploads land in UPLOAD_DIR so that
+# ad-hoc images can be shared without write access to the gallery's image
+# share. Defaults to "<DATA_FOLDER>/input" (i.e. `root/input/*` when the
+# share is mounted at `/root` / `DATA_FOLDER=/root`).
+UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", str(DATA_FOLDER / "input")))
+
 
 def resolve_secret_key() -> str:
     configured = os.environ.get("SECRET_KEY", "").strip()
@@ -108,6 +115,10 @@ app.secret_key = resolve_secret_key()
 # SESSION_COOKIE_SAMESITE: Lax to allow cross-site navigation while maintaining security
 # SESSION_COOKIE_HTTPONLY: Prevent JavaScript access to session cookie
 app.config["PERMANENT_SESSION_LIFETIME"] = int(os.environ.get("SESSION_LIFETIME_DAYS", 30)) * 24 * 60 * 60
+# Cap browser uploads (issue #485); 2 GiB default keeps shared media files
+# within the "ad-hoc images" use case.
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
+app.config["UPLOAD_FOLDER"] = str(UPLOAD_DIR)
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "true").strip().lower() == "true"
 app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -1124,6 +1135,13 @@ def index(subpath: str = ""):
             has_more = True
             break
 
+    # Location uploads land in, when it is inside the gallery root so the
+    # upload button can deep-link there (issue #485).
+    try:
+        upload_dir_rel = UPLOAD_DIR.resolve().relative_to(DATA_FOLDER.resolve()).as_posix()
+    except (ValueError, OSError):
+        upload_dir_rel = ""
+
     # Apply category search filter (root only).
     # Issue #51 expects folder/category name substring matching.
     if search_query and not safe_subpath:
@@ -1184,6 +1202,7 @@ def index(subpath: str = ""):
         parent_url=parent_url,
         stats=stats,
         current_subpath=safe_subpath,
+        upload_dir_rel=upload_dir_rel,
         nav_crumbs=nav_crumbs,
         search_query=search_query,
         category_filter_active=bool(search_query and not safe_subpath),
@@ -1399,6 +1418,58 @@ def bulk_delete():
         redirect_kwargs.update(bulk_state="noop")
 
     return redirect(url_for("index", **redirect_kwargs))
+
+
+@app.route("/upload", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=10, window=60)
+def upload():
+    """Upload images for sharing (issue #485).
+
+    Files land in UPLOAD_DIR (default: ``DATA_FOLDER/input``) so ad-hoc
+    images can be shared from the gallery without write access to the
+    image share. The button is rendered only on the gallery root page.
+    """
+    if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("upload", "denied", reason="invalid_csrf")
+        return {"error": "Invalid CSRF token"}, 403
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+
+    stored = []
+    skipped = []
+    for file in request.files.getlist("files"):
+        raw_name = file.filename
+        if not raw_name:
+            continue
+        safe_name = secure_filename(raw_name)
+        if not safe_name:
+            skipped.append(raw_name)
+            continue
+        if not safe_name.lower().endswith(IMAGE_EXTENSIONS + VIDEO_EXTENSIONS):
+            log_security_event("upload", "denied", reason="unsupported_type", filename=raw_name)
+            skipped.append(raw_name)
+            continue
+        dest = UPLOAD_DIR / safe_name
+        if dest.exists():
+            stem, suffix = os.path.splitext(safe_name)
+            safe_name = f"{stem}-{secrets.token_hex(4)}{suffix}"
+            dest = UPLOAD_DIR / safe_name
+        file.save(dest)
+        stored.append(str(safe_name))
+
+    outcome = "success" if stored else ("skipped" if skipped else "noop")
+    log_security_event("upload", outcome, stored=len(stored), skipped=len(skipped))
+
+    if not stored:
+        return {"error": "No files were uploaded. Send image files in the 'files' field."}, 422
+
+    # Land the user where the files were saved, if that is inside the gallery root.
+    try:
+        dest_subpath = UPLOAD_DIR.resolve().relative_to(DATA_FOLDER.resolve()).as_posix()
+    except ValueError:
+        dest_subpath = ""
+    return redirect(url_for("index", subpath=dest_subpath))
 
 
 @app.route("/tag", methods=["POST"])
