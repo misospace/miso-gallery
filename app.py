@@ -15,6 +15,7 @@ import stat
 import subprocess
 import threading
 import time
+import warnings
 from base64 import urlsafe_b64encode
 from collections import OrderedDict
 from pathlib import Path
@@ -37,6 +38,7 @@ from flask import (
 )
 from flask.sessions import SecureCookieSessionInterface
 from PIL import Image, UnidentifiedImageError
+from werkzeug.utils import secure_filename
 
 from auth import (
     configure_oauth,
@@ -82,6 +84,15 @@ DATA_FOLDER = Path(os.environ.get("DATA_FOLDER", "/data"))
 THUMBNAIL_CACHE_DIR = DATA_FOLDER / ".thumb_cache"
 TAG_DATABASE = Path(os.environ.get("TAG_DATABASE", str(DATA_FOLDER / ".miso-gallery-tags.sqlite3")))
 
+# In-browser upload (issue #485): browser uploads land in UPLOAD_DIR so that
+# ad-hoc images can be shared without write access to the gallery's image
+# share. The upload target must remain in the gallery root.
+UPLOAD_DIR = Path(os.environ.get("UPLOAD_DIR", str(DATA_FOLDER / "input"))).resolve()
+try:
+    UPLOAD_DIR.relative_to(DATA_FOLDER.resolve())
+except ValueError as exc:
+    raise ValueError("UPLOAD_DIR must resolve within DATA_FOLDER") from exc
+
 
 def resolve_secret_key() -> str:
     configured = os.environ.get("SECRET_KEY", "").strip()
@@ -108,6 +119,9 @@ app.secret_key = resolve_secret_key()
 # SESSION_COOKIE_SAMESITE: Lax to allow cross-site navigation while maintaining security
 # SESSION_COOKIE_HTTPONLY: Prevent JavaScript access to session cookie
 app.config["PERMANENT_SESSION_LIFETIME"] = int(os.environ.get("SESSION_LIFETIME_DAYS", 30)) * 24 * 60 * 60
+# Cap browser uploads (issue #485); 2 GiB default keeps shared media files
+# within the "ad-hoc images" use case.
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_BYTES", str(2 * 1024 * 1024 * 1024)))
 app.config["SESSION_COOKIE_SECURE"] = os.environ.get("SESSION_COOKIE_SECURE", "true").strip().lower() == "true"
 app.config["SESSION_COOKIE_SAMESITE"] = os.environ.get("SESSION_COOKIE_SAMESITE", "Lax")
 app.config["SESSION_COOKIE_HTTPONLY"] = True
@@ -357,9 +371,9 @@ def source_file_path(rel_path: str) -> Path:
 
 
 def thumbnail_filename(rel_path: str, source_path: Path) -> str:
-    stat = source_path.stat()
+    file_stat = source_path.stat()
     safe_name = rel_path.replace("/", "__")
-    return f"{safe_name}.{stat.st_mtime_ns}.{stat.st_size}.jpg"
+    return f"{safe_name}.{file_stat.st_mtime_ns}.{file_stat.st_size}.jpg"
 
 
 def generate_thumbnail(source_path: Path, output_path: Path) -> None:
@@ -579,17 +593,17 @@ def _tag_store() -> TagStore:
 
 def media_metadata(path: Path, tags: list[str] | None = None) -> dict[str, object]:
     rel_path = path.relative_to(DATA_FOLDER).as_posix()
-    stat = path.stat()
+    file_stat = path.stat()
     media_type = "video" if path.suffix.lower() in VIDEO_EXTENSIONS else "image"
     return {
         "name": path.name,
         "rel_path": rel_path,
         "media_type": media_type,
         "tags": _tag_store().get_tags(rel_path) if tags is None else tags,
-        "size": stat.st_size,
-        "size_human": format_size(stat.st_size),
-        "modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stat.st_mtime)),
-        "mtime": stat.st_mtime,
+        "size": file_stat.st_size,
+        "size_human": format_size(file_stat.st_size),
+        "modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(file_stat.st_mtime)),
+        "mtime": file_stat.st_mtime,
         "view_url": url_for("view", filename=rel_path),
         "thumb_url": url_for("thumb", filename=rel_path),
     }
@@ -1124,6 +1138,13 @@ def index(subpath: str = ""):
             has_more = True
             break
 
+    # Location uploads land in, when it is inside the gallery root so the
+    # upload button can deep-link there (issue #485).
+    try:
+        upload_dir_rel = UPLOAD_DIR.resolve().relative_to(DATA_FOLDER.resolve()).as_posix()
+    except (ValueError, OSError):
+        upload_dir_rel = ""
+
     # Apply category search filter (root only).
     # Issue #51 expects folder/category name substring matching.
     if search_query and not safe_subpath:
@@ -1184,6 +1205,7 @@ def index(subpath: str = ""):
         parent_url=parent_url,
         stats=stats,
         current_subpath=safe_subpath,
+        upload_dir_rel=upload_dir_rel,
         nav_crumbs=nav_crumbs,
         search_query=search_query,
         category_filter_active=bool(search_query and not safe_subpath),
@@ -1399,6 +1421,92 @@ def bulk_delete():
         redirect_kwargs.update(bulk_state="noop")
 
     return redirect(url_for("index", **redirect_kwargs))
+
+
+def _is_valid_upload_content(file, suffix: str) -> bool:
+    """Validate image contents or supported video container signatures."""
+    stream = file.stream
+    try:
+        if suffix in IMAGE_EXTENSIONS + (".gif",):
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(stream) as image:
+                    image.verify()
+            return True
+        header = stream.read(4096)
+        if suffix in (".mp4", ".mov"):
+            return len(header) >= 16 and header[4:8] == b"ftyp" and b"moov" in header[8:]
+        return len(header) >= 8 and header.startswith(b"\x1a\x45\xdf\xa3") and b"webm" in header.lower()
+    except (OSError, SyntaxError, UnidentifiedImageError, ValueError, Image.DecompressionBombError):
+        return False
+    finally:
+        stream.seek(0)
+
+
+def _new_upload_destination(safe_name: str) -> tuple[Path, int] | None:
+    """Atomically open a new regular destination under UPLOAD_DIR."""
+    stem, suffix = os.path.splitext(safe_name)
+    for _ in range(10):
+        candidate = UPLOAD_DIR / safe_name
+        try:
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            safe_name = f"{stem}-{secrets.token_hex(4)}{suffix}"
+            continue
+        except OSError:
+            return None
+        return candidate, fd
+    return None
+
+
+@app.route("/upload", methods=["POST"])
+@require_auth
+@rate_limit(max_requests=10, window=60)
+def upload():
+    """Upload validated media for sharing (issue #485)."""
+    if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("upload", "denied", reason="invalid_csrf")
+        return {"error": "Invalid CSRF token"}, 403
+
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    stored = []
+    skipped = []
+    for file in request.files.getlist("files"):
+        raw_name = file.filename
+        safe_name = secure_filename(raw_name or "")
+        suffix = Path(safe_name).suffix.lower()
+        if not safe_name or suffix not in IMAGE_EXTENSIONS + VIDEO_EXTENSIONS:
+            log_security_event("upload", "denied", reason="unsupported_type", filename=raw_name)
+            skipped.append(raw_name)
+            continue
+        if not _is_valid_upload_content(file, suffix):
+            log_security_event("upload", "denied", reason="invalid_content", filename=raw_name)
+            skipped.append(raw_name)
+            continue
+        destination = _new_upload_destination(safe_name)
+        if destination is None:
+            log_security_event("upload", "denied", reason="unsafe_destination", filename=raw_name)
+            skipped.append(raw_name)
+            continue
+        dest, fd = destination
+        try:
+            with os.fdopen(fd, "wb") as output:
+                while chunk := file.stream.read(64 * 1024):
+                    output.write(chunk)
+        except OSError:
+            dest.unlink(missing_ok=True)
+            skipped.append(raw_name)
+            continue
+        stored.append(dest.name)
+
+    outcome = "success" if stored else ("skipped" if skipped else "noop")
+    log_security_event("upload", outcome, stored=len(stored), skipped=len(skipped))
+    if not stored:
+        return {"error": "No files were uploaded. Send valid media files in the 'files' field."}, 422
+
+    _invalidate_gallery_scan_cache()
+    dest_subpath = UPLOAD_DIR.relative_to(DATA_FOLDER.resolve()).as_posix()
+    return redirect(url_for("index", subpath=dest_subpath))
 
 
 @app.route("/tag", methods=["POST"])

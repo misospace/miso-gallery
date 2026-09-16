@@ -51,6 +51,8 @@ services:
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `DATA_FOLDER` | No | `/data` | Path to image directory |
+| `UPLOAD_DIR` | No | `$DATA_FOLDER/input` | Where in-browser uploads land. It must resolve inside `DATA_FOLDER`; the gallery-root upload button saves media here (e.g. `root/input/*` when the share is mounted at `DATA_FOLDER=/root`) so ad-hoc media can be shared without write access to the image share (issue #485). |
+| `MAX_UPLOAD_BYTES` | No | `2147483648` | Max bytes per upload request (2 GiB). |
 | `TAG_DATABASE` | No | `$DATA_FOLDER/.miso-gallery-tags.sqlite3` | Path to the SQLite tag database. **Recommended to set this outside `DATA_FOLDER`** on NFS or snapshot-based backups — see [Backup Considerations](docs/runbook.md#backup-considerations-tag-database-placement). |
 | `IMAGE_BASE_URL` | No | - | Base URL for shareable links |
 | `PORT` | No | `5000` | Server port |
@@ -180,6 +182,10 @@ Thumbnails are automatically generated and cached in `.thumb_cache/` directory. 
 - Click checkboxes on images to select
 - Use "Select All" / "Deselect All" buttons
 - Bulk delete selected images
+
+### Upload
+
+The gallery root page shows an upload button (behind authentication) that saves selected media to `UPLOAD_DIR` (default `<DATA_FOLDER>/input`). `UPLOAD_DIR` must resolve within `DATA_FOLDER`; uploads reject unsafe symlink destinations and invalid image/video content. This lets users share ad-hoc media through the gallery without write access to the image share (issue #485).
 
 ### Direct Image Access
 

@@ -40,6 +40,10 @@
     .filter-chip { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:rgba(245,166,35,.12); border:1px solid rgba(245,166,35,.35); color:#f6c36d; font-size:.92rem; }
     .clear-filter-link { color:#f5a623; text-decoration:none; font-size:.92rem; }
     .clear-filter-link:hover { text-decoration:underline; }
+    .upload-form { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:15px; padding:10px 12px; border-radius:8px; border:1px dashed #3a3a3a; background:#141414; }
+    .upload-form-label { font-size:.85rem; color:#cfcfcf; }
+    .upload-form input[type="file"] { color:#cfcfcf; font-size:.85rem; }
+    .upload-submit { background:linear-gradient(135deg,#2f2f4f 0%,#243357 100%); color:#f5a623; border:1px solid #4b4b75; border-radius:6px; padding:8px 14px; cursor:pointer; font-size:0.85rem; }
     .bulk-feedback { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:-4px 0 15px; padding:10px 12px; border-radius:8px; border:1px solid #2f3a2f; background:#152015; color:#cfe8cf; }
     .bulk-feedback.info { border-color:#3b3b3b; background:#171717; color:#d6d6d6; }
     .bulk-feedback strong { color:#f5a623; }
@@ -170,6 +174,14 @@
       <span>{{ bulk_feedback.message }}</span>
     </div>
     {% endif %}
+    {% if not current_subpath and upload_dir_rel %}
+    <form id="uploadForm" class="upload-form" method="POST" action="/upload" enctype="multipart/form-data">
+      <input type="hidden" name="csrf_token" value="{{ csrf }}">
+      <label class="upload-form-label" for="uploadFiles">⬆️ Upload images to {{ upload_dir_rel }}/</label>
+      <input id="uploadFiles" type="file" name="files" multiple accept=".png,.jpg,.jpeg,.webp,.gif,.mp4,.webm,.mov">
+      <button type="submit" id="uploadBtn" class="upload-submit">Upload</button>
+    </form>
+    {% endif %}
     {% if items %}
     <form id="bulkDeleteForm" method="POST" action="/bulk-delete">
       <input type="hidden" name="csrf_token" value="{{ csrf }}">
@@ -295,6 +307,19 @@
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setDrawerOpen(false); });
 
     document.getElementById('refreshBtn')?.addEventListener('click', () => window.location.reload());
+
+    // Upload button (issue #485): plain form submit; disable while in flight.
+    const uploadForm = document.getElementById('uploadForm');
+    const uploadFiles = document.getElementById('uploadFiles');
+    const uploadBtn = document.getElementById('uploadBtn');
+    uploadForm?.addEventListener('submit', () => {
+      if (!uploadFiles || !uploadFiles.files.length) {
+        alert('Choose at least one image file to upload.');
+        return false;
+      }
+      uploadBtn.disabled = true;
+      uploadBtn.textContent = 'Uploading…';
+    });
 
     // Category search (Issue #51)
     const categorySearchInput = document.getElementById('categorySearch');
