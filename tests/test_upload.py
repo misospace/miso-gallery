@@ -8,6 +8,8 @@ import io
 import sys
 from pathlib import Path
 
+import pytest
+
 from conftest import _MINIMAL_PNG, build_client
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -149,19 +151,73 @@ def test_upload_unauthenticated_does_not_save(monkeypatch, tmp_path):
     assert not (data_dir / "x.png").exists()
 
 
-def test_upload_custom_upload_dir_outside_gallery_redirects_to_root(monkeypatch, tmp_path):
-    outside = tmp_path / "shared"
-    client, data_dir = _local_client(monkeypatch, tmp_path, extra_env={"UPLOAD_DIR": str(outside)})
+def test_upload_rejects_invalid_image_content(monkeypatch, tmp_path):
+    client, data_dir = _local_client(monkeypatch, tmp_path)
     csrf = _login(client)
 
     resp = client.post(
         "/upload",
-        data={"csrf_token": csrf, "files": (io.BytesIO(_PNG), "shot.png")},
+        data={"csrf_token": csrf, "files": (io.BytesIO(b"not an image"), "evil.png")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 422
+    assert not (data_dir / "input" / "evil.png").exists()
+
+
+def test_upload_rejects_invalid_video_content(monkeypatch, tmp_path):
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+
+    resp = client.post(
+        "/upload",
+        data={"csrf_token": csrf, "files": (io.BytesIO(b"not a video"), "evil.mp4")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 422
+    assert not (data_dir / "input" / "evil.mp4").exists()
+
+
+def test_upload_skips_symlink_destination(monkeypatch, tmp_path):
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+    input_dir = data_dir / "input"
+    input_dir.mkdir()
+    outside = tmp_path / "outside.png"
+    (input_dir / "target.png").symlink_to(outside)
+
+    resp = client.post(
+        "/upload",
+        data={"csrf_token": csrf, "files": (io.BytesIO(_PNG), "target.png")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 422
+    assert not outside.exists()
+
+
+def test_upload_sanitizes_traversal_and_null_byte_names(monkeypatch, tmp_path):
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+
+    resp = client.post(
+        "/upload",
+        data={"csrf_token": csrf, "files": (io.BytesIO(_PNG), "../safe\x00.png")},
         content_type="multipart/form-data",
     )
     assert resp.status_code == 302
-    assert resp.headers["Location"] == "/"
-    assert (outside / "shot.png").read_bytes() == _PNG
-    # Button must not advertise the destination in the UI (it is outside the gallery).
-    html = client.get("/").get_data(as_text=True)
-    assert 'id="uploadForm"' not in html
+    assert (data_dir / "input" / "safe.png").read_bytes() == _PNG
+
+
+def test_upload_dir_outside_data_folder_fails_at_startup(monkeypatch, tmp_path):
+    outside = tmp_path / "shared"
+    with pytest.raises(ValueError, match="UPLOAD_DIR must resolve within DATA_FOLDER"):
+        _local_client(monkeypatch, tmp_path, extra_env={"UPLOAD_DIR": str(outside)})
+
+
+def test_upload_dir_symlink_outside_data_folder_fails_at_startup(monkeypatch, tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    outside = tmp_path / "shared"
+    (data_dir / "input").symlink_to(outside)
+
+    with pytest.raises(ValueError, match="UPLOAD_DIR must resolve within DATA_FOLDER"):
+        _local_client(monkeypatch, tmp_path, extra_env={"UPLOAD_DIR": str(data_dir / "input")})
