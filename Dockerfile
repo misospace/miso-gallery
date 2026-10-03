@@ -7,6 +7,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app.py auth.py security.py tag_store.py trash.py health.py ./
 COPY templates/ templates/
+COPY assets/ assets/
 COPY entrypoint.sh .
 
 # Create unprivileged user and ensure /data is writable.
