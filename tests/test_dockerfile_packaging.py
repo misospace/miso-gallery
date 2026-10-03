@@ -109,3 +109,31 @@ def test_dockerfile_chowns_data():
     dockerfile = Path("Dockerfile").read_text()
     assert "chown" in dockerfile
     assert "/data" in dockerfile
+
+
+def test_dockerfile_packages_assets():
+    """Dockerfile should copy assets/ into the image at an assets destination."""
+    dockerfile = Path("Dockerfile").read_text()
+    copy_commands = [
+        line.split()
+        for line in dockerfile.splitlines()
+        if line.strip().startswith("COPY ")
+    ]
+
+    def asset_basename(token):
+        return token.rstrip("/").rsplit("/", 1)[-1]
+
+    assert any(
+        asset_basename(command[-1]) == "assets"
+        and any(
+            asset_basename(source) == "assets" for source in command[1:-1]
+        )
+        for command in copy_commands
+    )
+
+
+def test_assets_present_in_repo():
+    """Tracked PNG assets must exist in the repo for the image to serve them."""
+    for name in ("icon-192.png", "icon-512.png", "miso-gallery-logo.png"):
+        asset = Path("assets") / name
+        assert asset.exists(), f"assets/{name} is missing"
