@@ -112,7 +112,7 @@ def test_dockerfile_chowns_data():
 
 
 def test_dockerfile_packages_assets():
-    """Dockerfile should copy the assets/ directory into the image."""
+    """Dockerfile should copy assets/ into the image at an assets destination."""
     dockerfile = Path("Dockerfile").read_text()
     copy_commands = [
         line.split()
@@ -120,8 +120,14 @@ def test_dockerfile_packages_assets():
         if line.strip().startswith("COPY ")
     ]
 
+    def asset_basename(token):
+        return token.rstrip("/").rsplit("/", 1)[-1]
+
     assert any(
-        "assets/" in command[1:-1] or "assets" in command[1:-1]
+        asset_basename(command[-1]) == "assets"
+        and any(
+            asset_basename(source) == "assets" for source in command[1:-1]
+        )
         for command in copy_commands
     )
 
