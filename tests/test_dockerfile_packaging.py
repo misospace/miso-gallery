@@ -1,3 +1,4 @@
+import fnmatch
 import re
 from pathlib import Path
 
@@ -109,3 +110,55 @@ def test_dockerfile_chowns_data():
     dockerfile = Path("Dockerfile").read_text()
     assert "chown" in dockerfile
     assert "/data" in dockerfile
+
+
+def test_dockerfile_packages_assets():
+    """Dockerfile should copy assets/ into the image at an assets destination."""
+    dockerfile = Path("Dockerfile").read_text()
+    copy_commands = [
+        line.split()
+        for line in dockerfile.splitlines()
+        if line.strip().startswith("COPY ")
+    ]
+
+    def asset_basename(token):
+        return token.rstrip("/").rsplit("/", 1)[-1]
+
+    assert any(
+        asset_basename(command[-1]) == "assets"
+        and any(
+            asset_basename(source) == "assets" for source in command[1:-1]
+        )
+        for command in copy_commands
+    )
+
+
+def test_assets_present_in_repo():
+    """Tracked PNG assets must exist in the repo for the image to serve them."""
+    for name in ("icon-192.png", "icon-512.png", "miso-gallery-logo.png"):
+        asset = Path("assets") / name
+        assert asset.exists(), f"assets/{name} is missing"
+
+
+def test_dockerignore_does_not_exclude_assets():
+    """.dockerignore must not exclude assets/ from the build context.
+
+    Excluding assets/ would re-break issue #502: /favicon.ico returns 204
+    and /assets/icon-192.png, /assets/icon-512.png return 404 in the built
+    image.
+    """
+    dockerignore = Path(".dockerignore")
+    assert dockerignore.exists(), ".dockerignore is missing"
+
+    probes = ("assets", "assets/icon-192.png")
+    for line in dockerignore.read_text().splitlines():
+        pattern = line.strip()
+        if not pattern or pattern.startswith("#"):
+            continue
+        if pattern.startswith("!"):
+            continue
+        normalized = pattern.lstrip("/").rstrip("/")
+        assert not any(fnmatch.fnmatch(probe, normalized) for probe in probes), (
+            f".dockerignore excludes assets/ from the build context ({line!r}); "
+            "this would re-break issue #502 (favicon 204 / manifest icons 404)"
+        )

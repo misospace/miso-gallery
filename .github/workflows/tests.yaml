@@ -85,6 +85,40 @@ jobs:
           docker logs gallery || true
           curl -f http://localhost:5000/ || exit 1
 
+      - name: Verify asset endpoints in built image
+        run: |
+          for path in /favicon.ico /assets/icon-192.png /assets/icon-512.png; do
+            response_file=$(mktemp)
+            if ! status_and_type=$(curl -sS -o "$response_file" -w '%{http_code} %{content_type}' "http://localhost:5000${path}"); then
+              echo "::error::Asset endpoint ${path} request failed"
+              docker logs gallery || true
+              exit 1
+            fi
+            status=${status_and_type%% *}
+            content_type=${status_and_type#* }
+            body_size=$(wc -c < "$response_file")
+            if [ "$status" != "200" ]; then
+              echo "::error::Asset endpoint ${path} returned status ${status} (expected 200)"
+              docker logs gallery || true
+              exit 1
+            fi
+            case "$content_type" in
+              image/*) ;;
+              *)
+                echo "::error::Asset endpoint ${path} returned Content-Type ${content_type} (expected image/*)"
+                docker logs gallery || true
+                exit 1
+                ;;
+            esac
+            if [ "$body_size" -le 0 ]; then
+              echo "::error::Asset endpoint ${path} returned an empty body (expected non-empty)"
+              docker logs gallery || true
+              exit 1
+            fi
+            echo "OK: ${path} -> ${status}, ${content_type}, ${body_size} bytes"
+            rm -f "$response_file"
+          done
+
       - name: Cleanup
         if: always()
         run: docker rm -f gallery || true
