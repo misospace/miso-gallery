@@ -269,3 +269,26 @@ def test_upload_batch_skips_warning_image_and_stores_small_image(monkeypatch, tm
     assert small.exists()
     assert small.read_bytes() == _PNG
     assert not (data_dir / "input" / "bomb.png").exists()
+
+
+def test_upload_batch_valid_first_then_warning_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+
+    resp = client.post(
+        "/upload",
+        data={
+            "csrf_token": csrf,
+            "files": [
+                (io.BytesIO(_PNG), "small.png"),
+                (io.BytesIO(_warning_range_png()), "bomb.png"),
+            ],
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    small = data_dir / "input" / "small.png"
+    assert small.exists()
+    assert small.read_bytes() == _PNG
+    assert not (data_dir / "input" / "bomb.png").exists()
