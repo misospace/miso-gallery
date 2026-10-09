@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from conftest import _MINIMAL_PNG, build_client
 
@@ -17,6 +18,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 _PNG = _MINIMAL_PNG
+
+
+def _warning_range_png() -> bytes:
+    """Valid 16x10 PNG (160 px): above MAX_IMAGE_PIXELS=100, at or below 2x it."""
+    buf = io.BytesIO()
+    Image.new("RGB", (16, 10)).save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _local_client(monkeypatch, tmp_path, extra_env=None):
@@ -224,3 +232,63 @@ def test_upload_dir_symlink_outside_data_folder_fails_at_startup(monkeypatch, tm
 
     with pytest.raises(ValueError, match="UPLOAD_DIR must resolve within DATA_FOLDER"):
         _local_client(monkeypatch, tmp_path, extra_env={"UPLOAD_DIR": str(data_dir / "input")})
+
+
+def test_upload_rejects_decompression_bomb_warning_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+
+    resp = client.post(
+        "/upload",
+        data={"csrf_token": csrf, "files": (io.BytesIO(_warning_range_png()), "bomb.png")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 422
+    assert not (data_dir / "input" / "bomb.png").exists()
+
+
+def test_upload_batch_skips_warning_image_and_stores_small_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+
+    resp = client.post(
+        "/upload",
+        data={
+            "csrf_token": csrf,
+            "files": [
+                (io.BytesIO(_warning_range_png()), "bomb.png"),
+                (io.BytesIO(_PNG), "small.png"),
+            ],
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    small = data_dir / "input" / "small.png"
+    assert small.exists()
+    assert small.read_bytes() == _PNG
+    assert not (data_dir / "input" / "bomb.png").exists()
+
+
+def test_upload_batch_valid_first_then_warning_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+
+    resp = client.post(
+        "/upload",
+        data={
+            "csrf_token": csrf,
+            "files": [
+                (io.BytesIO(_PNG), "small.png"),
+                (io.BytesIO(_warning_range_png()), "bomb.png"),
+            ],
+        },
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    small = data_dir / "input" / "small.png"
+    assert small.exists()
+    assert small.read_bytes() == _PNG
+    assert not (data_dir / "input" / "bomb.png").exists()
