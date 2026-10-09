@@ -1437,7 +1437,7 @@ def _is_valid_upload_content(file, suffix: str) -> bool:
         if suffix in (".mp4", ".mov"):
             return len(header) >= 16 and header[4:8] == b"ftyp" and b"moov" in header[8:]
         return len(header) >= 8 and header.startswith(b"\x1a\x45\xdf\xa3") and b"webm" in header.lower()
-    except (OSError, SyntaxError, UnidentifiedImageError, ValueError, Image.DecompressionBombError):
+    except (OSError, SyntaxError, UnidentifiedImageError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
         return False
     finally:
         stream.seek(0)
