@@ -3,8 +3,8 @@ from unittest.mock import patch
 
 from PIL import Image
 
-from app import _FOLDER_COVER_MAX_SIZE, folder_cover_rel_path
 from conftest import build_client
+from thumbnails import _FOLDER_COVER_MAX_SIZE, folder_cover_rel_path
 
 
 def _build_folder_client(monkeypatch, tmp_path, auto_covers: bool):
@@ -116,7 +116,7 @@ def test_folder_cover_cache_lru_eviction(monkeypatch, tmp_path):
     }
     client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none", extra_env=extra_env)
 
-    from app import _FOLDER_COVER_CACHE as cache
+    from thumbnails import _FOLDER_COVER_CACHE as cache
 
     cache.clear()
 
@@ -186,7 +186,7 @@ def test_folder_cover_null_byte_path(monkeypatch, tmp_path):
     }
     build_client(monkeypatch, tmp_path, auth_type="none", extra_env=extra_env)
 
-    from app import _FOLDER_COVER_CACHE as cache
+    from thumbnails import _FOLDER_COVER_CACHE as cache
 
     cache.clear()
 

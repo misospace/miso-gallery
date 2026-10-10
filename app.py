@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import heapq
 import html
@@ -63,6 +62,16 @@ from security import (
     validate_csrf,
 )
 from tag_store import TagStore
+from thumbnails import (
+    batch_remove_thumbnails,
+    ensure_thumbnail_cache_dir,
+    folder_cover_rel_path,
+    generate_thumbnail,
+    load_env_config,
+    remove_thumbnail_cache_for,
+    run_thumbnail_integrity_check,
+    thumbnail_filename,
+)
 from trash import (
     dir_size,
     empty_trash,
@@ -71,6 +80,11 @@ from trash import (
     purge_old_trash,
     restore_from_trash,
 )
+
+# The thumbnail/folder-cover module reads its GALLERY_* settings at import
+# time; refresh them on every app import so reloading app (as the test
+# bootstrap does) observes per-run environment overrides.
+load_env_config()
 
 # Load service worker from external file (extracted from app.py)
 SERVICE_WORKER_PATH = os.path.join(os.path.dirname(__file__), "templates", "service-worker.js")
@@ -226,7 +240,6 @@ def log_security_event(event: str, outcome: str, *, request_id: str = "", **fiel
 
 # Configure OAuth for OIDC if enabled
 configure_oauth(app)
-THUMBNAIL_MAX_SIZE = 400
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 VIDEO_EXTENSIONS = (".gif", ".mp4", ".webm", ".mov")
 FAVICON_URL = os.environ.get("FAVICON_URL", "").strip()
@@ -259,11 +272,7 @@ _VALID_TASK_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 # semaphore instance because module-level state is per-process.
 WEBHOOK_TASK_MAX_CONCURRENT = 1
 _webhook_task_slot = threading.BoundedSemaphore(WEBHOOK_TASK_MAX_CONCURRENT)
-AUTO_FOLDER_COVERS_ENABLED = os.environ.get("GALLERY_AUTO_FOLDER_COVERS", "false").strip().lower() in {"1", "true", "yes", "on"}
-FOLDER_COVER_CACHE_TTL = max(int(os.environ.get("GALLERY_COVER_CACHE_TTL", "3600") or 3600), 0)
 WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
-_FOLDER_COVER_CACHE: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
-_FOLDER_COVER_MAX_SIZE = 1024
 
 # Bounded pagination defaults for gallery endpoints
 GALLERY_PAGE_DEFAULT = 50
@@ -355,10 +364,6 @@ def _render_task_command(template: str, params: dict[str, object]) -> str:
     return rendered
 
 
-def ensure_thumbnail_cache_dir() -> None:
-    THUMBNAIL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-
 def sanitize_rel_path(rel_path: str) -> str:
     normalized = os.path.normpath(rel_path).replace("\\", "/").lstrip("/")
     if normalized.startswith(".."):
@@ -368,167 +373,6 @@ def sanitize_rel_path(rel_path: str) -> str:
 
 def source_file_path(rel_path: str) -> Path:
     return DATA_FOLDER / sanitize_rel_path(rel_path)
-
-
-def thumbnail_filename(rel_path: str, source_path: Path) -> str:
-    file_stat = source_path.stat()
-    safe_name = rel_path.replace("/", "__")
-    return f"{safe_name}.{file_stat.st_mtime_ns}.{file_stat.st_size}.jpg"
-
-
-def generate_thumbnail(source_path: Path, output_path: Path) -> None:
-    with Image.open(source_path) as img:
-        img = img.convert("RGB")
-        img.thumbnail((THUMBNAIL_MAX_SIZE, THUMBNAIL_MAX_SIZE), Image.Resampling.LANCZOS)
-        img.save(output_path, format="JPEG", quality=85, optimize=True)
-
-
-def batch_remove_thumbnails(rel_paths: list[str]) -> None:
-    """Remove all cached thumbnails matching any of the given rel_paths in a single dir walk.
-
-    Replaces per-path loops (issue #249). One call == one `iterdir()` regardless
-    of how many paths are passed.
-    """
-    if not rel_paths:
-        return
-    ensure_thumbnail_cache_dir()
-    prefixes = {
-        sanitize_rel_path(rel_path).replace("/", "__") + "."
-        for rel_path in rel_paths
-    }
-    for cached_file in THUMBNAIL_CACHE_DIR.iterdir():
-        if cached_file.is_symlink():
-            # #445: never unlink through a symlink (a stale bind-mount / NFS
-            # target would be deleted as the app user).
-            continue
-        name = cached_file.name
-        if any(name.startswith(prefix) for prefix in prefixes):
-            with contextlib.suppress(OSError):
-                cached_file.unlink()
-
-
-def remove_thumbnail_cache_for(rel_path: str) -> None:
-    """Remove cached thumbnails for a single rel_path.
-
-    Thin wrapper over batch_remove_thumbnails so existing single-path callers
-    keep working; bulk callers should call batch_remove_thumbnails directly.
-    """
-    batch_remove_thumbnails([rel_path])
-
-
-def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
-    """Check thumbnails and regenerate missing/invalid entries on demand.
-
-    Args:
-        limit: Maximum files to scan. Defaults to GALLERY_SCAN_LIMIT.
-    """
-    effective_limit = limit if limit is not None else GALLERY_SCAN_LIMIT
-
-    ensure_thumbnail_cache_dir()
-    excluded_dirs = {THUMBNAIL_CACHE_DIR.name, ".trash"}
-    stats = {"checked": 0, "regenerated": 0, "failed": 0}
-
-    for item in DATA_FOLDER.rglob("*"):
-        if item.is_symlink():
-            # #445: never generate a thumbnail from a symlink target
-            # (arbitrary file content outside DATA_FOLDER).
-            continue
-        if not item.is_file() or item.suffix.lower() not in IMAGE_EXTENSIONS:
-            continue
-        if item.name.startswith("."):
-            continue
-
-        rel_path = item.relative_to(DATA_FOLDER)
-        if any(part in excluded_dirs or part.startswith(".") for part in rel_path.parts):
-            continue
-
-        rel_posix = rel_path.as_posix()
-        stats["checked"] += 1
-        if stats["checked"] > effective_limit:
-            break
-
-        cached_name = thumbnail_filename(rel_posix, item)
-        cached_path = THUMBNAIL_CACHE_DIR / cached_name
-
-        needs_regen = not cached_path.exists()
-        if not needs_regen:
-            try:
-                with Image.open(cached_path) as thumb_img:
-                    thumb_img.verify()
-            except (UnidentifiedImageError, OSError):
-                needs_regen = True
-
-        if not needs_regen:
-            continue
-
-        try:
-            generate_thumbnail(item, cached_path)
-            stats["regenerated"] += 1
-        except (UnidentifiedImageError, OSError):
-            stats["failed"] += 1
-
-    return stats
-
-
-def folder_cover_rel_path(folder_rel_path: str) -> str | None:
-    """Return a cached auto-cover image rel path for a folder, if available."""
-
-    if not AUTO_FOLDER_COVERS_ENABLED:
-        return None
-
-    now = time.time()
-    cached = _FOLDER_COVER_CACHE.get(folder_rel_path)
-    if cached and now - cached[0] < FOLDER_COVER_CACHE_TTL:
-        # Move to end (most recently used) for LRU ordering.
-        _FOLDER_COVER_CACHE.move_to_end(folder_rel_path)
-        cached_rel = cached[1]
-        if cached_rel is None:
-            # Short-circuit: folder was previously scanned and had no media.
-            return None
-        # Re-validate the backing file still exists and resolves within DATA_FOLDER.
-        try:
-            cached_path = (DATA_FOLDER / sanitize_rel_path(cached_rel)).resolve()
-            cached_path.relative_to(DATA_FOLDER.resolve())
-        except ValueError:
-            # Resolved path escapes DATA_FOLDER (e.g. symlink) — treat as missing.
-            _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
-            return None
-        if cached_path.exists() and cached_path.is_file() and cached_path.suffix.lower() in IMAGE_EXTENSIONS:
-            return cached_rel
-        # Stale entry — fall through to re-scan.
-
-    folder_path = DATA_FOLDER / sanitize_rel_path(folder_rel_path) if folder_rel_path else DATA_FOLDER
-    if not folder_path.exists() or not folder_path.is_dir():
-        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
-        while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
-            _FOLDER_COVER_CACHE.popitem(last=False)
-        return None
-
-    # Delegate to iter_gallery_items for bounded, exclusion-aware scanning.
-    items = iter_gallery_items(kind="media", limit=1, root=folder_path)
-
-    if not items:
-        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
-        while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
-            _FOLDER_COVER_CACHE.popitem(last=False)
-        return None
-
-    # Validate the discovered cover resolves within DATA_FOLDER.
-    try:
-        resolved = items[0].resolve()
-        resolved.relative_to(DATA_FOLDER.resolve())
-    except ValueError:
-        # Symlink or other escape — treat as no cover.
-        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
-        while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
-            _FOLDER_COVER_CACHE.popitem(last=False)
-        return None
-
-    cover_rel = items[0].relative_to(DATA_FOLDER).as_posix()
-    _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
-    while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
-        _FOLDER_COVER_CACHE.popitem(last=False)
-    return cover_rel
 
 
 def format_size(size: int) -> str:

@@ -3,6 +3,7 @@ import sys
 
 from PIL import Image
 
+import thumbnails
 from conftest import build_client
 
 
@@ -80,7 +81,7 @@ def test_batch_remove_thumbnails_skips_symlinks(monkeypatch, tmp_path):
     app_module = sys.modules["app"]
 
     cache = data_dir / ".thumb_cache"
-    monkeypatch.setattr(app_module, "ensure_thumbnail_cache_dir", lambda: None)
+    monkeypatch.setattr(thumbnails, "ensure_thumbnail_cache_dir", lambda: None)
 
     # Stale symlink simulating a bind-mount / NFS target
     external = tmp_path / "nfs_target.jpg"
