@@ -159,6 +159,15 @@ _route_limit_overrides: dict[str, RateLimitConfig] | None = None
 _primary_limiter: RedisRateLimiter | InMemoryRateLimiter | None = None
 
 
+def _allow_inmemory_opt_in() -> bool:
+    """True when the operator explicitly opted in to the per-process in-memory limiter."""
+    return os.environ.get("ALLOW_INMEMORY_RATE_LIMIT", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
 def _build_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
     redis_url = os.environ.get("RATE_LIMIT_REDIS_URL") or os.environ.get("REDIS_URL")
     redis_prefix = os.environ.get("RATE_LIMIT_PREFIX", "miso-gallery:ratelimit")
@@ -170,11 +179,7 @@ def _build_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
         # deployment that looks production-shaped so the operator cannot ship the
         # weak default by accident. The explicit opt-out below is intended only for
         # local single-worker development (see entrypoint.sh / README).
-        allow_inmemory = os.environ.get("ALLOW_INMEMORY_RATE_LIMIT", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        )
+        allow_inmemory = _allow_inmemory_opt_in()
         workers_raw = os.environ.get("WEB_CONCURRENCY", "").strip()
         workers = _to_positive_int(workers_raw, 1)
         multi_worker = workers > 1
@@ -214,11 +219,7 @@ def _build_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
         # in-memory fallback: that is exactly the weak configuration this guard
         # is meant to stop. The operator must fix the Redis configuration or
         # explicitly opt out for a single-worker dev setup.
-        if os.environ.get("ALLOW_INMEMORY_RATE_LIMIT", "").strip().lower() in (
-            "1",
-            "true",
-            "yes",
-        ):
+        if _allow_inmemory_opt_in():
             logger.warning(
                 "Failed to initialize Redis rate limiter (%s); "
                 "ALLOW_INMEMORY_RATE_LIMIT=1 set, using in-memory fallback",
@@ -356,7 +357,13 @@ def _effective_config(endpoint: str, default_max_requests: int, default_window: 
 
 
 def rate_limit(max_requests: int = 30, window: int = 60):
-    """Rate limit decorator with Redis/Dragonfly backend and in-memory fallback."""
+    """Rate limit decorator with Redis/Dragonfly backend.
+
+    When the primary limiter raises at runtime, the request is denied with a 503
+    (fail closed) so a broken shared limiter can never silently widen the
+    effective quota. The per-process in-memory fallback is only used when the
+    operator has explicitly opted in via ALLOW_INMEMORY_RATE_LIMIT.
+    """
 
     default_max = _to_positive_int(max_requests, 30)
     default_window = _to_positive_int(window, 60)
@@ -370,9 +377,33 @@ def rate_limit(max_requests: int = 30, window: int = 60):
 
             try:
                 allowed = get_primary_limiter().allow(key, config.max_requests, config.window)
-            except Exception as exc:  # pragma: no cover - runtime resilience
-                logger.warning("Primary limiter failed (%s); using in-memory fallback", exc)
-                allowed = FALLBACK_LIMITER.allow(key, config.max_requests, config.window)
+            except Exception as exc:
+                if _allow_inmemory_opt_in():
+                    logger.warning("Primary limiter failed (%s); using in-memory fallback", exc)
+                    allowed = FALLBACK_LIMITER.allow(key, config.max_requests, config.window)
+                else:
+                    # SECURITY: do NOT silently degrade to the per-process fallback.
+                    # With multiple workers it would multiply the effective quota;
+                    # deny the request instead and tell the operator how to fix it.
+                    logger.error(
+                        "Primary rate limiter failed (%s); denying this request "
+                        "fail-closed. The per-process in-memory fallback is NOT "
+                        "being used because ALLOW_INMEMORY_RATE_LIMIT is not set. "
+                        "Fix REDIS_URL / RATE_LIMIT_REDIS_URL, or set "
+                        "ALLOW_INMEMORY_RATE_LIMIT=1 with WEB_CONCURRENCY=1 for "
+                        "single-worker local development.",
+                        exc,
+                    )
+                    return (
+                        jsonify(
+                            {
+                                "error": "Rate limiting unavailable",
+                                "max_requests": config.max_requests,
+                                "window": config.window,
+                            }
+                        ),
+                        503,
+                    )
 
             if not allowed:
                 return (

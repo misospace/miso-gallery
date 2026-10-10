@@ -49,6 +49,9 @@ def build_client(monkeypatch, tmp_path, *, api_keys: str = TEST_API_KEY, auth_ty
     - OIDC_ENABLED     → "false"
     - SECRET_KEY       → TEST_SECRET
     - LLM_API_KEYS     → api_keys param (pass None to leave unset)
+    - ALLOW_INMEMORY_RATE_LIMIT → "1" (single-process test deployment opts into the
+      in-memory limiter, matching the documented dev config)
+    - WEB_CONCURRENCY  → "1"
 
     extra_env: optional dict of additional env vars set before app import
     (e.g. GALLERY_AUTO_FOLDER_COVERS, WEBHOOK_ENABLED, OIDC_ISSUER, etc.)
@@ -82,6 +85,14 @@ def build_client(monkeypatch, tmp_path, *, api_keys: str = TEST_API_KEY, auth_ty
     # Only set OIDC_ENABLED to false if not already set via extra_env
     if extra_env is None or "OIDC_ENABLED" not in extra_env:
         monkeypatch.setenv("OIDC_ENABLED", "false")
+    # Single-process test deployment opts into the in-memory rate limiter, matching
+    # the documented dev configuration. The fail-closed runtime guard in
+    # security.rate_limit must not deny requests in tests, so default both vars here.
+    # Only set when not already present in extra_env so a caller can override.
+    if extra_env is None or "ALLOW_INMEMORY_RATE_LIMIT" not in extra_env:
+        monkeypatch.setenv("ALLOW_INMEMORY_RATE_LIMIT", "1")
+    if extra_env is None or "WEB_CONCURRENCY" not in extra_env:
+        monkeypatch.setenv("WEB_CONCURRENCY", "1")
     monkeypatch.setenv("SECRET_KEY", TEST_SECRET)
 
     if api_keys is None:

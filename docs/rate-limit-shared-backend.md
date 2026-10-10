@@ -10,7 +10,7 @@ Why:
 - Consistent throttling decisions across multiple app replicas
 - Better protection for auth-sensitive endpoints during scale-out
 - Already supported in code (`RATE_LIMIT_REDIS_URL`, `RATE_LIMIT_PREFIX`)
-- Safe fallback to in-memory limiter when Redis is unavailable
+- Fail-closed: when the shared limiter fails, requests are denied with 503; the in-memory limiter is only used with the explicit `ALLOW_INMEMORY_RATE_LIMIT=1` + `WEB_CONCURRENCY=1` dev opt-in
 
 ## Target configuration
 
@@ -56,5 +56,5 @@ Optional:
 ## Rollback
 
 1. Remove `RATE_LIMIT_REDIS_URL` from deployment env.
-2. Redeploy; app falls back to in-memory limiter automatically.
+2. Redeploy; the app now refuses to start without a Redis URL. To run on the in-memory limiter instead, explicitly set `ALLOW_INMEMORY_RATE_LIMIT=1` and `WEB_CONCURRENCY=1` (single worker — the per-worker quota is not shared across workers).
 3. Investigate Redis connectivity or script errors before retrying migration.
