@@ -1,6 +1,6 @@
 """Regression tests for the batched thumbnail cache cleanup helper (issue #249)."""
 
-import app as app_module
+import thumbnails
 
 
 def _make_cached_file(cache_dir, safe_name, suffix):
@@ -9,11 +9,13 @@ def _make_cached_file(cache_dir, safe_name, suffix):
 
 
 def test_batch_remove_thumbnails_removes_all_matching_paths_in_one_walk(monkeypatch, tmp_path):
+    import app as app_module
+
     cache = tmp_path / "thumbs"
     cache.mkdir()
     monkeypatch.setattr(app_module, "THUMBNAIL_CACHE_DIR", cache)
     # ensure_thumbnail_cache_dir() is a no-op for these tests — the cache already exists.
-    monkeypatch.setattr(app_module, "ensure_thumbnail_cache_dir", lambda: None)
+    monkeypatch.setattr(thumbnails, "ensure_thumbnail_cache_dir", lambda: None)
 
     target_a = _make_cached_file(cache, "cats__cat", "111")
     target_b = _make_cached_file(cache, "dogs__dog", "222")
@@ -31,20 +33,24 @@ def test_batch_remove_thumbnails_removes_all_matching_paths_in_one_walk(monkeypa
 
 
 def test_batch_remove_thumbnails_noop_on_empty(monkeypatch, tmp_path):
+    import app as app_module
+
     cache = tmp_path / "thumbs"
     cache.mkdir()
     monkeypatch.setattr(app_module, "THUMBNAIL_CACHE_DIR", cache)
-    monkeypatch.setattr(app_module, "ensure_thumbnail_cache_dir", lambda: None)
+    monkeypatch.setattr(thumbnails, "ensure_thumbnail_cache_dir", lambda: None)
     # Must not raise even when the path list is empty or the cache is empty.
     app_module.batch_remove_thumbnails([])
     app_module.batch_remove_thumbnails(["any/path"])
 
 
 def test_remove_thumbnail_cache_for_delegates_to_batch(monkeypatch, tmp_path):
+    import app as app_module
+
     cache = tmp_path / "thumbs"
     cache.mkdir()
     monkeypatch.setattr(app_module, "THUMBNAIL_CACHE_DIR", cache)
-    monkeypatch.setattr(app_module, "ensure_thumbnail_cache_dir", lambda: None)
+    monkeypatch.setattr(thumbnails, "ensure_thumbnail_cache_dir", lambda: None)
 
     target = _make_cached_file(cache, "cats__cat", "111")
     other = _make_cached_file(cache, "dogs__dog", "222")
