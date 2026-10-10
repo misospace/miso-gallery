@@ -382,7 +382,7 @@ Releases are cut by the standing release-please PR. Do not bump versions by hand
 Tests workflow additionally fails any PR where `pyproject.toml` and `APP_VERSION`
 drift apart.
 
-**Dependency invariant:** `requirements.txt` is the pinned install manifest consumed by the Dockerfile and CI; `pyproject.toml` `[project.dependencies]` mirrors those pins as ranges whose lower bound equals the pinned version. The Tests workflow fails any PR where the two disagree (a package present in only one, or a floor that no longer matches the pin). Renovate bumps `requirements.txt`; update `pyproject.toml` in the same PR. `pip` is exempt — it is pinned only so `pip-audit` does not flag pip itself.
+**Dependency invariant:** `requirements.txt` is the install manifest consumed by the Dockerfile and CI; it pins (or floors) runtime versions. `pyproject.toml` `[project.dependencies]` mirrors those pins as ranges whose lower bound equals the pinned version. The Tests workflow fails any PR where the two disagree (a package present in only one, or a floor that no longer matches the pin). Renovate bumps `requirements.txt`; update `pyproject.toml` in the same PR. `pip` is exempt — it is pinned only so `pip-audit` does not flag pip itself.
 
 > The legacy "Manual Release" / "Publish Release" workflows were removed; they predate
 > release-please and could never complete under the current flow. Use the release-please

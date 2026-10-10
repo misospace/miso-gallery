@@ -21,6 +21,17 @@ def write_manifests(tmp_path, dependencies, requirements):
     return pyproject, requirements_file
 
 
+def write_string_manifest(tmp_path, dependencies, requirements):
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        "[project]\nname = 'test-project'\n"
+        f"dependencies = {dependencies!r}\n"
+    )
+    requirements_file = tmp_path / "requirements.txt"
+    requirements_file.write_text(requirements)
+    return pyproject, requirements_file
+
+
 def test_repo_manifests_are_consistent():
     assert MODULE.check_consistency(REPO / "pyproject.toml", REPO / "requirements.txt") == []
 
@@ -71,6 +82,50 @@ def test_lower_bound_parsing():
     assert MODULE.lower_bound(">=41.0.0") == (41, 0, 0)
     assert MODULE.lower_bound(">=3.1.3,<4") == (3, 1, 3)
     assert MODULE.lower_bound("<4") is None
+
+
+def test_lower_bound_out_of_order():
+    assert MODULE.lower_bound("<4,>=3.1.3") == (3, 1, 3)
+
+
+def test_equivalent_short_and_long_versions(tmp_path):
+    pyproject, requirements = write_manifests(
+        tmp_path, ["Flask>=3.1,<4"], "flask==3.1.0\n"
+    )
+    assert MODULE.check_consistency(pyproject, requirements) == []
+
+
+def test_extras_are_ignored(tmp_path):
+    pyproject, requirements = write_manifests(
+        tmp_path, ["Flask[async]>=3.1.3,<4"], "flask[bcrypt]==3.1.3\n"
+    )
+    assert MODULE.check_consistency(pyproject, requirements) == []
+
+
+def test_environment_markers_are_ignored(tmp_path):
+    pyproject, requirements = write_manifests(
+        tmp_path,
+        ["requests>=2.34.2,<3"],
+        'requests==2.34.2; python_version >= "3.8"\n',
+    )
+    assert MODULE.check_consistency(pyproject, requirements) == []
+
+
+def test_string_form_dependencies(tmp_path):
+    pyproject, requirements = write_string_manifest(
+        tmp_path, "Flask>=3.1.3,<4", "flask==3.1.3\n"
+    )
+    assert MODULE.check_consistency(pyproject, requirements) == []
+
+
+def test_pip_in_pyproject_is_flagged(tmp_path):
+    pyproject, requirements = write_manifests(
+        tmp_path,
+        ["Flask>=3.1.3,<4", "pip>=26.1.2"],
+        "flask==3.1.3\npip>=26.1.2\n",
+    )
+    problems = MODULE.check_consistency(pyproject, requirements)
+    assert any("pip" in problem for problem in problems)
 
 
 def test_comments_and_blanks_ignored(tmp_path):
