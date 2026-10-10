@@ -45,6 +45,9 @@ jobs:
           fi
           echo "OK: app.py, pyproject.toml, and .release-please-manifest.json all report version $APP_VER"
 
+      - name: Verify pyproject.toml and requirements.txt dependencies agree
+        run: python3 scripts/check_dependency_consistency.py
+
       - name: Run unit tests
         run: |
           python -m coverage run -m pytest -q
