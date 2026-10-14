@@ -462,7 +462,18 @@ class TestRestoreConsumesTrashedDirectory:
         assert unknown == []
 
     def test_cross_device_directory_restore_fallback_consumes_source(self, monkeypatch, tmp_path):
-        """The copytree fallback in restore must consume the source like rename."""
+        """The copytree fallback in restore must consume the source like rename.
+
+        The fallback now stages the copy on the *destination* filesystem
+        (under ``dest.parent``); if it staged on the source filesystem
+        (under ``td``), the staged ``stage.rename(dest)`` would cross the
+        same boundary that just failed the original ``item.rename(dest)``
+        and the fallback could never complete. This test fails on the
+        old staging-on-source implementation: the staged rename is mocked
+        to fail too, so the old code returns False while the new code
+        successfully completes the staged rename and the source-metadata
+        consume.
+        """
         client, data_dir = build_client(monkeypatch, tmp_path)
         folder = self._make_folder(data_dir)
 
@@ -472,9 +483,20 @@ class TestRestoreConsumesTrashedDirectory:
         meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
 
         real_rename = trash.Path.rename
+        trash_root_resolved = trash.trash_dir(data_dir).resolve()
 
         def cross_device_rename(path, destination):
-            if path == trash_item:
+            # Simulate a true cross-filesystem restore: any rename whose
+            # source lives under the trash filesystem fails with EXDEV,
+            # including the staged rename if the stage is (incorrectly)
+            # placed back under td. Renames whose source is under the
+            # destination filesystem — which is what the new staging
+            # produces — succeed.
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return real_rename(path, destination)
+            if trash_root_resolved in resolved.parents or resolved == trash_root_resolved:
                 raise OSError("cross-device")
             return real_rename(path, destination)
 
@@ -521,8 +543,11 @@ class TestRestoreConsumesTrashedDirectory:
         entries = list_trash(data_dir)
         assert len(entries) == 1
         assert entries[0]["original"] != "unknown"
-        # No staging directory left behind after the failed restore.
-        assert list(trash.trash_dir(data_dir).glob(".restore-stage-*")) == []
+        # No staging directory left behind after the failed restore. The
+        # stage lives on the destination filesystem (under dest.parent),
+        # not under the trash root, so scan the whole data folder.
+        stages = [p for p in data_dir.rglob(".restore-stage-*") if p.is_dir()]
+        assert stages == [], f"stage directory leaked: {stages}"
 
     def test_concurrent_restore_does_not_delete_winners_destination(
         self, monkeypatch, tmp_path
@@ -531,9 +556,10 @@ class TestRestoreConsumesTrashedDirectory:
         same entry race, the loser's fallback cleanup must not delete the
         winner's restored directory.
 
-        The cross-device fallback now stages the copy in a private
-        directory under the trash root and only ever rmtree's that stage
-        — never dest. Under the previous code, an unconditional
+        The cross-device fallback now stages the copy on the destination
+        filesystem (under ``dest.parent``) and only ever rmtree's that
+        privately-owned stage — never the function's computed dest.
+        Under the previous code, an unconditional
         ``shutil.rmtree(dest)`` in the copytree failure handler would
         delete any directory that happened to occupy ``dest`` (including
         another concurrent restore's restored media).
@@ -547,7 +573,7 @@ class TestRestoreConsumesTrashedDirectory:
         meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
 
         # Track every rmtree call inside the trash module so we can
-        # prove no cleanup ever targets a destination under data_dir.
+        # prove no cleanup ever targets the function's computed dest.
         rmtree_targets: list[str] = []
         real_rmtree = trash.shutil.rmtree
 
@@ -579,23 +605,30 @@ class TestRestoreConsumesTrashedDirectory:
         # The trash source and metadata must remain for a retry.
         assert trash_item.is_dir()
         assert meta_file.exists()
-        # No .restore-stage-* directory leaks across calls.
-        stages = list(trash.trash_dir(data_dir).glob(".restore-stage-*"))
+        # No .restore-stage-* directory leaks across calls. The stage lives
+        # on the destination filesystem (under dest.parent), not under the
+        # trash root, so scan the whole data folder.
+        stages = [p for p in data_dir.rglob(".restore-stage-*") if p.is_dir()]
         assert stages == [], f"stage directory leaked: {stages}"
 
         # The critical guarantee: no rmtree call ever targeted the
-        # data folder. Under the old code, the failure path would have
-        # rmtree'd the function's computed dest (which is under
-        # data_dir), clobbering a concurrent winner's restored media.
-        trash_root = trash.trash_dir(data_dir).resolve()
+        # destination ``dest``. Under the old code, the failure path
+        # would have rmtree'd the function's computed dest, clobbering
+        # a concurrent winner's restored media. The stage lives on the
+        # destination filesystem (not under the trash root), so the
+        # invariant can no longer be "every rmtree target is inside the
+        # trash root"; it must be the more targeted
+        # "rmtree never targets a path owned by another caller", i.e.
+        # never the function's computed dest.
+        dest_resolved = folder.resolve()
         for target in rmtree_targets:
             try:
                 resolved = Path(target).resolve()
             except OSError:
                 continue
-            assert trash_root in resolved.parents or resolved == trash_root, (
-                f"rmtree targeted {target} which is outside the trash "
-                f"root; this is the data-loss race the staging fix prevents."
+            assert resolved != dest_resolved, (
+                f"rmtree targeted the destination {target}; this is the "
+                f"data-loss race the staging fix prevents."
             )
 
     def test_concurrent_restore_does_not_delete_winners_destination_end_to_end(
@@ -672,8 +705,49 @@ class TestRestoreConsumesTrashedDirectory:
         # remains for a retry).
         assert trash_item.is_dir()
         assert meta_file.exists()
-        # No leftover staging directory.
-        assert list(trash.trash_dir(data_dir).glob(".restore-stage-*")) == []
+        # No leftover staging directory. The stage lives on the
+        # destination filesystem (under dest.parent), not under the
+        # trash root, so scan the whole data folder.
+        stages = [p for p in data_dir.rglob(".restore-stage-*") if p.is_dir()]
+        assert stages == [], f"stage directory leaked: {stages}"
+
+    def test_orphan_restore_stage_reclaimed_by_empty_and_purge(self, monkeypatch, tmp_path):
+        """A ``.restore-stage-*`` directory left behind by a crashed
+        cross-device restore must be reclaimed by ``empty_trash`` and
+        ``purge_old_trash``.
+
+        The stage now lives on the destination filesystem (under
+        ``dest.parent``), not under ``td``, so the normal ``td`` iteration
+        would miss it. The reclaim helper sweeps ``data_folder`` instead.
+        """
+        from trash import empty_trash, purge_old_trash
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        # Simulate an orphan left by a previous crashed cross-device restore.
+        orphan_parent = data_dir / "album"
+        orphan_parent.mkdir()
+        orphan = orphan_parent / ".restore-stage-deadbeef"
+        orphan.mkdir()
+        (orphan / "partial.jpg").write_bytes(b"partial")
+        assert orphan.is_dir()
+
+        empty_trash(data_dir)
+        assert not orphan.exists(), "empty_trash must reclaim orphan stages"
+
+        # Same again under purge_old_trash with a fresh orphan.
+        orphan.mkdir()
+        (orphan / "partial.jpg").write_bytes(b"partial")
+        purge_old_trash(data_dir, retention_days=1)
+        assert not orphan.exists(), "purge_old_trash must reclaim orphan stages"
+
+        # And an orphan at the data folder root, not under a subdir.
+        orphan_root = data_dir / ".restore-stage-abcdef"
+        orphan_root.mkdir()
+        empty_trash(data_dir)
+        assert not orphan_root.exists(), (
+            "empty_trash must reclaim orphan stages at the data folder root"
+        )
 
 
 class TestRestorePathTraversal:
