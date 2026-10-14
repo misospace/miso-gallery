@@ -1,5 +1,62 @@
 # Changelog
 
+## [0.3.0](https://github.com/misospace/miso-gallery/compare/0.2.1...0.3.0) (2026-10-14)
+
+
+### Features
+
+* **container:** update image python (3.14 → 3.15) ([6aa3afa](https://github.com/misospace/miso-gallery/commit/6aa3afa9c39d82fc9ee51c9d7e4b5f7e3848d23e))
+* **container:** update image python (3.14 → 3.15) ([2c28e83](https://github.com/misospace/miso-gallery/commit/2c28e83a7d66b0a3915866c2169854f920f06d71))
+* **deps:** update dependency authlib (1.8.0 → 1.9.1) ([4a8d3ea](https://github.com/misospace/miso-gallery/commit/4a8d3ea92f039f88950df00d101cfc268d740c3b))
+* **deps:** update dependency authlib (1.8.0 → 1.9.1) ([a6ae9c4](https://github.com/misospace/miso-gallery/commit/a6ae9c4fc8848d401f8eda7b7bc72b5cd603415e))
+* **gallery:** show PNG generation metadata in the Details panel ([dbfe90a](https://github.com/misospace/miso-gallery/commit/dbfe90aac864b8f75dfd50ac961f70049de1779e))
+* **gallery:** show PNG generation metadata in the Details panel (issue [#510](https://github.com/misospace/miso-gallery/issues/510)) ([9b323f4](https://github.com/misospace/miso-gallery/commit/9b323f4a0bc2a2356126646b761c9242ae24e006))
+* **upload:** add authenticated in-browser upload button ([289b258](https://github.com/misospace/miso-gallery/commit/289b258cf190962c7aff48a8fba89706628e3814))
+* **upload:** add authenticated in-browser upload button ([9857371](https://github.com/misospace/miso-gallery/commit/98573716e2b300c4b70f8c77f52e523ef7d90953)), closes [#485](https://github.com/misospace/miso-gallery/issues/485)
+
+
+### Bug Fixes
+
+* **auth:** reject AUTH_TYPE=oidc when OIDC env is incomplete ([b2231f9](https://github.com/misospace/miso-gallery/commit/b2231f9922ad12ac758575cb3809ea87564d2d77))
+* **auth:** reject AUTH_TYPE=oidc when OIDC env is incomplete ([c5b5c5b](https://github.com/misospace/miso-gallery/commit/c5b5c5bd1bd38532f02619c949a19669d798ecec)), closes [#449](https://github.com/misospace/miso-gallery/issues/449)
+* **ci:** gate build push on fork detection so fork PRs build green (issue [#509](https://github.com/misospace/miso-gallery/issues/509)) ([d4d3216](https://github.com/misospace/miso-gallery/commit/d4d3216c507451b21a4a95a83cb382d8d93eddde))
+* **ci:** gate build push on fork detection so fork PRs build green (issue [#509](https://github.com/misospace/miso-gallery/issues/509)) ([e970bfc](https://github.com/misospace/miso-gallery/commit/e970bfc9ae64776e0746b7d6fe541b7a96b9e9f2))
+* **deps:** align Authlib minimum with updated runtime pin ([b5e677b](https://github.com/misospace/miso-gallery/commit/b5e677b5ea0ddb6cf674f155489c6bed542e88d6))
+* **docker:** package assets/ in the image and add packaging regression test ([33f9e72](https://github.com/misospace/miso-gallery/commit/33f9e721330ebcec9a4f2c316be6222295868fe8))
+* **docker:** package assets/ in the image and add packaging regression test ([b13e3e0](https://github.com/misospace/miso-gallery/commit/b13e3e0393384e38d28b6ddfbd1cb7c7fe90bf6b)), closes [#502](https://github.com/misospace/miso-gallery/issues/502)
+* **llm:** exclude synthetic root from /api/llm/folders total/has_more ([6289c0b](https://github.com/misospace/miso-gallery/commit/6289c0b4d6c32c86169e957b2b8da4b4e2261d72)), closes [#480](https://github.com/misospace/miso-gallery/issues/480)
+* **llm:** guard post-walk stat/relative_to in LLM read endpoints ([4139697](https://github.com/misospace/miso-gallery/commit/4139697f37bce03117f39dfebef6420f050fc286))
+* **llm:** guard post-walk stat/relative_to in LLM read endpoints ([237075d](https://github.com/misospace/miso-gallery/commit/237075d223af6065abbd657beb0d4581030d9707)), closes [#480](https://github.com/misospace/miso-gallery/issues/480)
+* **security:** fail closed on runtime rate-limiter failure (issue [#508](https://github.com/misospace/miso-gallery/issues/508)) ([82d00ca](https://github.com/misospace/miso-gallery/commit/82d00cabd426ee986409aea92c847b69440c24f4))
+* **security:** fail closed on runtime rate-limiter failure (issue [#508](https://github.com/misospace/miso-gallery/issues/508)) ([e8e7951](https://github.com/misospace/miso-gallery/commit/e8e7951c0ed2560bc08c6a791b525812a7fafd07))
+* **security:** reject symlinks resolving outside DATA_FOLDER in llm_image() ([5e86b4d](https://github.com/misospace/miso-gallery/commit/5e86b4d959de62773ffc7ddbfa7aa8e4f14e05dd)), closes [#447](https://github.com/misospace/miso-gallery/issues/447)
+* **service-worker:** drop nonexistent /assets/style.css and /assets/app.js from CORE_ASSETS ([598c19e](https://github.com/misospace/miso-gallery/commit/598c19e03827314814db52f31d44ac8228a8758a))
+* **service-worker:** drop nonexistent /assets/style.css and /assets/app.js from CORE_ASSETS ([54c4c48](https://github.com/misospace/miso-gallery/commit/54c4c48b0860fe5a6ba75aab2de724e28b4a1290)), closes [#479](https://github.com/misospace/miso-gallery/issues/479)
+* **upload:** harden destination and content validation ([d36a417](https://github.com/misospace/miso-gallery/commit/d36a417c29ff6f90927681cdaf06ebba58cf1e5a))
+* **upload:** reject decompression-bomb warning images instead of 500 ([8e36bbe](https://github.com/misospace/miso-gallery/commit/8e36bbeb2f3181072cafe6ba619d8833630c0663)), closes [#503](https://github.com/misospace/miso-gallery/issues/503)
+* **upload:** reject decompression-bomb warning uploads instead of 500 ([50eb53c](https://github.com/misospace/miso-gallery/commit/50eb53cf901c238c18807ceef6470bdc14032ae8))
+
+
+### Chores
+
+* **ai-review:** upgrade reviewer to v3.2.0 ([c93054f](https://github.com/misospace/miso-gallery/commit/c93054f5d47167f58c8459e774013f334a037cd9))
+* **ai-review:** upgrade reviewer to v3.2.0 ([556ff68](https://github.com/misospace/miso-gallery/commit/556ff6842d871a3ac8b81c048f72eb84ca958c65))
+* **changelog:** dedupe doubled 0.2.1 release-please entries (issue [#496](https://github.com/misospace/miso-gallery/issues/496)) ([83578f9](https://github.com/misospace/miso-gallery/commit/83578f901560e743fe36490bd7900efc1696bd11))
+* **changelog:** dedupe doubled 0.2.1 release-please entries (issue [#496](https://github.com/misospace/miso-gallery/issues/496)) ([4489523](https://github.com/misospace/miso-gallery/commit/4489523b29557d31b7fde2636dfafff1e4141c68))
+* update native loop settings ([29656a4](https://github.com/misospace/miso-gallery/commit/29656a4ee1d4a06f8a9c5fa3d2f8230dd1e2a7b5))
+* update native loop settings ([c99280f](https://github.com/misospace/miso-gallery/commit/c99280fc6e31ea3f6f4fdfe056b7e25a830cc621))
+
+
+### Styles
+
+* **test:** add trailing newline to satisfy ruff W292 in python-lint (issue [#509](https://github.com/misospace/miso-gallery/issues/509)) ([6762b1c](https://github.com/misospace/miso-gallery/commit/6762b1c9d6724e0ebc2432d4c93d86f2e5524459))
+
+
+### Refactors
+
+* **thumbnails:** extract thumbnail and folder-cover logic from app.py (issue [#518](https://github.com/misospace/miso-gallery/issues/518)) ([3fde746](https://github.com/misospace/miso-gallery/commit/3fde746e39c00e2ec472b006bad727f318c41502))
+* **thumbnails:** extract thumbnail and folder-cover logic from app.py (issue [#518](https://github.com/misospace/miso-gallery/issues/518)) ([84b1c86](https://github.com/misospace/miso-gallery/commit/84b1c86cb2ff0a292a709c05814b065552b15d20))
+
 ## [0.2.1](https://github.com/misospace/miso-gallery/compare/0.2.0...0.2.1) (2026-09-05)
 
 
