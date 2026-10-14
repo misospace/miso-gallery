@@ -240,7 +240,23 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                     ts += 1
             else:
                 dest = dest.with_name(f"{dest.stem}_{ts}{dest.suffix}")
-        shutil.copytree(item, dest) if item.is_dir() else item.rename(dest)
+        if item.is_dir():
+            try:
+                # Move consumes the trash source so a successful restore
+                # leaves no orphaned copy behind (matches file semantics).
+                item.rename(dest)
+            except OSError:
+                # Cross-device fallback: copy, then remove the source only
+                # after the copy fully succeeds. On failure, drop the partial
+                # copy and propagate so source and metadata stay recoverable.
+                try:
+                    shutil.copytree(item, dest, symlinks=True)
+                except Exception:
+                    shutil.rmtree(dest, ignore_errors=True)
+                    raise
+                shutil.rmtree(item)
+        else:
+            item.rename(dest)
         if meta_file.exists():
             meta_file.unlink(missing_ok=True)
         return True

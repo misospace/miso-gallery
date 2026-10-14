@@ -393,6 +393,110 @@ class TestTrashRestore:
         assert (nested / "file2.jpg").read_bytes() == content_before["subdir/file2.jpg"]
 
 
+class TestRestoreConsumesTrashedDirectory:
+    """Regression tests for orphaned directory copies after restore (#516).
+
+    A successful directory restore must consume the trash source and its
+    metadata, matching file-restore semantics; a failed restore must keep
+    both recoverable.
+    """
+
+    def _make_folder(self, data_dir):
+        folder = data_dir / "album"
+        folder.mkdir()
+        (folder / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0a")
+        (folder / "sub").mkdir()
+        (folder / "sub" / "b.jpg").write_bytes(b"\xff\xd8\xff\xe0b")
+        return folder
+
+    def test_restore_directory_removes_trash_source_and_metadata(self, monkeypatch, tmp_path):
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_folder(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item = trash.trash_dir(data_dir) / entry
+        meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
+        assert trash_item.is_dir() and meta_file.exists()
+
+        assert restore_from_trash(entry, data_dir) is True
+        assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert (folder / "sub" / "b.jpg").read_bytes() == b"\xff\xd8\xff\xe0b"
+        assert not trash_item.exists()
+        assert not meta_file.exists()
+        assert list_trash(data_dir) == []
+
+    def test_restore_directory_collision_renames_and_consumes_trash_entry(self, monkeypatch, tmp_path):
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_folder(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+
+        # Recreate a colliding destination holding different bytes.
+        folder.mkdir()
+        (folder / "new.txt").write_text("new")
+
+        assert restore_from_trash(entry, data_dir) is True
+        assert (folder / "new.txt").read_text() == "new"
+        renamed = [p for p in data_dir.iterdir() if p.is_dir() and p.name.startswith("album_")]
+        assert len(renamed) == 1
+        assert (renamed[0] / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert (renamed[0] / "sub" / "b.jpg").read_bytes() == b"\xff\xd8\xff\xe0b"
+        assert list_trash(data_dir) == []
+
+    def test_repeated_trash_restore_cycles_do_not_accumulate_entries(self, monkeypatch, tmp_path):
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_folder(data_dir)
+
+        for _ in range(3):
+            assert move_to_trash(folder, data_dir) is True
+            entries = list_trash(data_dir)
+            assert len(entries) == 1
+            assert restore_from_trash(entries[0]["name"], data_dir) is True
+            assert list_trash(data_dir) == []
+            assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+
+        assert not (folder / "sub").is_symlink()
+        unknown = [t for t in list_trash(data_dir) if t["original"] == "unknown"]
+        assert unknown == []
+
+    def test_failed_directory_restore_keeps_source_and_metadata(self, monkeypatch, tmp_path):
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_folder(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item = trash.trash_dir(data_dir) / entry
+        meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
+
+        real_rename = trash.Path.rename
+
+        def cross_device_rename(path, destination):
+            if path == trash_item:
+                raise OSError("cross-device")
+            return real_rename(path, destination)
+
+        def failing_copytree(src, dest, *args, **kwargs):
+            # Leave a partial copy behind, like a real interrupted copytree.
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / "partial.jpg").write_bytes(b"partial")
+            raise OSError("disk full")
+
+        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+        monkeypatch.setattr(trash.shutil, "copytree", failing_copytree)
+
+        assert restore_from_trash(entry, data_dir) is False
+        assert trash_item.is_dir()
+        assert (trash_item / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert meta_file.exists()
+        assert not folder.exists()
+        # The partial copy must not linger at the destination.
+        entries = list_trash(data_dir)
+        assert len(entries) == 1
+        assert entries[0]["original"] != "unknown"
+
+
 class TestRestorePathTraversal:
     """Regression tests for path traversal in restore_from_trash (#382).
 
