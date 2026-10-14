@@ -38,6 +38,21 @@
     .image-details-row { display:flex; justify-content:space-between; gap:12px; }
     .image-details-label { color:#7c7c7c; }
     .image-details-value { text-align:right; word-break:break-word; }
+    .image-metadata { display:grid; gap:6px; padding-top:6px; margin-top:2px; border-top:1px solid #262626; }
+    .image-metadata[hidden] { display:none; }
+    .image-metadata-rolls { display:grid; gap:4px; }
+    .image-metadata-roll-list { display:grid; gap:2px; }
+    .image-metadata-roll { color:#a9a9a9; word-break:break-word; }
+    .image-metadata-prompt summary { cursor:pointer; list-style:none; padding:2px 0; color:#d6d6d6; font-size:.75rem; font-weight:600; }
+    .image-metadata-prompt summary::-webkit-details-marker { display:none; }
+    .image-metadata-prompt summary::after { content:'▾'; float:right; color:#888; }
+    .image-metadata-prompt[open] summary::after { content:'▴'; }
+    .image-metadata-prompt-body { white-space:pre-wrap; word-break:break-word; color:#a9a9a9; padding:4px 0 2px; }
+    .image-metadata-recipe .image-details-value { display:flex; align-items:flex-start; gap:8px; justify-content:flex-end; }
+    .image-metadata-recipe-text { white-space:pre-wrap; }
+    .image-metadata-copy { flex:0 0 auto; background:#2a2a2a; color:#d6d6d6; border:1px solid #444; border-radius:5px; padding:2px 8px; font-size:.7rem; cursor:pointer; }
+    .image-metadata-copy:hover { background:#333; }
+    .image-metadata-copy.is-copied { color:#7bd88f; border-color:#7bd88f; }
     .thumb-preview-btn { position:absolute; bottom:10px; right:10px; background:rgba(245,166,35,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
     .thumb-preview-btn:hover { background:#f5a623; }
     .folder-nav-btn { position:absolute; bottom:10px; left:10px; background:rgba(59,130,246,.95); color:#0d0d0d; border:none; padding:6px 10px; border-radius:5px; cursor:pointer; font-size:.75rem; font-weight:600; opacity:0; transition:opacity .2s; text-decoration:none; display:flex; align-items:center; gap:4px; z-index:3; }
@@ -84,6 +99,7 @@
             <div class="image-details-row"><span class="image-details-label">Path</span><span class="image-details-value">{{ item.rel_path }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Size</span><span class="image-details-value">{{ item.size }}</span></div>
             <div class="image-details-row"><span class="image-details-label">Added</span><span class="image-details-value">{{ item.added }}</span></div>
+            <div class="image-metadata" data-metadata-url="{{ url_for('image_metadata', relpath=item.rel_path) }}" hidden></div>
           </div>
         </details>
         {% if item.folder_url %}
@@ -144,5 +160,6 @@
     if (installBtn) installBtn.hidden = true;
   });
 </script>
+<script src="/assets/image-metadata.js" defer></script>
 </body>
 </html>
