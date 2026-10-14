@@ -52,6 +52,7 @@ from auth import (
     verify_oidc_authorization,
 )
 from health import health, storage_health, storage_health_read, storage_health_write
+from metadata import read_image_metadata
 from security import (
     _client_ip,
     add_security_headers,
@@ -1685,6 +1686,31 @@ def llm_image(relpath: str):
     if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
         return {"error": "Image not found"}, 404
     return media_metadata(media_path)
+
+
+@app.route("/api/image-metadata/<path:relpath>")
+@require_auth
+@rate_limit(max_requests=120, window=60)
+def image_metadata(relpath: str):
+    """Return embedded PNG generation metadata for a single gallery image.
+
+    Read lazily per image (never during enumeration) so the details panel can
+    fill itself in when opened. Guard sequence mirrors llm_image().
+    """
+    if not sanitize_path(relpath):
+        return {"error": "Invalid path"}, 400
+    media_path = source_file_path(relpath)
+    # Reject symlinks under DATA_FOLDER that resolve outside it, for the same
+    # reason as llm_image(): a read-scoped caller must not be able to read the
+    # text chunks of an arbitrary filesystem target.
+    if media_path.is_symlink():
+        try:
+            media_path.resolve().relative_to(DATA_FOLDER.resolve())
+        except ValueError:
+            return {"error": "Image not found"}, 404
+    if not media_path.exists() or not is_media_file(media_path) or is_excluded_gallery_path(media_path):
+        return {"error": "Image not found"}, 404
+    return {"metadata": read_image_metadata(media_path)}
 
 
 @app.route("/api/llm/recent")
