@@ -254,7 +254,18 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                 except Exception:
                     shutil.rmtree(dest, ignore_errors=True)
                     raise
-                shutil.rmtree(item)
+                try:
+                    shutil.rmtree(item)
+                except OSError:
+                    # Keep the trash entry and metadata so a retry stays
+                    # possible; both copies exist but nothing is lost.
+                    logger.warning(
+                        "Restored %r to %s but could not remove trash source %s",
+                        item_name,
+                        dest,
+                        item,
+                    )
+                    raise
         else:
             item.rename(dest)
         if meta_file.exists():

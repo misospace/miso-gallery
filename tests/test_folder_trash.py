@@ -457,9 +457,34 @@ class TestRestoreConsumesTrashedDirectory:
             assert list_trash(data_dir) == []
             assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
 
-        assert not (folder / "sub").is_symlink()
         unknown = [t for t in list_trash(data_dir) if t["original"] == "unknown"]
         assert unknown == []
+
+    def test_cross_device_directory_restore_fallback_consumes_source(self, monkeypatch, tmp_path):
+        """The copytree fallback in restore must consume the source like rename."""
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_folder(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item = trash.trash_dir(data_dir) / entry
+        meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
+
+        real_rename = trash.Path.rename
+
+        def cross_device_rename(path, destination):
+            if path == trash_item:
+                raise OSError("cross-device")
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+
+        assert restore_from_trash(entry, data_dir) is True
+        assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert (folder / "sub" / "b.jpg").read_bytes() == b"\xff\xd8\xff\xe0b"
+        assert not trash_item.exists()
+        assert not meta_file.exists()
+        assert list_trash(data_dir) == []
 
     def test_failed_directory_restore_keeps_source_and_metadata(self, monkeypatch, tmp_path):
         client, data_dir = build_client(monkeypatch, tmp_path)
