@@ -17,6 +17,7 @@ import contextlib
 import json
 import re
 import time
+from pathlib import Path
 
 import pytest
 
@@ -520,6 +521,159 @@ class TestRestoreConsumesTrashedDirectory:
         entries = list_trash(data_dir)
         assert len(entries) == 1
         assert entries[0]["original"] != "unknown"
+        # No staging directory left behind after the failed restore.
+        assert list(trash.trash_dir(data_dir).glob(".restore-stage-*")) == []
+
+    def test_concurrent_restore_does_not_delete_winners_destination(
+        self, monkeypatch, tmp_path
+    ):
+        """Regression for review blocker on #516: when two restores of the
+        same entry race, the loser's fallback cleanup must not delete the
+        winner's restored directory.
+
+        The cross-device fallback now stages the copy in a private
+        directory under the trash root and only ever rmtree's that stage
+        — never dest. Under the previous code, an unconditional
+        ``shutil.rmtree(dest)`` in the copytree failure handler would
+        delete any directory that happened to occupy ``dest`` (including
+        another concurrent restore's restored media).
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_folder(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item = trash.trash_dir(data_dir) / entry
+        meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
+
+        # Track every rmtree call inside the trash module so we can
+        # prove no cleanup ever targets a destination under data_dir.
+        rmtree_targets: list[str] = []
+        real_rmtree = trash.shutil.rmtree
+
+        def tracking_rmtree(path, *args, **kwargs):
+            rmtree_targets.append(str(path))
+            return real_rmtree(path, *args, **kwargs)
+
+        # Force the rename branch to fail (cross-device or already-moved
+        # source) so the fallback runs.
+        real_rename = trash.Path.rename
+
+        def failing_rename(path, destination):
+            if path == trash_item:
+                raise OSError("source no longer present")
+            return real_rename(path, destination)
+
+        # Force copytree to fail with FileExistsError, simulating the
+        # race where another restore has already populated the computed
+        # destination path.
+        def racing_copytree(src, dest, *args, **kwargs):
+            raise FileExistsError(f"dest {dest} already exists")
+
+        monkeypatch.setattr(trash.shutil, "rmtree", tracking_rmtree)
+        monkeypatch.setattr(trash.Path, "rename", failing_rename)
+        monkeypatch.setattr(trash.shutil, "copytree", racing_copytree)
+
+        assert restore_from_trash(entry, data_dir) is False
+
+        # The trash source and metadata must remain for a retry.
+        assert trash_item.is_dir()
+        assert meta_file.exists()
+        # No .restore-stage-* directory leaks across calls.
+        stages = list(trash.trash_dir(data_dir).glob(".restore-stage-*"))
+        assert stages == [], f"stage directory leaked: {stages}"
+
+        # The critical guarantee: no rmtree call ever targeted the
+        # data folder. Under the old code, the failure path would have
+        # rmtree'd the function's computed dest (which is under
+        # data_dir), clobbering a concurrent winner's restored media.
+        trash_root = trash.trash_dir(data_dir).resolve()
+        for target in rmtree_targets:
+            try:
+                resolved = Path(target).resolve()
+            except OSError:
+                continue
+            assert trash_root in resolved.parents or resolved == trash_root, (
+                f"rmtree targeted {target} which is outside the trash "
+                f"root; this is the data-loss race the staging fix prevents."
+            )
+
+    def test_concurrent_restore_does_not_delete_winners_destination_end_to_end(
+        self, monkeypatch, tmp_path
+    ):
+        """End-to-end regression for the concurrent restore race.
+
+        Simulates two restores of the same entry interleaved: Request A
+        has already populated the destination (``album``), and Request
+        B observes the source still in trash (passes the exists check)
+        but its rename fails (source has been moved concurrently) and
+        falls into the copytree fallback. B's fallback cleanup must not
+        delete A's restored directory.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_folder(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item = trash.trash_dir(data_dir) / entry
+        meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
+
+        # Pre-populate the destination as if Request A had already
+        # completed its restore. This is the "rival" the loser's
+        # cleanup must not delete.
+        rival_dest = data_dir / "album"
+        rival_dest.mkdir()
+        (rival_dest / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0a")
+        (rival_dest / "sub").mkdir()
+        (rival_dest / "sub" / "b.jpg").write_bytes(b"\xff\xd8\xff\xe0b")
+        rival_inode = (rival_dest / "a.jpg").stat().st_ino
+
+        # Force the function's dest-uniqueness check to ignore the
+        # pre-existing rival so the function computes dest = album
+        # (not album_<ts>). The OLD code's rmtree(dest) on a populated
+        # album is what wipes the rival; we want to reproduce that
+        # exact failure mode.
+        real_exists = trash.Path.exists
+
+        def exists_ignores_rival(self_path):
+            if str(self_path) == str(rival_dest):
+                return False
+            return real_exists(self_path)
+
+        # Force rename to fail for the trash source (B observes
+        # "source gone" because A moved it).
+        real_rename = trash.Path.rename
+
+        def failing_rename(path, destination):
+            if path == trash_item:
+                raise OSError("source no longer present")
+            return real_rename(path, destination)
+
+        # Force copytree to fail because dest is occupied by A.
+        def racing_copytree(src, dest, *args, **kwargs):
+            raise FileExistsError(f"dest {dest} already exists")
+
+        monkeypatch.setattr(trash.Path, "exists", exists_ignores_rival)
+        monkeypatch.setattr(trash.Path, "rename", failing_rename)
+        monkeypatch.setattr(trash.shutil, "copytree", racing_copytree)
+
+        # Request B runs: rename fails, fallback copytree fails,
+        # cleanup runs. B must return False without clobbering the
+        # rival's restored directory.
+        assert restore_from_trash(entry, data_dir) is False
+
+        # A's restored media is intact (same inode).
+        assert rival_dest.is_dir()
+        rival_a = rival_dest / "a.jpg"
+        assert rival_a.read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert rival_a.stat().st_ino == rival_inode
+        assert (rival_dest / "sub" / "b.jpg").read_bytes() == b"\xff\xd8\xff\xe0b"
+        # Trash source preserved (B's rename failed, so the trash entry
+        # remains for a retry).
+        assert trash_item.is_dir()
+        assert meta_file.exists()
+        # No leftover staging directory.
+        assert list(trash.trash_dir(data_dir).glob(".restore-stage-*")) == []
 
 
 class TestRestorePathTraversal:

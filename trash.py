@@ -5,6 +5,7 @@ import json
 import logging
 import shutil
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -246,14 +247,30 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                 # leaves no orphaned copy behind (matches file semantics).
                 item.rename(dest)
             except OSError:
-                # Cross-device fallback: copy, then remove the source only
-                # after the copy fully succeeds. On failure, drop the partial
-                # copy and propagate so source and metadata stay recoverable.
+                # Cross-device fallback: stage the copy in a private
+                # directory under the trash root, then atomically move it
+                # into place. The stage is exclusively owned by this call,
+                # so failure cleanup only ever rmtree's our own stage —
+                # never dest. Without staging, a concurrent duplicate
+                # restore whose copytree fails because the winner already
+                # populated dest would rmtree the winner's restored media.
+                stage = td / f".restore-stage-{uuid.uuid4().hex}"
+                stage_failed = True
                 try:
-                    shutil.copytree(item, dest, symlinks=True)
-                except Exception:
-                    shutil.rmtree(dest, ignore_errors=True)
-                    raise
+                    shutil.copytree(item, stage, symlinks=True)
+                    try:
+                        stage.rename(dest)
+                    except OSError:
+                        # Another restore populated dest concurrently, or
+                        # rename crossed devices again. Clean up only our
+                        # stage; leave dest alone (it may belong to the
+                        # winner or to a later retry).
+                        shutil.rmtree(stage, ignore_errors=True)
+                        raise
+                    stage_failed = False
+                finally:
+                    if stage_failed and stage.exists():
+                        shutil.rmtree(stage, ignore_errors=True)
                 try:
                     shutil.rmtree(item)
                 except OSError:
