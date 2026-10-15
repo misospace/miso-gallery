@@ -5,6 +5,7 @@ import json
 import logging
 import shutil
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -240,7 +241,57 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                     ts += 1
             else:
                 dest = dest.with_name(f"{dest.stem}_{ts}{dest.suffix}")
-        shutil.copytree(item, dest) if item.is_dir() else item.rename(dest)
+        if item.is_dir():
+            try:
+                # Move consumes the trash source so a successful restore
+                # leaves no orphaned copy behind (matches file semantics).
+                item.rename(dest)
+            except OSError:
+                # Cross-device fallback: stage the copy on the *destination*
+                # filesystem (under dest.parent), then atomically rename it
+                # into place. The stage MUST live on dest's filesystem: if
+                # it lived next to the source, the staged rename would
+                # itself cross the same cross-device boundary that just
+                # failed the original rename (typically EXDEV), and the
+                # fallback could never complete. Putting it under
+                # dest.parent keeps the final rename on a single filesystem.
+                #
+                # The stage is exclusively owned by this call (UUID-named),
+                # so failure cleanup only ever rmtree's our own stage —
+                # never dest. Without staging, a concurrent duplicate
+                # restore whose copytree fails because the winner already
+                # populated dest would rmtree the winner's restored media.
+                stage = dest.parent / f".restore-stage-{uuid.uuid4().hex}"
+                stage_failed = True
+                try:
+                    shutil.copytree(item, stage, symlinks=True)
+                    try:
+                        stage.rename(dest)
+                    except OSError:
+                        # Another restore populated dest concurrently, or
+                        # rename crossed devices again. Clean up only our
+                        # stage; leave dest alone (it may belong to the
+                        # winner or to a later retry).
+                        shutil.rmtree(stage, ignore_errors=True)
+                        raise
+                    stage_failed = False
+                finally:
+                    if stage_failed and stage.exists():
+                        shutil.rmtree(stage, ignore_errors=True)
+                try:
+                    shutil.rmtree(item)
+                except OSError:
+                    # Keep the trash entry and metadata so a retry stays
+                    # possible; both copies exist but nothing is lost.
+                    logger.warning(
+                        "Restored %r to %s but could not remove trash source %s",
+                        item_name,
+                        dest,
+                        item,
+                    )
+                    raise
+        else:
+            item.rename(dest)
         if meta_file.exists():
             meta_file.unlink(missing_ok=True)
         return True
@@ -262,6 +313,7 @@ def empty_trash(data_folder: Path) -> int:
             deleted += 1
         except Exception:
             pass
+    _reclaim_orphan_restore_stages(data_folder)
     return deleted
 
 
@@ -288,4 +340,24 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
             if meta_file.exists():
                 meta_file.unlink(missing_ok=True)
             deleted += 1
+    _reclaim_orphan_restore_stages(data_folder)
     return deleted
+
+
+def _reclaim_orphan_restore_stages(data_folder: Path) -> None:
+    """Reclaim ``.restore-stage-*`` directories left behind by a crashed restore.
+
+    The cross-device fallback in ``restore_from_trash`` stages the copy on
+    the destination filesystem (under ``dest.parent``). If the process
+    crashes between ``copytree`` and the final ``rename``, the staged
+    directory can leak. Because it lives under the data folder (not under
+    ``td``), the normal ``empty_trash``/``purge_old_trash`` iteration over
+    the trash directory would miss it; this helper sweeps the data folder
+    for ``.restore-stage-*`` directories and removes them.
+    """
+    for stage in data_folder.rglob(".restore-stage-*"):
+        try:
+            if stage.is_dir():
+                shutil.rmtree(stage, ignore_errors=True)
+        except OSError:
+            pass
