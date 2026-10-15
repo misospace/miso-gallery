@@ -100,7 +100,10 @@ def build_client(monkeypatch, tmp_path, *, api_keys: str = TEST_API_KEY, auth_ty
     else:
         monkeypatch.setenv("LLM_API_KEYS", api_keys)
 
-    for mod in ("auth", "app"):
+    # "llm_api" must be popped with "auth": it binds require_api_key_with_scope
+    # from auth at import time, so a stale copy would keep the previous test's
+    # auth objects after auth is re-imported.
+    for mod in ("auth", "llm_api", "app"):
         sys.modules.pop(mod, None)
 
     app_module = importlib.import_module("app")
