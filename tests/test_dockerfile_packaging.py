@@ -35,6 +35,17 @@ def test_dockerfile_packages_oidc():
     assert any("oidc.py" in command[1:-1] for command in copy_commands)
 
 
+def test_dockerfile_packages_llm_api():
+    dockerfile = Path("Dockerfile").read_text()
+    copy_commands = [
+        line.split()
+        for line in dockerfile.splitlines()
+        if line.strip().startswith("COPY ")
+    ]
+
+    assert any("llm_api.py" in command[1:-1] for command in copy_commands)
+
+
 def test_dockerfile_uses_entrypoint():
     """Dockerfile should use entrypoint.sh instead of hardcoded CMD."""
     dockerfile = Path("Dockerfile").read_text()

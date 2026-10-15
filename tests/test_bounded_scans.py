@@ -37,7 +37,9 @@ def _build_bounded_client(monkeypatch, tmp_path):
     monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
     monkeypatch.setenv("LLM_API_KEYS", "agent-key")
 
-    for mod in ("auth", "app"):
+    # llm_api must be popped with auth for the same reason as in conftest.py:
+    # it binds require_api_key_with_scope from auth at import time.
+    for mod in ("auth", "oidc", "llm_api", "app"):
         sys.modules.pop(mod, None)
 
     import app as app_module
@@ -108,7 +110,7 @@ class TestIterGalleryItemsSortsBeforeTruncating:
         monkeypatch.setenv("OIDC_ENABLED", "false")
         monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
 
-        for mod in ("auth", "app"):
+        for mod in ("auth", "oidc", "llm_api", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module
@@ -171,7 +173,7 @@ class TestLlmImagesHasMore:
         monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
         monkeypatch.setenv("LLM_API_KEYS", "agent-key")
 
-        for mod in ("auth", "app"):
+        for mod in ("auth", "oidc", "llm_api", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module
@@ -289,7 +291,7 @@ class TestFolderCoverDelegatesToIterGalleryItems:
         monkeypatch.setenv("LLM_API_KEYS", "agent-key")
         monkeypatch.setenv("GALLERY_AUTO_FOLDER_COVERS", "true")
 
-        for mod in ("auth", "app"):
+        for mod in ("auth", "oidc", "llm_api", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module
@@ -326,7 +328,7 @@ class TestFolderCoverDelegatesToIterGalleryItems:
         monkeypatch.setenv("LLM_API_KEYS", "agent-key")
         monkeypatch.setenv("GALLERY_AUTO_FOLDER_COVERS", "true")
 
-        for mod in ("auth", "app"):
+        for mod in ("auth", "oidc", "llm_api", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module
@@ -363,7 +365,7 @@ class TestFolderCoverDelegatesToIterGalleryItems:
         monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
         monkeypatch.setenv("LLM_API_KEYS", "agent-key")
 
-        for mod in ("auth", "app"):
+        for mod in ("auth", "oidc", "llm_api", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module

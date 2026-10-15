@@ -100,10 +100,11 @@ def build_client(monkeypatch, tmp_path, *, api_keys: str = TEST_API_KEY, auth_ty
     else:
         monkeypatch.setenv("LLM_API_KEYS", api_keys)
 
-    # "oidc" must be popped with "auth": it binds oauth/verify_oidc_authorization
-    # from auth at import time, so a stale copy would keep the previous test's
-    # auth objects after auth is re-imported.
-    for mod in ("auth", "oidc", "app"):
+# "oidc" and "llm_api" must be popped with "auth": each binds objects from
+    # auth at import time (oidc binds oauth/verify_oidc_authorization;
+    # llm_api binds require_api_key_with_scope), so a stale copy would keep
+    # the previous test's auth objects after auth is re-imported.
+    for mod in ("auth", "oidc", "llm_api", "app"):
         sys.modules.pop(mod, None)
 
     app_module = importlib.import_module("app")
