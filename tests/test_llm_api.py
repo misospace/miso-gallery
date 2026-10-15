@@ -2,6 +2,7 @@ import sys
 import time
 from pathlib import Path
 
+import llm_api
 from conftest import auth_header, build_client
 
 
@@ -614,7 +615,7 @@ def test_llm_recent_survives_file_vanishing_between_walk_and_sort(monkeypatch, t
     b = data_dir / "b.png"
     a.write_bytes(b"\x89PNG")
     b.write_bytes(b"\x89PNG")
-    app._gallery_scan_cache[("media", app.LLM_ENUMERATION_LIMIT, str(data_dir))] = (
+    app._gallery_scan_cache[("media", llm_api.LLM_ENUMERATION_LIMIT, str(data_dir))] = (
         time.time(),
         [a, b],
     )
@@ -657,7 +658,7 @@ def test_llm_images_survives_file_vanishing_between_walk_and_metadata(monkeypatc
 
     # Deterministic snapshot: walk returns these paths; metadata then stats them.
     app._gallery_scan_cache.clear()
-    app._gallery_scan_cache[("media", app.LLM_ENUMERATION_LIMIT, str(data_dir))] = (
+    app._gallery_scan_cache[("media", llm_api.LLM_ENUMERATION_LIMIT, str(data_dir))] = (
         time.time(),
         [a, b],
     )
@@ -693,7 +694,7 @@ def test_llm_folders_survives_relative_to_no_longer_resolving(monkeypatch, tmp_p
 
     # Deterministic snapshot: the stray folder is in the returned list.
     app._gallery_scan_cache.clear()
-    app._gallery_scan_cache[("folders", app.LLM_ENUMERATION_LIMIT, str(data_dir))] = (
+    app._gallery_scan_cache[("folders", llm_api.LLM_ENUMERATION_LIMIT, str(data_dir))] = (
         time.time(),
         [stray],
     )

@@ -8,6 +8,7 @@ unreachable and has_more promised results the API could not return.
 """
 
 import app
+import llm_api
 
 
 def test_iter_gallery_items_returns_items_beyond_scan_limit(tmp_path, monkeypatch):
@@ -17,7 +18,7 @@ def test_iter_gallery_items_returns_items_beyond_scan_limit(tmp_path, monkeypatc
     for i in range(8):
         (tmp_path / f"img_{i:03d}.jpg").write_bytes(b"\xff\xd8\xff\xe0")
 
-    items = app.iter_gallery_items(kind="media", limit=app.LLM_ENUMERATION_LIMIT)
+    items = app.iter_gallery_items(kind="media", limit=llm_api.LLM_ENUMERATION_LIMIT)
 
     assert len(items) == 8
     assert (tmp_path / "img_007.jpg") in items
