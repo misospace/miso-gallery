@@ -24,6 +24,17 @@ def test_dockerfile_packages_thumbnails():
     assert any("thumbnails.py" in command[1:-1] for command in copy_commands)
 
 
+def test_dockerfile_packages_oidc():
+    dockerfile = Path("Dockerfile").read_text()
+    copy_commands = [
+        line.split()
+        for line in dockerfile.splitlines()
+        if line.strip().startswith("COPY ")
+    ]
+
+    assert any("oidc.py" in command[1:-1] for command in copy_commands)
+
+
 def test_dockerfile_uses_entrypoint():
     """Dockerfile should use entrypoint.sh instead of hardcoded CMD."""
     dockerfile = Path("Dockerfile").read_text()
