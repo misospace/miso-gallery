@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import time
 from collections import OrderedDict
@@ -14,6 +15,27 @@ AUTO_FOLDER_COVERS_ENABLED = False
 FOLDER_COVER_CACHE_TTL = 3600
 _FOLDER_COVER_CACHE: OrderedDict[str, tuple[float, str | None]] = OrderedDict()
 _FOLDER_COVER_MAX_SIZE = 1024
+
+# Cache identity binding (issue #515):
+# A digest of the full normalized relative path is the *first* segment of the
+# cache filename. Distinct gallery-relative paths (e.g. ``a/b.png`` vs
+# ``a__b.png``) therefore produce distinct cache identities even when their
+# mtime_ns and size match. The legacy format
+# ``<rel_path-with-/-as-__>.<mtime_ns>.<size>.jpg`` was not injective in
+# ``rel_path`` and caused one cached JPEG to be reused across distinct files.
+_THUMBNAIL_PATH_IDENTITY_LEN = 16
+
+
+def _thumbnail_path_identity(rel_path: str) -> str:
+    """Return a short, collision-resistant identity for a normalized relative path.
+
+    The identity is the leading ``_THUMBNAIL_PATH_IDENTITY_LEN`` hex chars of
+    SHA-256 over ``rel_path`` (UTF-8). It is used as the prefix of every
+    thumbnail cache filename written by ``thumbnail_filename`` and matched by
+    ``batch_remove_thumbnails``, making the cache identity injective in the
+    gallery-relative path (issue #515).
+    """
+    return hashlib.sha256(rel_path.encode("utf-8")).hexdigest()[:_THUMBNAIL_PATH_IDENTITY_LEN]
 
 
 def load_env_config() -> None:
@@ -51,9 +73,21 @@ def ensure_thumbnail_cache_dir() -> None:
 
 
 def thumbnail_filename(rel_path: str, source_path: Path) -> str:
+    """Build a cache filename that uniquely identifies this relative path *and* source stat.
+
+    The leading segment is a digest of the full normalized relative path so
+    that distinct gallery-relative paths cannot collide on a single cached
+    JPEG even when their mtime_ns and size are identical (issue #515). Legacy
+    cache files written by earlier builds (which used the path with ``/``
+    swapped for ``__`` and lacked the digest) are not matched by this format
+    and are left in place; subsequent regeneration under the new contract
+    simply writes additional files alongside them. They are never deleted
+    automatically — see ``test_thumbnail_maintenance`` for the legacy-handling
+    coverage.
+    """
     file_stat = source_path.stat()
-    safe_name = rel_path.replace("/", "__")
-    return f"{safe_name}.{file_stat.st_mtime_ns}.{file_stat.st_size}.jpg"
+    identity = _thumbnail_path_identity(rel_path)
+    return f"{identity}.{file_stat.st_mtime_ns}.{file_stat.st_size}.jpg"
 
 
 def generate_thumbnail(source_path: Path, output_path: Path) -> None:
@@ -68,13 +102,17 @@ def batch_remove_thumbnails(rel_paths: list[str]) -> None:
 
     Replaces per-path loops (issue #249). One call == one `iterdir()` regardless
     of how many paths are passed.
+
+    Match is by the path-identity digest prefix written by ``thumbnail_filename``
+    (issue #515), so unrelated paths cannot share a cache file with any
+    requested path even when their mtime+size happen to match.
     """
     if not rel_paths:
         return
     app = _app()
     ensure_thumbnail_cache_dir()
     prefixes = {
-        app.sanitize_rel_path(rel_path).replace("/", "__") + "."
+        _thumbnail_path_identity(app.sanitize_rel_path(rel_path)) + "."
         for rel_path in rel_paths
     }
     for cached_file in app.THUMBNAIL_CACHE_DIR.iterdir():
