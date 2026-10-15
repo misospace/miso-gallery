@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app.py auth.py security.py tag_store.py trash.py health.py thumbnails.py metadata.py llm_api.py ./
+COPY app.py auth.py security.py tag_store.py trash.py health.py thumbnails.py metadata.py oidc.py llm_api.py ./
 COPY templates/ templates/
 COPY assets/ assets/
 COPY entrypoint.sh .

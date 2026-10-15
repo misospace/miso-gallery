@@ -141,7 +141,7 @@ def test_oidc_callback_stores_refresh_token(monkeypatch, tmp_path):
     client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
 
     # Mock oauth.oidc.authorize_access_token to return a token with refresh_token
-    import app as app_module
+    import oidc as oidc_module
 
     mock_called = False
 
@@ -157,8 +157,8 @@ def test_oidc_callback_stores_refresh_token(monkeypatch, tmp_path):
         }
 
     # Patch the authorize_access_token method
-    original_authorize = app_module.oauth.oidc.authorize_access_token
-    app_module.oauth.oidc.authorize_access_token = mock_authorize_access_token
+    original_authorize = oidc_module.oauth.oidc.authorize_access_token
+    oidc_module.oauth.oidc.authorize_access_token = mock_authorize_access_token
 
     try:
         # Mock the userinfo endpoint
@@ -169,12 +169,12 @@ def test_oidc_callback_stores_refresh_token(monkeypatch, tmp_path):
             "email": "test@example.com",
             "name": "Test User",
         }
-        original_get = app_module.oauth.oidc.get
-        app_module.oauth.oidc.get = MagicMock(return_value=mock_resp)
+        original_get = oidc_module.oauth.oidc.get
+        oidc_module.oauth.oidc.get = MagicMock(return_value=mock_resp)
 
         # Mock verify_oidc_authorization to allow the user
-        original_verify = app_module.verify_oidc_authorization
-        app_module.verify_oidc_authorization = MagicMock(return_value=(True, None))
+        original_verify = oidc_module.verify_oidc_authorization
+        oidc_module.verify_oidc_authorization = MagicMock(return_value=(True, None))
 
         try:
             resp = client.get(
@@ -192,10 +192,10 @@ def test_oidc_callback_stores_refresh_token(monkeypatch, tmp_path):
                 assert sess["authenticated"] is True
                 assert sess["auth_method"] == "oidc"
         finally:
-            app_module.oauth.oidc.get = original_get
-            app_module.verify_oidc_authorization = original_verify
+            oidc_module.oauth.oidc.get = original_get
+            oidc_module.verify_oidc_authorization = original_verify
     finally:
-        app_module.oauth.oidc.authorize_access_token = original_authorize
+        oidc_module.oauth.oidc.authorize_access_token = original_authorize
 
 
 def test_oidc_callback_stores_expiry_without_refresh(monkeypatch, tmp_path):
@@ -208,7 +208,7 @@ def test_oidc_callback_stores_expiry_without_refresh(monkeypatch, tmp_path):
     }
     client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
 
-    import app as app_module
+    import oidc as oidc_module
 
     def mock_authorize_access_token(*args, **kwargs):
         return {
@@ -218,8 +218,8 @@ def test_oidc_callback_stores_expiry_without_refresh(monkeypatch, tmp_path):
             "token_type": "Bearer",
         }
 
-    original_authorize = app_module.oauth.oidc.authorize_access_token
-    app_module.oauth.oidc.authorize_access_token = mock_authorize_access_token
+    original_authorize = oidc_module.oauth.oidc.authorize_access_token
+    oidc_module.oauth.oidc.authorize_access_token = mock_authorize_access_token
 
     try:
         from unittest.mock import MagicMock
@@ -229,11 +229,11 @@ def test_oidc_callback_stores_expiry_without_refresh(monkeypatch, tmp_path):
             "email": "test@example.com",
             "name": "Test User",
         }
-        original_get = app_module.oauth.oidc.get
-        app_module.oauth.oidc.get = MagicMock(return_value=mock_resp)
+        original_get = oidc_module.oauth.oidc.get
+        oidc_module.oauth.oidc.get = MagicMock(return_value=mock_resp)
 
-        original_verify = app_module.verify_oidc_authorization
-        app_module.verify_oidc_authorization = MagicMock(return_value=(True, None))
+        original_verify = oidc_module.verify_oidc_authorization
+        oidc_module.verify_oidc_authorization = MagicMock(return_value=(True, None))
 
         try:
             resp = client.get(
@@ -248,10 +248,10 @@ def test_oidc_callback_stores_expiry_without_refresh(monkeypatch, tmp_path):
                 # No refresh token stored when provider doesn't send one
                 assert sess.get("oidc_refresh_token") is None
         finally:
-            app_module.oauth.oidc.get = original_get
-            app_module.verify_oidc_authorization = original_verify
+            oidc_module.oauth.oidc.get = original_get
+            oidc_module.verify_oidc_authorization = original_verify
     finally:
-        app_module.oauth.oidc.authorize_access_token = original_authorize
+        oidc_module.oauth.oidc.authorize_access_token = original_authorize
 
 
 def test_verify_local_password_plaintext_warning(monkeypatch, tmp_path, caplog):
@@ -364,7 +364,7 @@ def test_oidc_refresh_success(monkeypatch, tmp_path):
     }
     client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
 
-    import app as app_module
+    import oidc as oidc_module
 
     with client.session_transaction() as sess:
         sess["authenticated"] = True
@@ -396,12 +396,12 @@ def test_oidc_refresh_success(monkeypatch, tmp_path):
         captured_userinfo_token["token"] = token
         return {"sub": "test-sub", "email": "test@example.com", "name": "Test User"}
 
-    original_verify = app_module.verify_oidc_authorization
-    app_module.verify_oidc_authorization = MagicMock(return_value=(True, None))
+    original_verify = oidc_module.verify_oidc_authorization
+    oidc_module.verify_oidc_authorization = MagicMock(return_value=(True, None))
 
     try:
         with patch("authlib.integrations.requests_client.OAuth2Session", FakeOAuth2Session):
-            monkeypatch.setattr(app_module.oauth.oidc, "userinfo", fake_userinfo)
+            monkeypatch.setattr(oidc_module.oauth.oidc, "userinfo", fake_userinfo)
             resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
 
         assert resp.status_code == 200
@@ -418,7 +418,7 @@ def test_oidc_refresh_success(monkeypatch, tmp_path):
             assert "oidc_token_expires_at" in sess
             assert "oidc_access_token" not in sess
     finally:
-        app_module.verify_oidc_authorization = original_verify
+        oidc_module.verify_oidc_authorization = original_verify
 
 
 def test_oidc_refresh_authorization_revoked(monkeypatch, tmp_path):
@@ -434,7 +434,7 @@ def test_oidc_refresh_authorization_revoked(monkeypatch, tmp_path):
     }
     client, _ = build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env=extra_env)
 
-    import app as app_module
+    import oidc as oidc_module
 
     with client.session_transaction() as sess:
         sess["authenticated"] = True
@@ -459,12 +459,12 @@ def test_oidc_refresh_authorization_revoked(monkeypatch, tmp_path):
     def fake_userinfo(token=None):
         return {"sub": "test-sub", "email": "test@example.com"}
 
-    original_verify = app_module.verify_oidc_authorization
-    app_module.verify_oidc_authorization = MagicMock(return_value=(False, "user_removed"))
+    original_verify = oidc_module.verify_oidc_authorization
+    oidc_module.verify_oidc_authorization = MagicMock(return_value=(False, "user_removed"))
 
     try:
         with patch("authlib.integrations.requests_client.OAuth2Session", FakeOAuth2Session):
-            monkeypatch.setattr(app_module.oauth.oidc, "userinfo", fake_userinfo)
+            monkeypatch.setattr(oidc_module.oauth.oidc, "userinfo", fake_userinfo)
             resp = client.post("/auth/oidc/refresh", data={"csrf_token": "test-csrf"})
 
         assert resp.status_code == 403
@@ -476,4 +476,4 @@ def test_oidc_refresh_authorization_revoked(monkeypatch, tmp_path):
         with client.session_transaction() as sess:
             assert not sess
     finally:
-        app_module.verify_oidc_authorization = original_verify
+        oidc_module.verify_oidc_authorization = original_verify

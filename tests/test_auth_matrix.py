@@ -590,7 +590,7 @@ def test_oidc_login_rate_limited(monkeypatch, tmp_path):
     import flask
 
     client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
-    import app as app_module
+    import oidc as oidc_module
 
     calls = {"n": 0}
 
@@ -598,7 +598,7 @@ def test_oidc_login_rate_limited(monkeypatch, tmp_path):
         calls["n"] += 1
         return flask.Response("redirected")
 
-    monkeypatch.setattr(app_module.oauth.oidc, "authorize_redirect", fake_authorize_redirect)
+    monkeypatch.setattr(oidc_module.oauth.oidc, "authorize_redirect", fake_authorize_redirect)
 
     # The first 20 requests (a real user logging in once is far below this) pass.
     for _i in range(20):
@@ -622,7 +622,7 @@ def test_oidc_callback_rate_limited(monkeypatch, tmp_path):
     unauthenticated callers.
     """
     client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
-    import app as app_module
+    import oidc as oidc_module
 
     calls = {"n": 0}
 
@@ -630,7 +630,7 @@ def test_oidc_callback_rate_limited(monkeypatch, tmp_path):
         calls["n"] += 1
         raise RuntimeError("mock provider failure")
 
-    monkeypatch.setattr(app_module.oauth.oidc, "authorize_access_token", fake_authorize_access_token)
+    monkeypatch.setattr(oidc_module.oauth.oidc, "authorize_access_token", fake_authorize_access_token)
 
     # The first 20 requests reach the handler (each fails the mock token
     # exchange and redirects to the login page with error=oidc_failed).
@@ -684,12 +684,12 @@ def test_refresh_token_url_from_discovery_metadata_when_env_unset(monkeypatch, t
     token_endpoint from the OIDC discovery document (Authlib server_metadata),
     not the hard-coded Authentik-style path."""
     client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
-    import app as app_module
+    import oidc as oidc_module
 
     monkeypatch.delenv("OIDC_TOKEN_URL", raising=False)
     # Simulate the discovery document having been fetched (as it is during
     # authorize_redirect / authorize_access_token in a real login).
-    app_module.oauth.oidc.server_metadata["token_endpoint"] = "https://issuer.example/oauth/token"
+    oidc_module.oauth.oidc.server_metadata["token_endpoint"] = "https://issuer.example/oauth/token"
 
     captured = {}
 
@@ -703,7 +703,7 @@ def test_refresh_token_url_from_discovery_metadata_when_env_unset(monkeypatch, t
 
     import authlib.integrations.requests_client as requests_client
     monkeypatch.setattr(requests_client, "OAuth2Session", _FakeOAuth2Session)
-    monkeypatch.setattr(app_module.oauth.oidc, "userinfo", lambda token=None: {"email": "alice@example.com"})
+    monkeypatch.setattr(oidc_module.oauth.oidc, "userinfo", lambda token=None: {"email": "alice@example.com"})
 
     with client.session_transaction() as sess:
         sess["csrf_token"] = "test-csrf"
@@ -723,11 +723,11 @@ def test_refresh_token_url_env_override_used_when_metadata_missing(monkeypatch, 
     """#450: when the discovery document has not been fetched, the
     OIDC_TOKEN_URL env var is used as the token endpoint."""
     client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
-    import app as app_module
+    import oidc as oidc_module
 
     monkeypatch.setenv("OIDC_TOKEN_URL", "https://issuer.example/custom/token")
     # No discovery metadata fetched — the env var must be used.
-    assert "token_endpoint" not in app_module.oauth.oidc.server_metadata
+    assert "token_endpoint" not in oidc_module.oauth.oidc.server_metadata
 
     captured = {}
 
@@ -741,7 +741,7 @@ def test_refresh_token_url_env_override_used_when_metadata_missing(monkeypatch, 
 
     import authlib.integrations.requests_client as requests_client
     monkeypatch.setattr(requests_client, "OAuth2Session", _FakeOAuth2Session)
-    monkeypatch.setattr(app_module.oauth.oidc, "userinfo", lambda token=None: {"email": "alice@example.com"})
+    monkeypatch.setattr(oidc_module.oauth.oidc, "userinfo", lambda token=None: {"email": "alice@example.com"})
 
     with client.session_transaction() as sess:
         sess["csrf_token"] = "test-csrf"
@@ -760,11 +760,11 @@ def test_refresh_token_url_falls_back_to_authentik_path(monkeypatch, tmp_path):
     """#450: only when both OIDC_TOKEN_URL and discovery metadata are missing
     does the handler fall back to the Authentik-style issuer path."""
     client = _build_auth_client(monkeypatch, tmp_path, auth_type="oidc", oidc_enabled=True)
-    import app as app_module
+    import oidc as oidc_module
 
     monkeypatch.delenv("OIDC_TOKEN_URL", raising=False)
     # No discovery metadata fetched — empty server_metadata.
-    assert "token_endpoint" not in app_module.oauth.oidc.server_metadata
+    assert "token_endpoint" not in oidc_module.oauth.oidc.server_metadata
 
     captured = {}
 
@@ -778,7 +778,7 @@ def test_refresh_token_url_falls_back_to_authentik_path(monkeypatch, tmp_path):
 
     import authlib.integrations.requests_client as requests_client
     monkeypatch.setattr(requests_client, "OAuth2Session", _FakeOAuth2Session)
-    monkeypatch.setattr(app_module.oauth.oidc, "userinfo", lambda token=None: {"email": "alice@example.com"})
+    monkeypatch.setattr(oidc_module.oauth.oidc, "userinfo", lambda token=None: {"email": "alice@example.com"})
 
     with client.session_transaction() as sess:
         sess["csrf_token"] = "test-csrf"
