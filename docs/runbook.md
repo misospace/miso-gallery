@@ -394,9 +394,10 @@ both the Dockerfile `COPY` list and `py-modules`. Docker remains the deploy path
 installed wheel carries the Python modules only, not `templates/` or `assets/`.
 
 **Decision (issue #547):** the install is library-only by design. Do not add
-`package-data`/`MANIFEST.in` coverage for `templates/` and `assets/` — that would push
-toward the `src/` layout the flat list deliberately avoids. An installed copy is not
-runnable: `app.py` fails at import with a message that points back to this section.
+`package-data` coverage for `templates/` and `assets/` — that would push toward the
+`src/` layout the flat list deliberately avoids (`MANIFEST.in` alone only affects the
+sdist, not the wheel). An installed copy is not runnable: `app.py` fails at import
+with a message that points back to this section.
 
 > The legacy "Manual Release" / "Publish Release" workflows were removed; they predate
 > release-please and could never complete under the current flow. Use the release-please

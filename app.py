@@ -155,9 +155,11 @@ def _load_service_worker_template(path: str) -> str:
     except FileNotFoundError as exc:
         raise RuntimeError(
             "templates/service-worker.js is missing: this looks like an installed (pip) copy of "
-            "miso-gallery. An installed wheel ships the Python modules only and is not runnable; "
-            "Docker is the supported deploy path. See the 'Packaging invariant' section of "
-            "docs/runbook.md."
+            "miso-gallery, or a partial source checkout. An installed wheel ships the Python "
+            "modules only and is not runnable — Docker is the supported deploy path; a source "
+            "checkout must restore the missing templates/ files from the repository. See the "
+            "'Packaging invariant' section of docs/runbook.md: "
+            "https://github.com/misospace/miso-gallery/blob/main/docs/runbook.md"
         ) from exc
 
 

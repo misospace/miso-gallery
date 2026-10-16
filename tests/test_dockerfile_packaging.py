@@ -192,14 +192,25 @@ def test_assets_present_in_repo():
 
 
 def test_service_worker_template_loads_from_repo():
-    """The repo checkout (Docker build context) must always ship the service worker."""
+    """The repo checkout must always ship a non-empty templates/service-worker.js."""
     import app
 
     assert app.SERVICE_WORKER_TEMPLATE, "templates/service-worker.js must be non-empty"
 
 
+def test_dockerfile_packages_templates():
+    """Dockerfile should copy templates/ into the image (issue #547: Docker is the deploy path)."""
+    dockerfile = Path("Dockerfile").read_text()
+    copy_commands = [
+        line.split()
+        for line in dockerfile.splitlines()
+        if line.strip().startswith("COPY ")
+    ]
+    assert any("templates/" in command[1:-1] for command in copy_commands)
+
+
 def test_missing_service_worker_error_names_packaging_decision(tmp_path):
-    """An installed (library-only) copy fails at import with a message pointing at the runbook (issue #547)."""
+    """The service-worker loader raises a message naming the library-only decision and its recovery paths (issue #547)."""
     import pytest
 
     from app import _load_service_worker_template
@@ -207,5 +218,19 @@ def test_missing_service_worker_error_names_packaging_decision(tmp_path):
     with pytest.raises(RuntimeError) as excinfo:
         _load_service_worker_template(str(tmp_path / "templates" / "service-worker.js"))
     message = str(excinfo.value)
+    assert "installed (pip) copy" in message
+    assert "partial source checkout" in message
     assert "Docker is the supported deploy path" in message
     assert "Packaging invariant" in message
+    assert "docs/runbook.md" in message
+
+
+def test_install_stays_library_only():
+    """Enforce the issue #547 decision: no package-data / MANIFEST.in may ship data dirs."""
+    pyproject = Path("pyproject.toml").read_text()
+    assert "[tool.setuptools.package-data]" not in pyproject, (
+        "issue #547: the install is library-only; templates/ and assets/ must not ship in the wheel"
+    )
+    assert not Path("MANIFEST.in").exists(), (
+        "issue #547: MANIFEST.in is not used; the install is library-only"
+    )
