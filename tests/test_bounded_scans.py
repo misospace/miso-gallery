@@ -39,7 +39,10 @@ def _build_bounded_client(monkeypatch, tmp_path):
 
     # llm_api must be popped with auth for the same reason as in conftest.py:
     # it binds require_api_key_with_scope from auth at import time.
-    for mod in ("auth", "oidc", "llm_api", "app"):
+    # gallery_scan must be popped with app (issue #521): it re-reads the
+    # GALLERY_* env constants at import time, so a stale copy would keep the
+    # previous limit/cache configuration after app is re-imported.
+    for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
         sys.modules.pop(mod, None)
 
     import app as app_module
@@ -110,7 +113,7 @@ class TestIterGalleryItemsSortsBeforeTruncating:
         monkeypatch.setenv("OIDC_ENABLED", "false")
         monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
 
-        for mod in ("auth", "oidc", "llm_api", "app"):
+        for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module
@@ -173,7 +176,7 @@ class TestLlmImagesHasMore:
         monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
         monkeypatch.setenv("LLM_API_KEYS", "agent-key")
 
-        for mod in ("auth", "oidc", "llm_api", "app"):
+        for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module
@@ -257,6 +260,9 @@ class TestScanLimitConstant:
 
     def test_default_value(self, monkeypatch):
         monkeypatch.delenv("GALLERY_SCAN_LIMIT", raising=False)
+        # GALLERY_SCAN_LIMIT is defined in gallery_scan and re-exported by app
+        # (issue #521), so both must be re-imported to observe the env default.
+        sys.modules.pop("gallery_scan", None)
         sys.modules.pop("app", None)
         import app as app_module
         assert hasattr(app_module, "GALLERY_SCAN_LIMIT")
@@ -291,7 +297,7 @@ class TestFolderCoverDelegatesToIterGalleryItems:
         monkeypatch.setenv("LLM_API_KEYS", "agent-key")
         monkeypatch.setenv("GALLERY_AUTO_FOLDER_COVERS", "true")
 
-        for mod in ("auth", "oidc", "llm_api", "app"):
+        for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module
@@ -328,7 +334,7 @@ class TestFolderCoverDelegatesToIterGalleryItems:
         monkeypatch.setenv("LLM_API_KEYS", "agent-key")
         monkeypatch.setenv("GALLERY_AUTO_FOLDER_COVERS", "true")
 
-        for mod in ("auth", "oidc", "llm_api", "app"):
+        for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module
@@ -365,7 +371,7 @@ class TestFolderCoverDelegatesToIterGalleryItems:
         monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
         monkeypatch.setenv("LLM_API_KEYS", "agent-key")
 
-        for mod in ("auth", "oidc", "llm_api", "app"):
+        for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
             sys.modules.pop(mod, None)
 
         import app as app_module
