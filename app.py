@@ -146,8 +146,22 @@ load_llm_env_config()
 
 # Load service worker from external file (extracted from app.py)
 SERVICE_WORKER_PATH = os.path.join(os.path.dirname(__file__), "templates", "service-worker.js")
-with open(SERVICE_WORKER_PATH, "r") as _f:
-    SERVICE_WORKER_TEMPLATE = _f.read()
+
+
+def _load_service_worker_template(path: str) -> str:
+    try:
+        with open(path, "r", encoding="utf-8") as _f:
+            return _f.read()
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            "templates/service-worker.js is missing: this looks like an installed (pip) copy of "
+            "miso-gallery. An installed wheel ships the Python modules only and is not runnable; "
+            "Docker is the supported deploy path. See the 'Packaging invariant' section of "
+            "docs/runbook.md."
+        ) from exc
+
+
+SERVICE_WORKER_TEMPLATE = _load_service_worker_template(SERVICE_WORKER_PATH)
 
 log = logging.getLogger("app")
 

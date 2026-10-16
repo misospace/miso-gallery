@@ -189,3 +189,23 @@ def test_assets_present_in_repo():
 # was removed (issue #506) because it approximated Docker semantics
 # (no ordered ! re-inclusions, incomplete pattern support) and could reject
 # valid .dockerignore configurations.
+
+
+def test_service_worker_template_loads_from_repo():
+    """The repo checkout (Docker build context) must always ship the service worker."""
+    import app
+
+    assert app.SERVICE_WORKER_TEMPLATE, "templates/service-worker.js must be non-empty"
+
+
+def test_missing_service_worker_error_names_packaging_decision(tmp_path):
+    """An installed (library-only) copy fails at import with a message pointing at the runbook (issue #547)."""
+    import pytest
+
+    from app import _load_service_worker_template
+
+    with pytest.raises(RuntimeError) as excinfo:
+        _load_service_worker_template(str(tmp_path / "templates" / "service-worker.js"))
+    message = str(excinfo.value)
+    assert "Docker is the supported deploy path" in message
+    assert "Packaging invariant" in message

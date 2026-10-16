@@ -29,6 +29,10 @@ dev = [
 
 # Flat py-modules list is deliberate: runtime modules live at the repo root, and
 # Dockerfile/entrypoint.sh copy and run them from there, so a src/ layout would diverge.
+# Decision (issue #547): the install is library-only by design. The wheel ships the
+# Python modules and no data directories (templates/, assets/), so an installed copy
+# is NOT runnable — Docker is the supported deploy path. Do not add package-data here;
+# app.py fails at import with a message pointing at docs/runbook.md ("Packaging invariant").
 [tool.setuptools]
 py-modules = [
     "app",
