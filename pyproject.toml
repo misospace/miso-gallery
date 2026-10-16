@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "miso-gallery"
 version = "0.3.0"
@@ -21,6 +25,23 @@ dev = [
     "pytest>=9.1,<10",
     "ruff>=0.9,<1",
     "coverage>=7.5,<8",
+]
+
+# Flat py-modules list is deliberate: runtime modules live at the repo root, and
+# Dockerfile/entrypoint.sh copy and run them from there, so a src/ layout would diverge.
+[tool.setuptools]
+py-modules = [
+    "app",
+    "auth",
+    "gallery_scan",
+    "health",
+    "llm_api",
+    "metadata",
+    "oidc",
+    "security",
+    "tag_store",
+    "thumbnails",
+    "trash",
 ]
 
 [tool.pytest.ini_options]
