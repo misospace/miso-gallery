@@ -104,7 +104,11 @@ def build_client(monkeypatch, tmp_path, *, api_keys: str = TEST_API_KEY, auth_ty
     # auth at import time (oidc binds oauth/verify_oidc_authorization;
     # llm_api binds require_api_key_with_scope), so a stale copy would keep
     # the previous test's auth objects after auth is re-imported.
-    for mod in ("auth", "oidc", "llm_api", "app"):
+    # "gallery_scan" must be popped with "app": it reads its GALLERY_* env
+    # constants at import time and owns the scan cache and _tag_store
+    # singleton, so a stale copy would keep the previous test's limits, TTLs,
+    # cached scans, and SQLite handle after app is re-imported (issue #521).
+    for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
         sys.modules.pop(mod, None)
 
     app_module = importlib.import_module("app")

@@ -59,9 +59,10 @@ def _app():
 
     The helpers below rely on ``DATA_FOLDER``, ``THUMBNAIL_CACHE_DIR``,
     ``IMAGE_EXTENSIONS``, ``GALLERY_SCAN_LIMIT``, ``sanitize_rel_path`` and
-    ``iter_gallery_items``, which stay in ``app.py`` (gallery-scan extraction is
-    tracked separately). Resolving them through the module at call time keeps
-    monkeypatching of ``app`` attributes effective and avoids a circular import.
+    ``iter_gallery_items``. The scan helpers moved to ``gallery_scan.py``
+    (issue #521) and ``app.py`` re-imports them, so resolving everything
+    through ``app`` at call time keeps monkeypatching of ``app`` attributes
+    effective and avoids a circular import.
     """
     import app
 
