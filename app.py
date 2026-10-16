@@ -84,7 +84,6 @@ from security import (
     sanitize_path,
     validate_csrf,
 )
-from tag_store import TagStore
 from thumbnails import (
     batch_remove_thumbnails,
     ensure_thumbnail_cache_dir,
@@ -103,6 +102,37 @@ from trash import (
     purge_old_trash,
     restore_from_trash,
 )
+
+# The gallery_scan symbols re-exported above are the patch surface that the
+# routes in this module, ``llm_api``/``thumbnails`` (via ``app_module.X``) and
+# the test suite (``monkeypatch.setattr(app, ...)``) rely on; several are not
+# referenced anywhere in this file, so list them in ``__all__`` to mark them
+# as intentional re-exports (issue #521).
+__all__ = [
+    "GALLERY_PAGE_DEFAULT",
+    "GALLERY_PAGE_MAX",
+    "GALLERY_SCAN_CACHE_MAX_ENTRIES",
+    "GALLERY_SCAN_CACHE_TTL",
+    "GALLERY_SCAN_LIMIT",
+    "RECENT_ENUMERATION_LIMIT",
+    "_apply_scan_limit",
+    "_gallery_item_rel_path",
+    "_gallery_scan_cache",
+    "_invalidate_gallery_scan_cache",
+    "_paginate",
+    "_parse_pagination",
+    "_tag_store",
+    "file_sha256",
+    "find_duplicate_media",
+    "format_size",
+    "is_excluded_gallery_path",
+    "is_media_file",
+    "iter_gallery_items",
+    "media_metadata",
+    "recent_gallery_entries",
+    "sanitize_rel_path",
+    "source_file_path",
+]
 
 # The thumbnail/folder-cover module reads its GALLERY_* settings at import
 # time; refresh them on every app import so reloading app (as the test
