@@ -53,10 +53,11 @@ def _app():
 
     The endpoints below rely on ``DATA_FOLDER`` and the gallery-scan/pagination
     helpers, the tag-store singleton, ``media_metadata``,
-    ``find_duplicate_media`` and the configured-task runner, which stay in
-    ``app.py`` (gallery-scan extraction is tracked separately). Resolving them
-    through the module at call time keeps monkeypatching of ``app`` attributes
-    effective and avoids a circular import.
+    ``find_duplicate_media`` and the configured-task runner. The scan/media
+    helpers live in ``gallery_scan.py`` (issue #521) and the configured-task
+    runner stays in ``app.py``; ``app.py`` re-imports the ``gallery_scan``
+    symbols, so resolving through ``app`` at call time keeps monkeypatching of
+    ``app`` attributes effective and avoids a circular import.
     """
     import app
 
