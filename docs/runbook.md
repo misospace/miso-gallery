@@ -384,6 +384,15 @@ drift apart.
 
 **Dependency invariant:** `requirements.txt` is the install manifest consumed by the Dockerfile and CI; it pins (or floors) runtime versions. `pyproject.toml` `[project.dependencies]` mirrors those pins as ranges whose lower bound equals the pinned version. The Tests workflow fails any PR where the two disagree (a package present in only one, or a floor that no longer matches the pin). Renovate bumps `requirements.txt`; update `pyproject.toml` in the same PR. `pip` is exempt — it is pinned only so `pip-audit` does not flag pip itself.
 
+**Packaging invariant:** the project installs with `pip install .`, so `pyproject.toml`
+declares an explicit `[build-system]` and a `[tool.setuptools]` `py-modules` list. That list
+is flat by design — runtime modules live at the repo root, and the Dockerfile copies them
+there individually — so a `src/` layout would diverge from how the image is actually built.
+Without the explicit list, setuptools auto-discovery treats `assets/` and `templates/` as
+top-level packages and the build aborts. A new root-level runtime module must be added to
+both the Dockerfile `COPY` list and `py-modules`. Docker remains the deploy path; an
+installed wheel carries the Python modules only, not `templates/` or `assets/`.
+
 > The legacy "Manual Release" / "Publish Release" workflows were removed; they predate
 > release-please and could never complete under the current flow. Use the release-please
 > flow above.
