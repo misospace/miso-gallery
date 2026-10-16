@@ -199,6 +199,15 @@ app = Flask(__name__)
 def set_csp_nonce():
     g.csp_nonce = secrets.token_urlsafe(16)
 
+
+# Expose the per-request CSP nonce to every template (issue #534). Rendered
+# inline scripts carry <script nonce="{{ csp_nonce }}">, which the
+# script-src 'nonce-...' directive requires; without this the attribute
+# renders empty and browsers reject the script.
+@app.context_processor
+def _inject_csp_nonce():
+    return {"csp_nonce": g.get("csp_nonce", "")}
+
 app.secret_key = resolve_secret_key()
 
 # Session persistence configuration for mobile compatibility
