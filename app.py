@@ -963,15 +963,21 @@ _MP4_MAX_BOXES = 4096
 _MP4_SKIP_CHUNK = 64 * 1024
 
 
-def _skip_stream(stream, count: int) -> bool:
-    """Advance ``stream`` by ``count`` bytes without buffering them; False if the stream ends early."""
+def _skip_stream(stream, count: int, total: int | None) -> bool:
+    """Advance ``stream`` by ``count`` bytes without buffering them; False if the stream ends early.
+
+    The seek fast path is only safe when the total length is measurable: on streams that
+    cannot report it, a forward seek can succeed past end of file, so fall back to bounded
+    reads that actually detect the early end.
+    """
     if count <= 0:
         return True
-    try:
-        stream.seek(count, os.SEEK_CUR)
-        return True
-    except (OSError, OverflowError, ValueError):
-        pass
+    if total is not None:
+        try:
+            stream.seek(count, os.SEEK_CUR)
+            return True
+        except (OSError, OverflowError, ValueError):
+            pass
     remaining = count
     while remaining > 0:
         chunk = stream.read(min(remaining, _MP4_SKIP_CHUNK))
@@ -1027,7 +1033,7 @@ def _is_valid_isobmff(stream) -> bool:
             return False
         if box_type == b"moov":
             seen_moov = True
-        if not _skip_stream(stream, size - header_size):
+        if not _skip_stream(stream, size - header_size, total):
             return False
         position += size
     return seen_moov

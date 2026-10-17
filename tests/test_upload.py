@@ -374,6 +374,40 @@ def test_isobmff_validation_survives_a_forward_only_stream():
     assert _is_valid_isobmff(_ForwardOnly(io.BytesIO(_ftyp() + _moov()))) is True
 
 
+def test_isobmff_validation_rejects_truncated_stream_with_unknown_length():
+    """A stream that permits forward seeks past EOF but cannot report its length must not pass."""
+    import os
+
+    from app import _is_valid_isobmff
+
+    class _SeeksPastEof:
+        """Forward seeks always succeed (even past EOF); length cannot be measured."""
+
+        def __init__(self, data):
+            self.data = data
+            self.pos = 0
+
+        def read(self, size=-1):
+            end = len(self.data) if size < 0 else min(self.pos + size, len(self.data))
+            chunk = self.data[self.pos:end]
+            self.pos = end
+            return chunk
+
+        def tell(self):
+            return self.pos
+
+        def seek(self, offset, whence=os.SEEK_SET):
+            if whence != os.SEEK_CUR:
+                raise OSError("stream cannot report its length")
+            self.pos += offset
+            return self.pos
+
+    # The second box declares a 24-byte body but only 4 payload bytes exist.
+    truncated = _ftyp() + (24).to_bytes(4, "big") + b"moov" + b"\x00" * 4
+    assert _is_valid_isobmff(_SeeksPastEof(truncated)) is False
+    assert _is_valid_isobmff(_SeeksPastEof(_ftyp() + _moov())) is True
+
+
 def test_upload_rejects_mp4_with_payload_shorter_than_declared(monkeypatch, tmp_path):
     client, data_dir = _local_client(monkeypatch, tmp_path)
     csrf = _login(client)
