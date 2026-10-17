@@ -30,6 +30,7 @@ class RateLimitConfig:
 
 
 def _to_positive_int(value: Any, fallback: int) -> int:
+    """Parse a positive integer, returning ``fallback`` on garbage or non-positive input."""
     try:
         parsed = int(value)
     except (TypeError, ValueError):
@@ -143,14 +144,6 @@ return 1
 
 FALLBACK_LIMITER = InMemoryRateLimiter()
 
-
-def _to_positive_int(raw: str, default: int) -> int:
-    """Parse a positive integer from an env var, returning ``default`` on garbage."""
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value > 0 else default
 
 # Lazy-loaded route overrides and primary limiter so that:
 # - tests can inject mock limiters without module-level patching
