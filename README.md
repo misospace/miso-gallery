@@ -328,6 +328,15 @@ Task execution requires a write-scoped LLM API key. Read-scoped keys can browse 
 
 ### Local Development
 
+With [mise](https://mise.jdx.dev) installed, a single command prepares the full development
+environment (pinned Python, isolated venv, dev dependencies) — see [CONTRIBUTING.md](CONTRIBUTING.md):
+
+```bash
+mise run bootstrap
+```
+
+Without mise, set up manually:
+
 ```bash
 # Clone and setup
 git clone https://github.com/misospace/miso-gallery.git
