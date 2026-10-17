@@ -10,10 +10,12 @@ mise run bootstrap
 
 [mise](https://mise.jdx.dev) installs the Python pinned in `.mise/config.toml` (locked, with
 checksums, in `.mise/mise.lock`), creates the project-local `.venv/`, and installs the project
-with dev extras from `pyproject.toml` — the dependency authority for development installs. No sudo, no global
-config changes, no Git hooks. Re-running is idempotent: an existing `.venv/` built from the
-pinned Python is reused. The script fails clearly if prerequisites are missing and never
-modifies tracked source or runs the test suite implicitly.
+with dev extras from `pyproject.toml` — the dependency authority for development installs. The
+committed pip constraint lock in `.mise/requirements-constraints.txt` pins the reviewed resolution
+(including the build backend) without adding a second dependency authority. No sudo, no global config changes, no Git hooks.
+Re-running is idempotent: an existing `.venv/` built from the pinned Python is reused. The script
+fails clearly if prerequisites are missing and never modifies tracked source or runs the test
+suite implicitly.
 
 Run tasks through mise so the pinned toolchain is used (activate `.venv/` manually if you
 prefer a plain shell):
