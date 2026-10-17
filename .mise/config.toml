@@ -64,7 +64,10 @@ echo "OK: check passed (versions $app_ver)"
 '''
 
 # Mirrors .github/workflows/tests.yaml unit-test job (same 80% coverage gate).
-# No SECRET_KEY export needed: conftest.py supplies a test-only key.
+# No SECRET_KEY export needed: the root conftest.py sets a test-only key via
+# os.environ.setdefault before pytest collects any test module (collection-time
+# `import app` executes after conftest import), so this task runs clean without
+# caller-supplied environment.
 [tasks.test]
 description = "Unit tests with the CI coverage gate (does not build Docker)"
 run = '''
