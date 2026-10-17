@@ -1,5 +1,41 @@
 # Changelog
 
+## [0.4.0](https://github.com/misospace/miso-gallery/compare/0.3.0...0.4.0) (2026-10-17)
+
+
+### Features
+
+* **deps:** update dependency pillow (12.3.0 → 13.0.0) ([#550](https://github.com/misospace/miso-gallery/issues/550)) ([52a5141](https://github.com/misospace/miso-gallery/commit/52a5141577c639ce460f00284e25dcb31938dea0))
+* **deps:** update dependency pillow (12.3.0 → 13.0.0) ([#551](https://github.com/misospace/miso-gallery/issues/551)) ([bd071d2](https://github.com/misospace/miso-gallery/commit/bd071d25bee0d6dfaf14133e1d30027ce9b22122))
+
+
+### Bug Fixes
+
+* **csp:** pass the per-request CSP nonce into template contexts (issue [#534](https://github.com/misospace/miso-gallery/issues/534)) ([#548](https://github.com/misospace/miso-gallery/issues/548)) ([59b396f](https://github.com/misospace/miso-gallery/commit/59b396f74910a68efcd5ac98c799b69ddf7c62c9))
+* **thumbnails:** bind cache identity to full path digest (issue [#515](https://github.com/misospace/miso-gallery/issues/515)) ([016e93d](https://github.com/misospace/miso-gallery/commit/016e93dd46396b2271a6c0a15e9220596000631f))
+* **thumbnails:** bind cache identity to full path digest (issue [#515](https://github.com/misospace/miso-gallery/issues/515)) ([06b5bd8](https://github.com/misospace/miso-gallery/commit/06b5bd83eed4a846df025cc562117f32944af2f0))
+* **trash:** consume trashed directory on successful restore ([3c1483d](https://github.com/misospace/miso-gallery/commit/3c1483d93af6abe4255114868165404a65d7af24))
+* **trash:** consume trashed directory on successful restore ([2352265](https://github.com/misospace/miso-gallery/commit/2352265df795bb2900460c8ade173e7108c9524c))
+* **trash:** log unrecoverable trash source after cross-device restore and cover fallback ([ec30c17](https://github.com/misospace/miso-gallery/commit/ec30c170ded707edf2919c5fb524750a58eee13e))
+* **trash:** stage cross-device restore copy to avoid clobbering concurrent winner ([106f680](https://github.com/misospace/miso-gallery/commit/106f680d8d30b3e19226984124e0ee3852dafb08))
+* **trash:** stage cross-device restore on dest filesystem, not source ([b0833a1](https://github.com/misospace/miso-gallery/commit/b0833a1736d47de423e9ddfa5ed3c8cb4b969a4d))
+* **upload:** accept valid non-faststart MP4/MOV uploads (issue [#494](https://github.com/misospace/miso-gallery/issues/494)) ([#552](https://github.com/misospace/miso-gallery/issues/552)) ([b481bec](https://github.com/misospace/miso-gallery/commit/b481beccf4de469d1c38014a6121babc3ceecbac))
+
+
+### Chores
+
+* **ci:** disable experimental requirement tracing ([#544](https://github.com/misospace/miso-gallery/issues/544)) ([83fbce9](https://github.com/misospace/miso-gallery/commit/83fbce9763f10d32e599c28dddc11ce7de309436))
+* **packaging:** declare pip install library-only and surface it at import (issue [#547](https://github.com/misospace/miso-gallery/issues/547)) ([#549](https://github.com/misospace/miso-gallery/issues/549)) ([8ce3e99](https://github.com/misospace/miso-gallery/commit/8ce3e99d89312e7cf5d28fe19d776ae267c45592))
+
+
+### Refactors
+
+* **gallery:** extract gallery scanning and media helpers into gallery_scan.py ([#543](https://github.com/misospace/miso-gallery/issues/543)) ([bb85c6f](https://github.com/misospace/miso-gallery/commit/bb85c6f265cd04930401730078cedaadc41dcd75))
+* **llm:** extract /api/llm/* REST API from app.py into llm_api.py (issue [#519](https://github.com/misospace/miso-gallery/issues/519)) ([84aeb17](https://github.com/misospace/miso-gallery/commit/84aeb171f9f920844fa1fea2c3fb433eaf38ed8f))
+* **llm:** extract /api/llm/* REST API from app.py into llm_api.py (issue [#519](https://github.com/misospace/miso-gallery/issues/519)) ([4564f96](https://github.com/misospace/miso-gallery/commit/4564f961e53db507f0e5b3d4e77b701991afd19a))
+* **oidc:** extract OIDC login/callback/refresh flow from app.py into oidc.py ([d424d4c](https://github.com/misospace/miso-gallery/commit/d424d4cad19af0301dd561360fe53639b2fd61bb))
+* **oidc:** extract OIDC login/callback/refresh flow from app.py into oidc.py ([3956339](https://github.com/misospace/miso-gallery/commit/3956339419a729468934cbdac1f4367253e31dbb))
+
 ## [0.3.0](https://github.com/misospace/miso-gallery/compare/0.2.1...0.3.0) (2026-10-14)
 
 
