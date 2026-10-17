@@ -10,6 +10,7 @@ import re
 import secrets
 import shlex
 import subprocess
+import sys
 import threading
 import time
 import warnings
@@ -958,6 +959,86 @@ def bulk_delete():
     return redirect(url_for("index", **redirect_kwargs))
 
 
+_MP4_MAX_BOXES = 4096
+_MP4_SKIP_CHUNK = 64 * 1024
+
+
+def _skip_stream(stream, count: int, total: int | None) -> bool:
+    """Advance ``stream`` by ``count`` bytes without buffering them; False if the stream ends early.
+
+    The seek fast path is only safe when the total length is measurable: on streams that
+    cannot report it, a forward seek can succeed past end of file, so fall back to bounded
+    reads that actually detect the early end.
+    """
+    if count <= 0:
+        return True
+    if total is not None:
+        try:
+            stream.seek(count, os.SEEK_CUR)
+            return True
+        except (OSError, OverflowError, ValueError):
+            pass
+    remaining = count
+    while remaining > 0:
+        chunk = stream.read(min(remaining, _MP4_SKIP_CHUNK))
+        if not chunk:
+            return False
+        remaining -= len(chunk)
+    return True
+
+
+def _stream_length(stream) -> int | None:
+    """Total stream length when it can be measured, else None for streams that cannot report it."""
+    try:
+        start = stream.tell()
+        total = stream.seek(0, os.SEEK_END)
+        stream.seek(start, os.SEEK_SET)
+    except (OSError, OverflowError, ValueError):
+        return None
+    return total
+
+
+def _is_valid_isobmff(stream) -> bool:
+    """Walk top-level ISO-BMFF boxes and require a leading ``ftyp`` plus a ``moov`` anywhere in the file.
+
+    Non-faststart MP4/MOV files put ``moov`` after ``mdat``, so the box walk seeks over payloads
+    instead of scanning bytes; this keeps memory bounded no matter how large the media data is.
+    """
+    total = _stream_length(stream)
+    position = 0
+    seen_moov = False
+    for index in range(_MP4_MAX_BOXES):
+        header = stream.read(8)
+        if len(header) < 8:
+            break
+        box_type = header[4:8]
+        if index == 0 and box_type != b"ftyp":
+            return False
+        size = int.from_bytes(header[:4], "big")
+        header_size = 8
+        if size == 1:
+            largesize = stream.read(8)
+            if len(largesize) < 8:
+                return False
+            size = int.from_bytes(largesize, "big")
+            header_size = 16
+        if size == 0:
+            # "extends to end of file" is only defined for the 32-bit size form.
+            if header_size != 8:
+                return False
+            break
+        if size < header_size or size > sys.maxsize:
+            return False
+        if total is not None and position + size > total:
+            return False
+        if box_type == b"moov":
+            seen_moov = True
+        if not _skip_stream(stream, size - header_size, total):
+            return False
+        position += size
+    return seen_moov
+
+
 def _is_valid_upload_content(file, suffix: str) -> bool:
     """Validate image contents or supported video container signatures."""
     stream = file.stream
@@ -968,9 +1049,9 @@ def _is_valid_upload_content(file, suffix: str) -> bool:
                 with Image.open(stream) as image:
                     image.verify()
             return True
-        header = stream.read(4096)
         if suffix in (".mp4", ".mov"):
-            return len(header) >= 16 and header[4:8] == b"ftyp" and b"moov" in header[8:]
+            return _is_valid_isobmff(stream)
+        header = stream.read(4096)
         return len(header) >= 8 and header.startswith(b"\x1a\x45\xdf\xa3") and b"webm" in header.lower()
     except (OSError, SyntaxError, UnidentifiedImageError, ValueError, Image.DecompressionBombError, Image.DecompressionBombWarning):
         return False
