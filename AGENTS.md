@@ -37,6 +37,10 @@ Default agent for `misospace/miso-gallery`. Role: Senior Software Engineer speci
 - **Frontend**: Server-rendered HTML/CSS/JS via `render_template_string` in `app.py`
 - **Database**: None — the application is stateless; images are stored on disk
 
+### Development Bootstrap
+- One noninteractive setup command from a clean checkout: `mise run bootstrap` (installs the Python pinned in `.mise/config.toml` / `.mise/mise.lock`, builds `.venv/`, installs the project with dev extras). Idempotent; see CONTRIBUTING.md.
+- Targeted verification: `mise run check` (lint + version/dependency consistency), `mise run test` (pytest with the CI 80% coverage gate). No native media utilities are required; tests fabricate media bytes in Python.
+
 ### Version Management
 - In-app version is sourced from `app.py`
 - Release automation must keep `app.py` version aligned with release tag
