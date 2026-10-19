@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import logging
 import shutil
@@ -9,10 +10,25 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+try:
+    import fcntl
+except ImportError:  # non-POSIX platform: fall back to the age-based policy
+    fcntl = None
+
 logger = logging.getLogger(__name__)
 
 TRASH_DIR_NAME = ".trash"
 META_SUFFIX = ".meta.json"
+STAGE_PREFIX = ".restore-stage-"
+STAGE_LOCK_SUFFIX = ".lock"
+
+# Stages that carry no verifiable live lock (legacy leftovers written before
+# the lock protocol, or filesystems where flock is unsupported) are only
+# reclaimed once they are older than this grace period. The flock on
+# ``<stage>.lock`` is the primary active/abandoned signal; the grace period
+# is the conservative fallback and must exceed any plausible restore
+# duration so a slow or lock-deprived copy is never clobbered.
+STAGE_ABANDON_GRACE_SECONDS = 24 * 3600
 
 
 def _utcnow() -> datetime:
@@ -174,14 +190,76 @@ def _find_symlinks(root: Path) -> list[Path]:
     return found
 
 
+SOURCE_LOCK_HELD = "held"
+SOURCE_LOCK_ACQUIRED = "acquired"
+SOURCE_LOCK_UNAVAILABLE = "unavailable"
+
+
+def _acquire_source_lock(meta_file: Path):
+    """Acquire the exclusive source lock on a trash item's meta file.
+
+    Every restorable trash item has a sibling ``<item>.meta.json``; an
+    exclusive ``flock`` on that file is the "source in use" signal shared by
+    ``restore_from_trash`` and the maintenance sweeps (``empty_trash``,
+    ``purge_old_trash``). The meta file doubles as the lock file, so no
+    extra lock file is created.
+
+    Returns ``(fh, state)`` where *state* is:
+
+    - ``SOURCE_LOCK_ACQUIRED``: *fh* is an open file description holding the
+      exclusive flock. The caller must keep it open while it reads, copies,
+      renames, or deletes the item, and release it by closing *fh* — never
+      by unlinking the meta file (it is real metadata, unlike a stage lock
+      file).
+    - ``SOURCE_LOCK_HELD``: another live process holds the lock (EAGAIN or
+      EACCES). The item is in use by a restore or by concurrent
+      maintenance; the caller must leave item and metadata alone.
+    - ``SOURCE_LOCK_UNAVAILABLE``: the state could not be determined (no
+      meta file, ``fcntl`` is None, the open failed, or flock raised
+      something other than EAGAIN/EACCES). Callers fall back to the
+      historical lockless behavior.
+
+    Like the stage-lock protocol, ``flock`` is honored across processes and
+    the kernel releases it on process death, so a crashed restore leaves
+    the item with a free lock and no grace machinery is needed for sources.
+    """
+    if fcntl is None:
+        return None, SOURCE_LOCK_UNAVAILABLE
+    try:
+        # Read-only open: never create or truncate real metadata. A missing
+        # meta file is a legitimate "unavailable" outcome.
+        fh = open(meta_file, "r")  # noqa: SIM115
+    except OSError:
+        return None, SOURCE_LOCK_UNAVAILABLE
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        fh.close()
+        if exc.errno in (errno.EAGAIN, errno.EACCES):
+            return None, SOURCE_LOCK_HELD
+        return None, SOURCE_LOCK_UNAVAILABLE
+    return fh, SOURCE_LOCK_ACQUIRED
+
+
 def restore_from_trash(item_name: str, data_folder: Path) -> bool:
     """Restore an item from trash to its original location.
 
     Returns True if restored, False if not found or invalid.
     Raises ValueError if *item_name* contains path traversal sequences.
+
+    For the whole duration of the restore the item's meta file is held
+    under an exclusive flock (see ``_acquire_source_lock``): trash
+    maintenance in any worker cannot delete the trash *source* while a
+    cross-device ``copytree`` is still reading it (issue #557), and if
+    maintenance holds the lock first, the restore fails fast before any
+    copy starts. A ``ValueError`` (invalid item or unsafe meta) propagates
+    to the caller; any other failure returns False with item and metadata
+    preserved so a retry stays possible.
     """
     # Reject path traversal in item_name (Flask's <path:> converter allows / and ..)
-    if "/" in item_name or "\\" in item_name or ".." in item_name:
+    # and embedded null bytes, which would make every path syscall below
+    # raise ValueError from deep inside os.stat instead of this explicit guard.
+    if "/" in item_name or "\\" in item_name or ".." in item_name or "\x00" in item_name:
         raise ValueError(f"Invalid trash item name: {item_name!r}")
 
     td = trash_dir(data_folder)
@@ -216,6 +294,22 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         raise ValueError(f"Item path escapes trash directory: {item_name!r}")
 
     meta_file = _meta_path(item)
+
+    # Source-side lock: hold an exclusive flock on the meta file across BOTH
+    # restore paths (fast rename and the cross-device stage/copytree
+    # fallback), the post-rename source cleanup, and the meta unlink, so the
+    # trash source cannot vanish under an in-flight copytree. Maintenance
+    # must *acquire* this lock (not merely probe it) before deleting, which
+    # closes the probe-vs-acquire race in both directions: if maintenance
+    # wins the lock the restore fails fast below; if the restore wins,
+    # maintenance skips the item.
+    lock_fh, lock_state = _acquire_source_lock(meta_file)
+    if lock_state == SOURCE_LOCK_HELD:
+        # Another worker is emptying, purging, or restoring this item.
+        # Failing fast before any copy starts loses nothing (trash
+        # semantics for a concurrently-emptied item) and keeps item+meta
+        # untouched for the holder to finish with.
+        return False
     try:
         meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
         rel = meta.get("original")
@@ -261,7 +355,12 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                 # never dest. Without staging, a concurrent duplicate
                 # restore whose copytree fails because the winner already
                 # populated dest would rmtree the winner's restored media.
-                stage = dest.parent / f".restore-stage-{uuid.uuid4().hex}"
+                stage = dest.parent / f"{STAGE_PREFIX}{uuid.uuid4().hex}"
+                # Mark the stage as actively owned *before* copying into it.
+                # Trash maintenance (empty/purge in any worker) consults this
+                # lock and must skip the stage while a live process holds it;
+                # see _reclaim_orphan_restore_stages.
+                stage_lock = _acquire_stage_lock(stage)
                 stage_failed = True
                 try:
                     shutil.copytree(item, stage, symlinks=True)
@@ -278,18 +377,36 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                 finally:
                     if stage_failed and stage.exists():
                         shutil.rmtree(stage, ignore_errors=True)
+                    _release_stage_lock(stage, stage_lock)
                 try:
                     shutil.rmtree(item)
                 except OSError:
-                    # Keep the trash entry and metadata so a retry stays
-                    # possible; both copies exist but nothing is lost.
-                    logger.warning(
-                        "Restored %r to %s but could not remove trash source %s",
+                    if item.exists():
+                        # Keep the trash entry and metadata so a retry stays
+                        # possible; both copies exist but nothing is lost.
+                        logger.warning(
+                            "Restored %r to %s but could not remove trash source %s",
+                            item_name,
+                            dest,
+                            item,
+                        )
+                        raise
+                    # The trash source vanished while we were restoring it:
+                    # concurrent trash maintenance reclaimed it after our
+                    # staged copy completed. Under the source-lock protocol
+                    # this cannot come from empty/purge (they must acquire
+                    # the same meta flock we hold); the branch remains as a
+                    # safety net for lockless filesystems. The destination
+                    # holds the full restored tree, so the restore itself
+                    # succeeded; the missing source is exactly what a
+                    # completed restore looks like.
+                    logger.info(
+                        "Restored %r to %s; trash source %s was already "
+                        "reclaimed by concurrent maintenance",
                         item_name,
                         dest,
                         item,
                     )
-                    raise
         else:
             item.rename(dest)
         if meta_file.exists():
@@ -299,18 +416,71 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         raise
     except Exception:
         return False
+    finally:
+        # Release the source lock by closing the descriptor only — never by
+        # unlinking the meta file: the success path unlinked it explicitly
+        # above, and a failed restore must keep item+meta for a retry.
+        if lock_fh is not None:
+            with contextlib.suppress(OSError):
+                lock_fh.close()
 
 
 def empty_trash(data_folder: Path) -> int:
+    """Delete every trash item, skipping items whose source lock is held.
+
+    Each deleted directory entry (an item or a meta file) counts 1. A meta
+    file whose paired item still exists is left for the item's own
+    iteration (deleting the meta first would strip the item of its lock
+    file); a meta file with no item is stale and is unlinked directly.
+
+    For a real item, maintenance ACQUIRES (not merely probes) the source
+    lock on the meta file and holds it across the delete of both the item
+    and its meta (see ``_acquire_source_lock``). If the lock is held by
+    another worker (an active restore or concurrent maintenance), the item
+    and its meta are skipped entirely and not counted. If the lock cannot
+    be acquired for any other reason (no meta file, ``fcntl`` is None, or
+    flock unsupported/unexpectedly failing), the historical unconditional
+    delete is kept for lockless filesystems.
+    """
     td = trash_dir(data_folder)
     deleted = 0
     for item in td.iterdir():
         try:
-            if item.is_dir():
-                shutil.rmtree(item, ignore_errors=True)
-            else:
-                item.unlink(missing_ok=True)
-            deleted += 1
+            if item.name.endswith(META_SUFFIX) and len(item.name) > len(META_SUFFIX):
+                # The paired item's iteration deletes item + meta together
+                # under the source lock; a lone meta means the item is
+                # already gone, so the meta is stale. An entry literally
+                # named ".meta.json" is a real trashed item, not metadata
+                # (stripping the suffix would leave an empty paired name),
+                # so it falls through to the ordinary item path below.
+                if item.with_name(item.name[:-len(META_SUFFIX)]).exists():
+                    continue
+                if item.exists():
+                    item.unlink(missing_ok=True)
+                    deleted += 1
+                continue
+            lock_fh, lock_state = _acquire_source_lock(_meta_path(item))
+            if lock_state == SOURCE_LOCK_HELD:
+                # An active restore (or concurrent maintenance) owns this
+                # item; deleting it mid-copy would report a successful
+                # restore of media that is only partially copied (#557).
+                continue
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
+                deleted += 1
+                meta_file = _meta_path(item)
+                if meta_file.exists():
+                    meta_file.unlink(missing_ok=True)
+                    deleted += 1
+            finally:
+                # Release by closing only; the meta was just deleted (or is
+                # gone with it) and must never be re-unlinked from here.
+                if lock_fh is not None:
+                    with contextlib.suppress(OSError):
+                        lock_fh.close()
         except Exception:
             pass
     _reclaim_orphan_restore_stages(data_folder)
@@ -318,6 +488,15 @@ def empty_trash(data_folder: Path) -> int:
 
 
 def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
+    """Delete trash items older than the retention window.
+
+    Counting is unchanged: one per expired item (its meta goes with it).
+    Like ``empty_trash``, maintenance acquires the item's source lock on
+    its meta file and holds it across the deletes; a lock held by another
+    worker (active restore or concurrent maintenance) skips the item AND
+    its meta without counting, while an unverifiable lock state falls back
+    to the historical unconditional delete. See ``_acquire_source_lock``.
+    """
     td = trash_dir(data_folder)
     cutoff = _utcnow() - timedelta(days=retention_days)
     deleted = 0
@@ -333,15 +512,163 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
             except Exception:
                 pass
         if deleted_at < cutoff:
-            if item.is_dir():
-                shutil.rmtree(item, ignore_errors=True)
-            else:
-                item.unlink(missing_ok=True)
-            if meta_file.exists():
+            lock_fh, lock_state = _acquire_source_lock(meta_file)
+            if lock_state == SOURCE_LOCK_HELD:
+                # Owned by a live restore (or concurrent maintenance): the
+                # item and its meta both stay, uncounted.
+                continue
+            try:
+                if item.is_dir():
+                    shutil.rmtree(item, ignore_errors=True)
+                else:
+                    item.unlink(missing_ok=True)
                 meta_file.unlink(missing_ok=True)
-            deleted += 1
+                deleted += 1
+            finally:
+                if lock_fh is not None:
+                    with contextlib.suppress(OSError):
+                        lock_fh.close()
     _reclaim_orphan_restore_stages(data_folder)
     return deleted
+
+
+def _stage_lock_path(stage: Path) -> Path:
+    """Path of the advisory lock file that marks *stage* as live."""
+    return stage.with_name(stage.name + STAGE_LOCK_SUFFIX)
+
+
+def _acquire_stage_lock(stage: Path):
+    """Best-effort advisory lock marking *stage* as actively owned.
+
+    The lock is an exclusive ``flock`` on ``<stage>.lock`` held for the
+    lifetime of the copy. ``flock`` is honored across processes: trash
+    maintenance running in any other worker sees the lock held and must not
+    reclaim the stage. When a restore process crashes, the kernel drops the
+    lock, so its stage becomes distinguishable as abandoned immediately —
+    no timing heuristic needed for the normal case.
+
+    Returns the open lock file on success. On *any* failure (flock
+    unsupported, read-only filesystem, permissions) the lock file is removed
+    before returning ``None``, so maintenance can never mistake an
+    in-flight restore's lock for a crashed owner's released one; such
+    stages fall back to the ``STAGE_ABANDON_GRACE_SECONDS`` age policy
+    instead of immediate reclaim.
+    """
+    if fcntl is None:
+        return None
+    lock_path = _stage_lock_path(stage)
+    try:
+        # The descriptor must outlive this function: closing it releases the
+        # flock, which is precisely what marks the stage as abandoned.
+        fh = open(lock_path, "w")  # noqa: SIM115
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        with contextlib.suppress(OSError):
+            lock_path.unlink(missing_ok=True)
+        return None
+    return fh
+
+
+def _release_stage_lock(stage: Path, fh) -> None:
+    """Close the lock file (releasing the flock) and remove the lock file."""
+    if fh is not None:
+        with contextlib.suppress(OSError):
+            fh.close()
+    with contextlib.suppress(OSError):
+        _stage_lock_path(stage).unlink(missing_ok=True)
+
+
+def _stage_lock_state(lock_path: Path):
+    """Classify a stage lock file for maintenance.
+
+    Returns ``True`` when a live process holds the lock (the stage is an
+    active restore's, never to be reclaimed), ``False`` when the lock file
+    exists but no process holds it (its owner crashed: the kernel drops
+    flocks on process death, so the stage is abandoned and reclaimable), and
+    ``None`` when the state cannot be determined (flock unsupported or the
+    lock file is inaccessible).
+    """
+    if fcntl is None:
+        return None
+    try:
+        with open(lock_path, "r") as fh:
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in (errno.EAGAIN, errno.EACCES):
+                    return True
+                return None
+            # Acquiring the lock proves nobody held it; exiting the with
+            # closes the descriptor and releases it again.
+    except OSError:
+        return None
+    return False
+
+
+def _exceeds_abandon_grace(path: Path) -> bool:
+    """True if *path*'s inode is older than the explicit abandon grace.
+
+    Uses ``st_ctime`` rather than ``st_mtime`` because ``copytree`` applies
+    the *source's* mtimes to the copy, which would make a freshly copied
+    stage of old media look old.
+    """
+    try:
+        st = path.stat()
+    except OSError:
+        return False
+    return (time.time() - st.st_ctime) > STAGE_ABANDON_GRACE_SECONDS
+
+
+def _remove_stage(stage: Path) -> None:
+    shutil.rmtree(stage, ignore_errors=True)
+    with contextlib.suppress(OSError):
+        _stage_lock_path(stage).unlink(missing_ok=True)
+
+
+def _reclaim_stage_dir(stage: Path) -> None:
+    """Reclaim one ``.restore-stage-*`` directory, if abandoned.
+
+    Active stages (lock held) are skipped entirely. Stages whose lock file
+    exists but is held by nobody are reclaimed immediately (the owner
+    crashed). Stages with no verifiable lock are reclaimed only once they
+    exceed ``STAGE_ABANDON_GRACE_SECONDS``.
+    """
+    lock_path = _stage_lock_path(stage)
+    if lock_path.exists():
+        held = _stage_lock_state(lock_path)
+        if held:
+            return
+        if held is False:
+            _remove_stage(stage)
+            return
+    if _exceeds_abandon_grace(stage):
+        _remove_stage(stage)
+
+
+def _reclaim_stage_lock_file(lock_path: Path) -> None:
+    """Reclaim a leaked lock file whose stage directory is already gone.
+
+    Unlike a stage *directory* paired with a lock (whose existence proves
+    the owner at least reached ``copytree``, hence had taken the flock), a
+    lock file with no directory proves nothing: the owner may simply not
+    have created the stage yet (the restore takes the flock a moment before
+    ``copytree`` creates the directory). Unlinking such a fresh lock would
+    strip a live restore of its protection mid-copy, so these orphans are
+    reclaimed only past the abandon grace, never immediately.
+    """
+    stage = lock_path.with_name(lock_path.name[: -len(STAGE_LOCK_SUFFIX)])
+    if stage.exists():
+        # The paired directory entry owns reclaim of this lock.
+        return
+    if _stage_lock_state(lock_path):
+        return
+    if _exceeds_abandon_grace(lock_path):
+        with contextlib.suppress(OSError):
+            lock_path.unlink(missing_ok=True)
 
 
 def _reclaim_orphan_restore_stages(data_folder: Path) -> None:
@@ -353,11 +680,41 @@ def _reclaim_orphan_restore_stages(data_folder: Path) -> None:
     directory can leak. Because it lives under the data folder (not under
     ``td``), the normal ``empty_trash``/``purge_old_trash`` iteration over
     the trash directory would miss it; this helper sweeps the data folder
-    for ``.restore-stage-*`` directories and removes them.
+    for ``.restore-stage-*`` directories and removes abandoned ones.
+
+    A stage is only abandoned if its owner is dead. A live restore holds an
+    exclusive ``flock`` on ``<stage>.lock`` for the whole copy, so sweeping
+    unconditionally would delete an in-progress restore (issue #557: a
+    second worker's ordinary maintenance — or even a purge with the default
+    30-day retention — could delete a stage created milliseconds earlier).
+    The reclaim policy is:
+
+    - lock held by a live process  -> skip (active restore)
+    - stage directory present with a lock file nobody holds -> reclaim now
+      (owner crashed; the kernel releases flocks on process death, and the
+      directory's existence proves the owner had reached the flock'd copy)
+    - no lock file / lock state unverifiable -> reclaim only after
+      ``STAGE_ABANDON_GRACE_SECONDS``, so legacy orphans stay collectable
+      while a slow or lock-deprived restore is never clobbered
+    - lock file without a stage directory -> reclaim only after the same
+      grace: the owner may not have created the stage yet, so a free lock
+      alone is not crash evidence.
+
+    ``flock`` works across processes (and is treated independently per open
+    file description even within one process), which is what makes the
+    signal valid between the app's concurrent workers; a per-process set
+    could not protect stages owned by other workers. The immediate
+    crashed-owner reclaim additionally assumes lock-coherent storage: the
+    supported deployment is a single host's Docker volume. On a hypothetical
+    multi-host mount where flock is per-client only, a free lock could be a
+    false crash signal; deployments sharing DATA_FOLDER across hosts would
+    need coherent locks (or should raise the grace and rely on it).
     """
-    for stage in data_folder.rglob(".restore-stage-*"):
+    for entry in data_folder.rglob(f"{STAGE_PREFIX}*"):
         try:
-            if stage.is_dir():
-                shutil.rmtree(stage, ignore_errors=True)
+            if entry.name.endswith(STAGE_LOCK_SUFFIX):
+                _reclaim_stage_lock_file(entry)
+            elif entry.is_dir():
+                _reclaim_stage_dir(entry)
         except OSError:
             pass
