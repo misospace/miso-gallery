@@ -878,7 +878,11 @@ class TestActiveRestoreStageProtection:
         import fcntl
 
         client, data_dir = build_client(monkeypatch, tmp_path)
-        stage = data_dir / "album"
+        album = data_dir / "album"
+        album.mkdir()
+        # The directory name must match the sweep glob, or the sweep would
+        # never inspect it and the test would pass vacuously.
+        stage = album / ".restore-stage-held"
         stage.mkdir()
         (stage / "partial.jpg").write_bytes(b"partial")
         lock = trash._stage_lock_path(stage)
@@ -892,6 +896,11 @@ class TestActiveRestoreStageProtection:
             assert lock.exists()
         finally:
             fh.close()
+
+        # Control: release the lock (simulating the owner's death) and the
+        # very same stage becomes reclaimable, proving the sweep did see it.
+        trash.empty_trash(data_dir)
+        assert not stage.exists(), "released stage must be reclaimed once lock is free"
 
     def test_lock_free_stage_respects_explicit_grace_policy(self, monkeypatch, tmp_path):
         """Stages with no verifiable lock are abandoned only by age.
@@ -932,8 +941,16 @@ class TestActiveRestoreStageProtection:
         )
 
     def test_leaked_lock_file_lifecycle(self, monkeypatch, tmp_path):
-        """A lock file whose stage directory is gone is a leak: reclaimed
-        while free, preserved while still held by a live restore."""
+        """A lock file whose stage directory never appeared is reclaimed
+        only under the grace policy, and never while a live restore holds
+        it.
+
+        A free lock without a directory proves nothing: the owner may be
+        moments from creating the stage (the restore takes the flock just
+        before copytree creates the directory). Unlinking it would strip a
+        live restore of its protection mid-copy, so freshness preserves it
+        even when it looks free.
+        """
         import fcntl
 
         client, data_dir = build_client(monkeypatch, tmp_path)
@@ -941,14 +958,16 @@ class TestActiveRestoreStageProtection:
         leak.mkdir()
         lock = leak / f"{trash.STAGE_PREFIX}ghost{trash.STAGE_LOCK_SUFFIX}"
 
-        # Free leaked lock: gone immediately (no grace wait).
+        # Fresh free lock-only entry: looks abandoned, is not provably so.
         lock.write_text("")
         trash.empty_trash(data_dir)
-        assert not lock.exists(), "empty_trash must reclaim a free orphan lock file"
-
-        lock.write_text("")
         trash.purge_old_trash(data_dir, retention_days=30)
-        assert not lock.exists(), "purge_old_trash must reclaim a free orphan lock file"
+        assert lock.exists(), "a fresh orphan lock must survive the grace period"
+
+        # Past the grace period with no stage ever appearing: a real leak.
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+        trash.empty_trash(data_dir)
+        assert not lock.exists(), "empty_trash must reclaim a grace-expired orphan lock file"
 
         # Held lock (owner mid-restore): preserved even with grace negative.
         lock.write_text("")

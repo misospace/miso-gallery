@@ -498,15 +498,23 @@ def _reclaim_stage_dir(stage: Path) -> None:
 
 
 def _reclaim_stage_lock_file(lock_path: Path) -> None:
-    """Reclaim a leaked lock file whose stage directory is already gone."""
+    """Reclaim a leaked lock file whose stage directory is already gone.
+
+    Unlike a stage *directory* paired with a lock (whose existence proves
+    the owner at least reached ``copytree``, hence had taken the flock), a
+    lock file with no directory proves nothing: the owner may simply not
+    have created the stage yet (the restore takes the flock a moment before
+    ``copytree`` creates the directory). Unlinking such a fresh lock would
+    strip a live restore of its protection mid-copy, so these orphans are
+    reclaimed only past the abandon grace, never immediately.
+    """
     stage = lock_path.with_name(lock_path.name[: -len(STAGE_LOCK_SUFFIX)])
     if stage.exists():
         # The paired directory entry owns reclaim of this lock.
         return
-    held = _stage_lock_state(lock_path)
-    if held:
+    if _stage_lock_state(lock_path):
         return
-    if held is False or _exceeds_abandon_grace(lock_path):
+    if _exceeds_abandon_grace(lock_path):
         with contextlib.suppress(OSError):
             lock_path.unlink(missing_ok=True)
 
@@ -530,16 +538,25 @@ def _reclaim_orphan_restore_stages(data_folder: Path) -> None:
     The reclaim policy is:
 
     - lock held by a live process  -> skip (active restore)
-    - lock file present, nobody holds it -> reclaim now (owner crashed;
-      the kernel releases flocks on process death)
+    - stage directory present with a lock file nobody holds -> reclaim now
+      (owner crashed; the kernel releases flocks on process death, and the
+      directory's existence proves the owner had reached the flock'd copy)
     - no lock file / lock state unverifiable -> reclaim only after
       ``STAGE_ABANDON_GRACE_SECONDS``, so legacy orphans stay collectable
-      while a slow or lock-deprived restore is never clobbered.
+      while a slow or lock-deprived restore is never clobbered
+    - lock file without a stage directory -> reclaim only after the same
+      grace: the owner may not have created the stage yet, so a free lock
+      alone is not crash evidence.
 
     ``flock`` works across processes (and is treated independently per open
     file description even within one process), which is what makes the
     signal valid between the app's concurrent workers; a per-process set
-    could not protect stages owned by other workers.
+    could not protect stages owned by other workers. The immediate
+    crashed-owner reclaim additionally assumes lock-coherent storage: the
+    supported deployment is a single host's Docker volume. On a hypothetical
+    multi-host mount where flock is per-client only, a free lock could be a
+    false crash signal; deployments sharing DATA_FOLDER across hosts would
+    need coherent locks (or should raise the grace and rely on it).
     """
     for entry in data_folder.rglob(f"{STAGE_PREFIX}*"):
         try:
