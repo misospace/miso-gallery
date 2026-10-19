@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import re
 import time
@@ -711,43 +712,357 @@ class TestRestoreConsumesTrashedDirectory:
         stages = [p for p in data_dir.rglob(".restore-stage-*") if p.is_dir()]
         assert stages == [], f"stage directory leaked: {stages}"
 
-    def test_orphan_restore_stage_reclaimed_by_empty_and_purge(self, monkeypatch, tmp_path):
-        """A ``.restore-stage-*`` directory left behind by a crashed
-        cross-device restore must be reclaimed by ``empty_trash`` and
-        ``purge_old_trash``.
+class TestActiveRestoreStageProtection:
+    """Regression tests for issue #557: trash maintenance must never
+    reclaim a ``.restore-stage-*`` directory that an in-flight cross-device
+    restore is copying into, while genuinely abandoned stages stay
+    reclaimable under an explicit policy.
 
-        The stage now lives on the destination filesystem (under
-        ``dest.parent``), not under ``td``, so the normal ``td`` iteration
-        would miss it. The reclaim helper sweeps ``data_folder`` instead.
+    The distinguishing signal is an exclusive ``flock`` on
+    ``<stage>.lock`` held by the restoring process for the whole copy.
+    ``flock`` is honored across processes (and treated independently per
+    open file description even within one process, which is what these
+    deterministic single-process interleavings exploit), and the kernel
+    drops it when the owner crashes — so any worker's maintenance can tell
+    an active stage from an abandoned one. A per-process set could not.
+    """
+
+    def _make_album(self, data_dir):
+        folder = data_dir / "album"
+        folder.mkdir()
+        (folder / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0a")
+        (folder / "sub").mkdir()
+        (folder / "sub" / "b.jpg").write_bytes(b"\xff\xd8\xff\xe0b")
+        return folder
+
+    def _interleave_maintenance(self, monkeypatch, data_dir, maintenance):
+        """Force the cross-device fallback and run *maintenance* mid-restore.
+
+        Renames whose source lives under the trash fail with EXDEV (a true
+        cross-filesystem restore), and *maintenance* is invoked between the
+        real ``copytree`` and the staged ``rename`` — the window in which a
+        second worker's ordinary maintenance used to delete the live stage.
+        The assertion inside the copytree wrapper fails loudly if the sweep
+        removes the stage the restore still owns.
         """
-        from trash import empty_trash, purge_old_trash
+        real_rename = trash.Path.rename
+        trash_root = trash.trash_dir(data_dir).resolve()
 
+        def cross_device_rename(path, destination):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return real_rename(path, destination)
+            if trash_root in resolved.parents or resolved == trash_root:
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_rename(path, destination)
+
+        real_copytree = trash.shutil.copytree
+
+        def copytree_with_maintenance(src, dest, *args, **kwargs):
+            result = real_copytree(src, dest, *args, **kwargs)
+            # shutil.copytree converts to str and recurses through this same
+            # attribute; only the top-level call from restore_from_trash
+            # passes Path objects, so inject maintenance exactly once.
+            if isinstance(dest, Path):
+                maintenance()
+                assert dest.is_dir(), (
+                    "concurrent trash maintenance deleted an active restore stage"
+                )
+            return result
+
+        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+        monkeypatch.setattr(trash.shutil, "copytree", copytree_with_maintenance)
+
+    def test_purge_during_active_cross_device_restore_preserves_stage(
+        self, monkeypatch, tmp_path
+    ):
+        """The issue #557 repro: ``purge_old_trash`` with the default
+        30-day retention used to delete a stage created milliseconds
+        earlier. Maintenance must skip the locked stage and the restore
+        must complete."""
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_album(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item = trash.trash_dir(data_dir) / entry
+        meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
+
+        self._interleave_maintenance(
+            monkeypatch, data_dir, lambda: trash.purge_old_trash(data_dir, retention_days=30)
+        )
+
+        assert restore_from_trash(entry, data_dir) is True
+        assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert (folder / "sub" / "b.jpg").read_bytes() == b"\xff\xd8\xff\xe0b"
+        assert not trash_item.exists()
+        assert not meta_file.exists()
+        assert list_trash(data_dir) == []
+        leftovers = [p for p in data_dir.rglob(f"{trash.STAGE_PREFIX}*")]
+        assert leftovers == [], f"stage artifacts leaked: {leftovers}"
+
+    def test_empty_during_active_cross_device_restore_preserves_stage(
+        self, monkeypatch, tmp_path
+    ):
+        """``empty_trash`` run mid-restore must not delete the live stage.
+
+        Emptying the trash removes the restore's trash source from under
+        it; the staged copy is already complete at that point, so the
+        restore still reports success with the full tree at its
+        destination rather than failing after the media was restored.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_album(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+
+        self._interleave_maintenance(
+            monkeypatch, data_dir, lambda: trash.empty_trash(data_dir)
+        )
+
+        assert restore_from_trash(entry, data_dir) is True
+        assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert (folder / "sub" / "b.jpg").read_bytes() == b"\xff\xd8\xff\xe0b"
+        assert list_trash(data_dir) == []
+        leftovers = [p for p in data_dir.rglob(f"{trash.STAGE_PREFIX}*")]
+        assert leftovers == [], f"stage artifacts leaked: {leftovers}"
+
+    def test_crashed_owner_stage_reclaimed_immediately(self, monkeypatch, tmp_path):
+        """A stage plus a released lock file is abandoned, not active.
+
+        A crashed owner's ``flock`` is dropped by the kernel, so the lock
+        file is present but held by nobody. Maintenance reclaims such a
+        stage immediately under both entry points, without waiting out the
+        grace period (the orphans here carry fresh timestamps).
+        """
         client, data_dir = build_client(monkeypatch, tmp_path)
 
-        # Simulate an orphan left by a previous crashed cross-device restore.
         orphan_parent = data_dir / "album"
         orphan_parent.mkdir()
         orphan = orphan_parent / ".restore-stage-deadbeef"
         orphan.mkdir()
         (orphan / "partial.jpg").write_bytes(b"partial")
-        assert orphan.is_dir()
+        lock = trash._stage_lock_path(orphan)
+        lock.write_text("")
 
-        empty_trash(data_dir)
-        assert not orphan.exists(), "empty_trash must reclaim orphan stages"
+        trash.empty_trash(data_dir)
+        assert not orphan.exists(), "empty_trash must reclaim a stage whose lock is released"
+        assert not lock.exists(), "the released lock file must be reclaimed with its stage"
 
-        # Same again under purge_old_trash with a fresh orphan.
+        # Same again under purge_old_trash with a fresh crashed orphan.
         orphan.mkdir()
         (orphan / "partial.jpg").write_bytes(b"partial")
-        purge_old_trash(data_dir, retention_days=1)
-        assert not orphan.exists(), "purge_old_trash must reclaim orphan stages"
+        lock.write_text("")
+        trash.purge_old_trash(data_dir, retention_days=30)
+        assert not orphan.exists(), "purge_old_trash must reclaim a stage whose lock is released"
 
-        # And an orphan at the data folder root, not under a subdir.
+        # And a crashed orphan at the data folder root, not under a subdir.
         orphan_root = data_dir / ".restore-stage-abcdef"
         orphan_root.mkdir()
-        empty_trash(data_dir)
+        trash._stage_lock_path(orphan_root).write_text("")
+        trash.empty_trash(data_dir)
         assert not orphan_root.exists(), (
             "empty_trash must reclaim orphan stages at the data folder root"
         )
+
+    def test_held_lock_protects_stage_even_past_grace(self, monkeypatch, tmp_path):
+        """A lock held by a live process outranks the age policy.
+
+        With the grace period forced negative (everything looks old), a
+        stage whose lock this process still holds must survive both
+        maintenance entry points — this is what distinguishes an active
+        stage from an abandoned one.
+        """
+        import fcntl
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        stage = data_dir / "album"
+        stage.mkdir()
+        (stage / "partial.jpg").write_bytes(b"partial")
+        lock = trash._stage_lock_path(stage)
+        fh = open(lock, "w")  # noqa: SIM115 - held open to keep the flock live
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+            trash.empty_trash(data_dir)
+            trash.purge_old_trash(data_dir, retention_days=1)
+            assert stage.exists(), "maintenance must not reclaim a stage under a held lock"
+            assert lock.exists()
+        finally:
+            fh.close()
+
+    def test_lock_free_stage_respects_explicit_grace_policy(self, monkeypatch, tmp_path):
+        """Stages with no verifiable lock are abandoned only by age.
+
+        Lock-free stages are legacy leftovers (written before the lock
+        protocol) or restores on filesystems without flock support. They
+        are preserved while they could still be a live copy, and reclaimed
+        once older than ``STAGE_ABANDON_GRACE_SECONDS``.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        orphan_parent = data_dir / "album"
+        orphan_parent.mkdir()
+        orphan = orphan_parent / ".restore-stage-legacy"
+        orphan.mkdir()
+        (orphan / "partial.jpg").write_bytes(b"partial")
+
+        # Fresh and unverifiable: keep it (it could be a live copy).
+        trash.empty_trash(data_dir)
+        trash.purge_old_trash(data_dir, retention_days=1)
+        assert orphan.exists(), "a fresh lock-free stage must survive the grace period"
+
+        # Past the grace period: abandoned, reclaimed by both entry points.
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+        trash.empty_trash(data_dir)
+        assert not orphan.exists(), "empty_trash must reclaim a grace-expired lock-free stage"
+
+        orphan.mkdir()
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+        trash.purge_old_trash(data_dir, retention_days=1)
+        assert not orphan.exists(), "purge_old_trash must reclaim a grace-expired stage"
+
+        # A grace-expired orphan at the data folder root too.
+        orphan_root = data_dir / ".restore-stage-abcdef"
+        orphan_root.mkdir()
+        trash.empty_trash(data_dir)
+        assert not orphan_root.exists(), (
+            "empty_trash must reclaim orphan stages at the data folder root"
+        )
+
+    def test_leaked_lock_file_lifecycle(self, monkeypatch, tmp_path):
+        """A lock file whose stage directory is gone is a leak: reclaimed
+        while free, preserved while still held by a live restore."""
+        import fcntl
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        leak = data_dir / "album"
+        leak.mkdir()
+        lock = leak / f"{trash.STAGE_PREFIX}ghost{trash.STAGE_LOCK_SUFFIX}"
+
+        # Free leaked lock: gone immediately (no grace wait).
+        lock.write_text("")
+        trash.empty_trash(data_dir)
+        assert not lock.exists(), "empty_trash must reclaim a free orphan lock file"
+
+        lock.write_text("")
+        trash.purge_old_trash(data_dir, retention_days=30)
+        assert not lock.exists(), "purge_old_trash must reclaim a free orphan lock file"
+
+        # Held lock (owner mid-restore): preserved even with grace negative.
+        lock.write_text("")
+        fh = open(lock, "w")  # noqa: SIM115 - held open to keep the flock live
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+            trash.empty_trash(data_dir)
+            assert lock.exists(), "maintenance must not unlink a lock an active restore holds"
+        finally:
+            fh.close()
+
+    def test_lock_acquisition_failure_leaves_no_abandon_signal(self, monkeypatch, tmp_path):
+        """A failed lock attempt must clean up after itself.
+
+        If flock is unsupported (or the open itself fails), no lock file
+        may remain: a present-but-free lock file is the signal for a
+        *crashed* owner, and leaving one behind for a live restore would
+        invite immediate reclaim by the very maintenance it is meant to
+        deter. Without a lock file, the stage only faces the conservative
+        grace policy.
+        """
+
+        def unsupported_flock(*args, **kwargs):
+            raise OSError(errno.EINVAL, "flock unsupported")
+
+        monkeypatch.setattr(trash.fcntl, "flock", unsupported_flock)
+
+        assert trash._acquire_stage_lock(tmp_path / ".restore-stage-x") is None
+        assert not (tmp_path / ".restore-stage-x.lock").exists(), (
+            "failed acquisition must leave no lock file behind"
+        )
+
+        def boom_open(*args, **kwargs):
+            raise OSError(errno.EROFS, "read-only filesystem")
+
+        monkeypatch.setattr("builtins.open", boom_open)
+        assert trash._acquire_stage_lock(tmp_path / ".restore-stage-y") is None
+
+    def test_unverifiable_lock_state_falls_back_to_grace_policy(self, monkeypatch, tmp_path):
+        """Lock states other than held/free classify as unknown, not abandoned.
+
+        On a filesystem where flock errors (not EAGAIN), maintenance must
+        not read the lock as released-and-reclaim-now; the stage is only
+        reclaimed once past the explicit grace period.
+        """
+
+        def unsupported_flock(*args, **kwargs):
+            raise OSError(errno.EINVAL, "flock unsupported")
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        stage = data_dir / ".restore-stage-nolockfs"
+        stage.mkdir()
+        lock = trash._stage_lock_path(stage)
+        lock.write_text("")
+
+        monkeypatch.setattr(trash.fcntl, "flock", unsupported_flock)
+        assert trash._stage_lock_state(lock) is None
+
+        trash.empty_trash(data_dir)
+        assert stage.exists(), "unverifiable fresh stage must survive the grace period"
+
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+        trash.empty_trash(data_dir)
+        assert not stage.exists(), "unverifiable grace-expired stage must be reclaimed"
+        assert not lock.exists()
+
+    def test_failed_source_cleanup_with_source_present_keeps_retry_semantics(
+        self, monkeypatch, tmp_path
+    ):
+        """The vanished-source success is narrowly scoped.
+
+        When the trash source still exists but cannot be removed (e.g.
+        permission error), the restore must keep its historical behavior:
+        return False with the trash entry and metadata preserved so a
+        retry stays possible. Only a source that is *gone* (reclaimed by
+        concurrent maintenance after the copy completed) counts as done.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_album(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item = trash.trash_dir(data_dir) / entry
+        meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
+
+        real_rename = trash.Path.rename
+        trash_root = trash.trash_dir(data_dir).resolve()
+
+        def cross_device_rename(path, destination):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return real_rename(path, destination)
+            if trash_root in resolved.parents or resolved == trash_root:
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_rename(path, destination)
+
+        real_rmtree = trash.shutil.rmtree
+
+        def stuck_rmtree(path, *args, **kwargs):
+            if Path(path) == trash_item:
+                raise OSError("directory busy")
+            return real_rmtree(path, *args, **kwargs)
+
+        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+        monkeypatch.setattr(trash.shutil, "rmtree", stuck_rmtree)
+
+        assert restore_from_trash(entry, data_dir) is False
+        assert trash_item.is_dir(), "unremovable trash source must stay for a retry"
+        assert meta_file.exists()
+        assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        leftovers = [p for p in data_dir.rglob(f"{trash.STAGE_PREFIX}*")]
+        assert leftovers == [], f"stage artifacts leaked: {leftovers}"
 
 
 class TestRestorePathTraversal:
