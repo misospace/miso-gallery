@@ -18,6 +18,7 @@ import errno
 import json
 import re
 import time
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -1084,6 +1085,284 @@ class TestActiveRestoreStageProtection:
         assert leftovers == [], f"stage artifacts leaked: {leftovers}"
 
 
+class TestSourceLockProtectsTrashSource:
+    """Regression tests for the #557 review blocker: the trash SOURCE.
+
+    The stage lock only protects the staged copy on the destination
+    filesystem; ``empty_trash``/``purge_old_trash`` could still delete the
+    trash item itself while a cross-device ``copytree`` was reading it,
+    letting a partial restore report success after the source was gone.
+
+    The distinguishing signal is now an exclusive ``flock`` on the item's
+    ``<item>.meta.json`` (the meta file doubles as the source lock, so no
+    extra lock file is needed). The restore holds it for the whole restore;
+    maintenance must ACQUIRE it — not merely probe it — before deleting, so
+    a held lock skips the item entirely and a crashed restore leaves a free
+    lock (the kernel drops flocks on process death) that any sweep can
+    reclaim immediately.
+    """
+
+    def _make_album(self, data_dir):
+        folder = data_dir / "album"
+        folder.mkdir()
+        (folder / "a.jpg").write_bytes(b"\xff\xd8\xff\xe0a")
+        (folder / "sub").mkdir()
+        (folder / "sub" / "b.jpg").write_bytes(b"\xff\xd8\xff\xe0b")
+        return folder
+
+    def _trash_paths(self, data_dir, entry):
+        trash_item = trash.trash_dir(data_dir) / entry
+        meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
+        return trash_item, meta_file
+
+    def _hold_meta_lock(self, meta_file):
+        """Open the meta file and flock it like an external worker would.
+
+        ``flock`` is treated independently per open file description even
+        within one process, so this fd makes the item look in-use to the
+        restore/sweep code running in the same test process.
+        """
+        import fcntl
+
+        fh = open(meta_file, "r")  # noqa: SIM115 - held open to keep the flock live
+        fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return fh
+
+    def _force_cross_device_restore(self, monkeypatch, data_dir):
+        """Make every rename whose source lives under the trash fail EXDEV."""
+        real_rename = trash.Path.rename
+        trash_root = trash.trash_dir(data_dir).resolve()
+
+        def cross_device_rename(path, destination):
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return real_rename(path, destination)
+            if trash_root in resolved.parents or resolved == trash_root:
+                raise OSError(errno.EXDEV, "cross-device link")
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+
+    def test_empty_mid_copytree_preserves_trash_source(self, monkeypatch, tmp_path):
+        """The #557 data-loss repro: ``empty_trash`` running mid-``copytree``.
+
+        The restore holds the source lock for the whole copy, so the sweep
+        must skip the trash item and its meta entirely — the wrapper below
+        runs ``empty_trash`` between the real ``copytree`` and the staged
+        rename and asserts, mid-copy, that the sweep counted nothing and
+        the source still exists. The restore then completes with the full
+        tree at its destination and consumes item+meta.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_album(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item, meta_file = self._trash_paths(data_dir, entry)
+
+        self._force_cross_device_restore(monkeypatch, data_dir)
+        real_copytree = trash.shutil.copytree
+
+        def copytree_with_maintenance(src, dest, *args, **kwargs):
+            result = real_copytree(src, dest, *args, **kwargs)
+            # shutil.copytree recurses through this same attribute; only the
+            # top-level call from restore_from_trash passes Path objects.
+            if isinstance(dest, Path):
+                deleted = trash.empty_trash(data_dir)
+                assert deleted == 0, (
+                    "empty_trash deleted entries while a restore was copying"
+                )
+                assert trash_item.is_dir(), "the trash source was deleted mid-copytree"
+                assert meta_file.exists(), "the trash metadata was deleted mid-copytree"
+            return result
+
+        monkeypatch.setattr(trash.shutil, "copytree", copytree_with_maintenance)
+
+        assert restore_from_trash(entry, data_dir) is True
+        assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert (folder / "sub" / "b.jpg").read_bytes() == b"\xff\xd8\xff\xe0b"
+        assert not trash_item.exists()
+        assert not meta_file.exists()
+        assert list_trash(data_dir) == []
+        leftovers = [p for p in data_dir.rglob(f"{trash.STAGE_PREFIX}*")]
+        assert leftovers == [], f"stage artifacts leaked: {leftovers}"
+
+    def test_maintenance_skips_items_with_externally_held_source_lock(
+        self, monkeypatch, tmp_path
+    ):
+        """Both sweeps skip an item whose meta lock another worker holds.
+
+        While the lock is held, ``empty_trash``/``purge_old_trash`` must
+        leave item and meta untouched and count nothing. Once the external
+        holder releases, the same sweeps delete normally with the exact
+        legacy counts: item and meta each count 1 under ``empty_trash``,
+        and the pair counts once under ``purge_old_trash``.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_album(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item, meta_file = self._trash_paths(data_dir, entry)
+
+        # Make the item look long expired for the purge half of the test.
+        old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+        meta_file.write_text(json.dumps({"original": "album", "deleted_at": old_iso}))
+
+        fh = self._hold_meta_lock(meta_file)
+        try:
+            assert trash.empty_trash(data_dir) == 0
+            assert trash_item.is_dir()
+            assert meta_file.exists()
+            assert trash.purge_old_trash(data_dir, retention_days=1) == 0
+            assert trash_item.is_dir()
+            assert meta_file.exists()
+        finally:
+            fh.close()
+
+        # Released: the item is reclaimable again with legacy counts
+        # (empty_trash counts the item and its meta separately).
+        assert trash.empty_trash(data_dir) == 2
+        assert not trash_item.exists()
+        assert not meta_file.exists()
+
+        # Same for purge_old_trash on a fresh expired item.
+        folder = self._make_album(data_dir)
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item, meta_file = self._trash_paths(data_dir, entry)
+        old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+        meta_file.write_text(json.dumps({"original": "album", "deleted_at": old_iso}))
+
+        fh = self._hold_meta_lock(meta_file)
+        try:
+            assert trash.purge_old_trash(data_dir, retention_days=1) == 0
+            assert trash_item.is_dir()
+            assert meta_file.exists()
+        finally:
+            fh.close()
+
+        assert trash.purge_old_trash(data_dir, retention_days=1) == 1
+        assert not trash_item.exists()
+        assert not meta_file.exists()
+
+    def test_restore_fails_fast_when_source_lock_held(self, monkeypatch, tmp_path):
+        """A held source lock makes the restore return False before copying.
+
+        If maintenance (or another worker) holds the item's meta flock, the
+        restore must fail fast — before any copy starts — instead of
+        racing a concurrent empty/purge. The rename is forced to fail with
+        EXDEV so the restore would take the cross-device ``copytree`` path,
+        and ``copytree`` records any invocation: on pre-fix code the copy
+        runs (and a mid-copy ``empty_trash`` deletes the source); with the
+        fix the invocation list stays empty.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_album(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item, meta_file = self._trash_paths(data_dir, entry)
+
+        self._force_cross_device_restore(monkeypatch, data_dir)
+        real_copytree = trash.shutil.copytree
+        copy_calls = []
+
+        def must_not_copy(*args, **kwargs):
+            copy_calls.append(True)
+            raise AssertionError("restore must fail fast on a held source lock")
+
+        monkeypatch.setattr(trash.shutil, "copytree", must_not_copy)
+
+        fh = self._hold_meta_lock(meta_file)
+        try:
+            assert restore_from_trash(entry, data_dir) is False
+            assert copy_calls == [], "restore started copying despite a held source lock"
+            # The held item and its metadata are untouched.
+            assert trash_item.is_dir()
+            assert meta_file.exists()
+            assert not folder.exists()
+        finally:
+            fh.close()
+
+        # Once the lock is free the very same item restores normally — the
+        # EXDEV forcing stays active, so this exercises the real cross-device
+        # staging path with the genuine copytree restored.
+        monkeypatch.setattr(trash.shutil, "copytree", real_copytree)
+        assert restore_from_trash(entry, data_dir) is True
+        assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
+        assert list_trash(data_dir) == []
+
+    def test_released_source_lock_item_deleted_normally(self, monkeypatch, tmp_path):
+        """Crash semantics: a released lock leaves the item reclaimable.
+
+        A crashed owner's flock is dropped by the kernel; holding the lock
+        and releasing it must leave item+meta in exactly the state any
+        sweep treats as ordinary trash. Both entry points must delete it
+        immediately, with the legacy counts.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        folder = self._make_album(data_dir)
+
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item, meta_file = self._trash_paths(data_dir, entry)
+
+        fh = self._hold_meta_lock(meta_file)
+        fh.close()  # kernel releases the flock: owner "died"
+
+        assert trash.empty_trash(data_dir) == 2
+        assert not trash_item.exists()
+        assert not meta_file.exists()
+
+        # Same for purge_old_trash on a fresh expired item.
+        folder = self._make_album(data_dir)
+        assert move_to_trash(folder, data_dir) is True
+        entry = list_trash(data_dir)[0]["name"]
+        trash_item, meta_file = self._trash_paths(data_dir, entry)
+        old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+        meta_file.write_text(json.dumps({"original": "album", "deleted_at": old_iso}))
+
+        fh = self._hold_meta_lock(meta_file)
+        fh.close()
+        assert trash.purge_old_trash(data_dir, retention_days=1) == 1
+        assert not trash_item.exists()
+        assert not meta_file.exists()
+
+    def test_stale_meta_without_item_is_reclaimed_by_empty(self, monkeypatch, tmp_path):
+        """A meta file with no paired item is stale: unlink it, count 1.
+
+        Deleting the meta before the item would strip the item of its lock
+        file, so a meta whose item still exists is left for the item's own
+        iteration; a lone meta needs no lock check.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        td = trash.trash_dir(data_dir)
+        stale = td / "ghost.txt.meta.json"
+        stale.write_text(json.dumps({"original": "ghost.txt"}))
+
+        assert trash.empty_trash(data_dir) == 1
+        assert not stale.exists()
+
+    def test_entry_named_exactly_meta_suffix_is_deleted_as_item(
+        self, monkeypatch, tmp_path
+    ):
+        """A trashed entry literally named ".meta.json" is an item, not a meta.
+
+        Stripping META_SUFFIX would leave an empty paired name, so this
+        entry must take the ordinary item path (deleted and counted) rather
+        than being misclassified as a stale meta and skipped forever.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        td = trash.trash_dir(data_dir)
+        odd = td / ".meta.json"
+        odd.write_bytes(b"data")
+
+        assert trash.empty_trash(data_dir) == 1
+        assert not odd.exists()
+
+
 class TestRestorePathTraversal:
     """Regression tests for path traversal in restore_from_trash (#382).
 
@@ -1147,6 +1426,25 @@ class TestRestorePathTraversal:
 
         with pytest.raises(ValueError, match="Invalid trash item name"):
             restore_from_trash("foo/../../../etc/passwd", data_dir)
+
+    def test_restore_rejects_null_byte_in_name(self, monkeypatch, tmp_path):
+        """An embedded null byte must be rejected before any path syscall.
+
+        ``Path("bad\\x00name").exists()`` would raise a bare
+        ``ValueError: embedded null byte`` from os.stat; the explicit guard
+        raises the canonical "Invalid trash item name" error instead and
+        never touches the filesystem.
+        """
+        from trash import restore_from_trash, trash_dir
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        td = trash_dir(data_dir)
+        with pytest.raises(ValueError, match="Invalid trash item name"):
+            restore_from_trash("bad\x00name", data_dir)
+
+        # Nothing was read, created, or deleted in the trash directory.
+        assert list(td.iterdir()) == []
 
     def test_restore_rejects_malicious_meta_original(self, monkeypatch, tmp_path):
         """Even if item_name is valid, a crafted .meta.json 'original' must not escape."""
