@@ -226,3 +226,48 @@ def test_batch_remove_thumbnails_leaves_legacy_cache_files_in_place(monkeypatch,
 
     assert not modern.exists(), "modern cache file must be deleted"
     assert legacy.exists(), "legacy cache file must NOT be deleted"
+
+
+def test_thumb_route_returns_not_found_for_decompression_bomb(monkeypatch, tmp_path):
+    """Issue #573: a gallery file whose declared dimensions exceed Pillow's
+    safety limit must produce a controlled 404 from the public thumbnail
+    route (not a 500), and the safety limit must remain enabled."""
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    bomb = data_dir / "large.png"
+    Image.new("RGB", (15, 15)).save(bomb)
+
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+
+    resp = client.get("/thumb/large.png")
+    assert resp.status_code == 404
+    # No cache entry may be written for a rejected source image.
+    bomb_identity = _thumbnail_path_identity("large.png")
+    cache = data_dir / ".thumb_cache"
+    assert not any(p.name.startswith(f"{bomb_identity}.") for p in cache.iterdir())
+    # A valid image keeps thumbnailing normally under the same patched limit.
+    assert client.get("/thumb/sample.png").status_code == 200
+
+
+def test_integrity_check_counts_decompression_bomb_as_failed_and_continues(monkeypatch, tmp_path):
+    """Issue #573: the maintenance sweep must record a decompression-bomb
+    source (and a bomb-shaped cache entry) as failed items and keep
+    processing the remaining eligible files instead of aborting."""
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    bomb = data_dir / "large.png"
+    Image.new("RGB", (15, 15)).save(bomb)
+
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 100)
+
+    # Plant a bomb-shaped cache entry so the verify() path is exercised too.
+    app_module = sys.modules["app"]
+    app_module.ensure_thumbnail_cache_dir()
+    cached_name = thumbnails.thumbnail_filename("large.png", bomb)
+    (app_module.THUMBNAIL_CACHE_DIR / cached_name).write_bytes(bomb.read_bytes())
+
+    stats = app_module.run_thumbnail_integrity_check()
+
+    assert stats["failed"] == 1
+    # sample.png, copy.png, cats/cat.jpg, large.png
+    assert stats["checked"] == 4
+    # The sweep continued: every valid bootstrap image was still regenerated.
+    assert stats["regenerated"] == 3

@@ -825,7 +825,7 @@ def thumb(filename: str):
     if not cached_path.exists():
         try:
             generate_thumbnail(source_path, cached_path)
-        except (UnidentifiedImageError, OSError):
+        except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
             return "Not found", 404
 
     return send_from_directory(str(THUMBNAIL_CACHE_DIR), cached_name)
