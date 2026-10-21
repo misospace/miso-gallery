@@ -176,7 +176,7 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
             try:
                 with Image.open(cached_path) as thumb_img:
                     thumb_img.verify()
-            except (UnidentifiedImageError, OSError):
+            except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
                 needs_regen = True
 
         if not needs_regen:
@@ -185,7 +185,7 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
         try:
             generate_thumbnail(item, cached_path)
             stats["regenerated"] += 1
-        except (UnidentifiedImageError, OSError):
+        except (UnidentifiedImageError, OSError, Image.DecompressionBombError):
             stats["failed"] += 1
 
     return stats
