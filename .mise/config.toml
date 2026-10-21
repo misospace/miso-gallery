@@ -13,7 +13,7 @@
 # task `run` scripts; no extra settings required).
 
 [tools]
-python = "3.15.0"
+python = "3.15.1"
 
 # One-time, noninteractive, idempotent setup: install the pinned Python, build
 # the project-local virtualenv, and install the project with dev extras from
