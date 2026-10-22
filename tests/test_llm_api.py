@@ -638,6 +638,8 @@ def test_llm_mutation_endpoints_keep_absent_and_empty_body_behavior(monkeypatch,
     body shape, and ``{}`` still passes the shape check. A body sent with a
     non-JSON content type is not parsed as JSON at all, so it also falls back
     to the empty payload and fails on field validation, not on body shape.
+    A blank body (whitespace only) carries no JSON value either, so it is
+    treated as an absent body rather than as a malformed one.
     """
     client, data_dir = build_client(monkeypatch, tmp_path, extra_env={"WEBHOOK_ENABLED": "false"})
 
@@ -667,6 +669,36 @@ def test_llm_mutation_endpoints_keep_absent_and_empty_body_behavior(monkeypatch,
     assert "must be an object" not in text_body.get_json()["error"]
     assert "rel_paths/images" in text_body.get_json()["error"]
     # The non-JSON body was not applied as a tag mutation either.
+    assert not (data_dir / ".miso-gallery-tags.sqlite3").exists()
+
+    # A blank body (whitespace only) sent with a JSON content type carries no
+    # JSON value, so it is an absent body, not a malformed one: the shape
+    # check must not claim it, and the empty-payload fallback must still
+    # apply.
+    for blank in ("   ", "\n", "\t"):
+        _reset_rate_limiters()
+        blank_dedup = client.post(
+            "/api/llm/dedup", data=blank, content_type="application/json", headers=auth_header()
+        )
+        assert blank_dedup.status_code == 200, (blank, blank_dedup.status_code)
+        assert blank_dedup.get_json()["dry_run"] is True, blank
+
+        _reset_rate_limiters()
+        blank_task = client.post(
+            "/api/llm/task/run", data=blank, content_type="application/json", headers=auth_header()
+        )
+        assert blank_task.status_code == 404, (blank, blank_task.status_code)
+        assert "disabled" in blank_task.get_json()["error"], blank
+
+        _reset_rate_limiters()
+        blank_tags = client.post(
+            "/api/llm/tags", data=blank, content_type="application/json", headers=auth_header()
+        )
+        assert blank_tags.status_code == 400, (blank, blank_tags.status_code)
+        assert "must be an object" not in blank_tags.get_json()["error"], blank
+        assert "rel_paths/images" in blank_tags.get_json()["error"], blank
+
+    # The blank bodies were not applied as a tag mutation either.
     assert not (data_dir / ".miso-gallery-tags.sqlite3").exists()
 
 

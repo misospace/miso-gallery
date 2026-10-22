@@ -542,6 +542,19 @@ def test_webhook_run_rejects_non_object_json_bodies(monkeypatch, tmp_path):
     assert resp_text.status_code == 400
     assert resp_text.get_json()["error"] == "task is required"
 
+    # A blank body (whitespace only) with a JSON content type carries no JSON
+    # value, so it is an absent body rather than a malformed one: it keeps
+    # the empty-payload fallback, not the body-shape rejection.
+    for blank in ("   ", "\n"):
+        resp_blank = client.post(
+            "/api/webhook/run",
+            data=blank,
+            content_type="application/json",
+            headers={"Authorization": "Bearer test-secret-123"},
+        )
+        assert resp_blank.status_code == 400, (blank, resp_blank.status_code)
+        assert resp_blank.get_json()["error"] == "task is required", blank
+
     # The bearer-secret check still precedes body validation.
     resp_unauth = client.post(
         "/api/webhook/run",
