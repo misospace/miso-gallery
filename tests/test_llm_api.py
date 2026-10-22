@@ -1,9 +1,33 @@
+import contextlib
 import sys
 import time
 from pathlib import Path
 
+import pytest
+
 import llm_api
 from conftest import auth_header, build_client
+
+
+def _reset_rate_limiters():
+    """Clear rate-limiter state so unrelated 429s cannot mask validation asserts."""
+    from security import FALLBACK_LIMITER, _primary_limiter
+
+    FALLBACK_LIMITER.reset()
+    if _primary_limiter is not None and _primary_limiter is not FALLBACK_LIMITER:
+        client = getattr(_primary_limiter, "_client", None)
+        prefix = getattr(_primary_limiter, "_prefix", "")
+        if client is not None and prefix:
+            with contextlib.suppress(Exception):
+                keys = list(client.scan_iter(match=f"{prefix}:*"))
+                if keys:
+                    client.delete(*keys)
+
+
+@pytest.fixture(autouse=True)
+def reset_rate_limiters():
+    """Reset rate limiter state before each test to avoid cross-test interference."""
+    _reset_rate_limiters()
 
 
 def _fresh_app():
@@ -416,6 +440,103 @@ def test_llm_delete_dry_run(monkeypatch, tmp_path):
     actual = client.post("/api/llm/delete", json={"rel_path": "cats/cat.jpg"}, headers=auth_header())
     assert actual.status_code == 200
     assert not (data_dir / "cats" / "cat.jpg").exists()
+
+
+# Non-boolean destructive flags must fail closed before any mutation (#572).
+_NON_BOOLEAN_VALUES = ["false", "true", 1, 0, 3.5, [], ["x"], {"a": 1}, None]
+
+
+def _trash_entries(data_dir):
+    trash = data_dir / ".trash"
+    return list(trash.iterdir()) if trash.exists() else []
+
+
+def test_llm_dedup_rejects_non_boolean_remove_and_delete_flags(monkeypatch, tmp_path):
+    """#572: non-boolean remove/delete must 400 with gallery and trash untouched.
+
+    The string "false" is truthy in Python, so the pre-fix ``bool(payload.get(...))``
+    coerced it into authorizing deletion. Any present non-boolean value must be
+    rejected before find_duplicate_media scans or move_to_trash runs, including
+    the legacy ``delete`` alias and a valid false paired with an invalid alias.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    for bad in _NON_BOOLEAN_VALUES:
+        for flag in ("remove", "delete"):
+            _reset_rate_limiters()
+            resp = client.post("/api/llm/dedup", json={flag: bad}, headers=auth_header())
+            assert resp.status_code == 400, (flag, bad)
+            assert f"{flag} must be a boolean" in resp.get_json()["error"]
+
+    _reset_rate_limiters()
+    mixed = client.post("/api/llm/dedup", json={"remove": False, "delete": "false"}, headers=auth_header())
+    assert mixed.status_code == 400
+
+    assert (data_dir / "sample.png").exists()
+    assert (data_dir / "copy.png").exists()
+    assert _trash_entries(data_dir) == []
+
+
+def test_llm_dedup_boolean_flags_preserve_behavior(monkeypatch, tmp_path):
+    """#572: remove:false stays read-only; valid true (incl. legacy alias) deletes."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    false_run = client.post("/api/llm/dedup", json={"remove": False}, headers=auth_header())
+    assert false_run.status_code == 200
+    assert false_run.get_json()["dry_run"] is True
+    assert (data_dir / "sample.png").exists()
+    assert (data_dir / "copy.png").exists()
+
+    alias = client.post("/api/llm/dedup", json={"delete": True}, headers=auth_header())
+    assert alias.status_code == 200
+    payload = alias.get_json()
+    assert payload["dry_run"] is False
+    assert payload["removed"] == ["sample.png"]
+    assert not (data_dir / "sample.png").exists()
+
+
+def test_llm_delete_rejects_non_boolean_dry_run(monkeypatch, tmp_path):
+    """#572: /api/llm/delete must reject non-boolean dry_run before trashing."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    for bad in _NON_BOOLEAN_VALUES:
+        _reset_rate_limiters()
+        resp = client.post(
+            "/api/llm/delete", json={"rel_path": "cats/cat.jpg", "dry_run": bad}, headers=auth_header()
+        )
+        assert resp.status_code == 400, bad
+        assert "dry_run must be a boolean" in resp.get_json()["error"]
+        assert (data_dir / "cats" / "cat.jpg").exists()
+    assert _trash_entries(data_dir) == []
+
+    false_run = client.post(
+        "/api/llm/delete", json={"rel_path": "cats/cat.jpg", "dry_run": False}, headers=auth_header()
+    )
+    assert false_run.status_code == 200
+    assert false_run.get_json()["dry_run"] is False
+    assert not (data_dir / "cats" / "cat.jpg").exists()
+
+
+def test_llm_bulk_delete_rejects_non_boolean_dry_run(monkeypatch, tmp_path):
+    """#572: /api/llm/bulk-delete must reject non-boolean dry_run before trashing."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    for bad in _NON_BOOLEAN_VALUES:
+        _reset_rate_limiters()
+        resp = client.post(
+            "/api/llm/bulk-delete", json={"rel_paths": ["sample.png"], "dry_run": bad}, headers=auth_header()
+        )
+        assert resp.status_code == 400, bad
+        assert "dry_run must be a boolean" in resp.get_json()["error"]
+        assert (data_dir / "sample.png").exists()
+    assert _trash_entries(data_dir) == []
+
+    false_run = client.post(
+        "/api/llm/bulk-delete", json={"rel_paths": ["sample.png"], "dry_run": False}, headers=auth_header()
+    )
+    assert false_run.status_code == 200
+    assert false_run.get_json()["dry_run"] is False
+    assert not (data_dir / "sample.png").exists()
 
 
 def test_legacy_llm_api_keys_work_as_both_read_and_write(monkeypatch, tmp_path):
