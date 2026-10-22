@@ -452,6 +452,11 @@ def register_llm_routes(app, log_security_event) -> None:
             log_security_event("llm_task_run", "rejected", reason="non_object_json_body")
             return payload_error
         task = data.get("task", "")
+        if not isinstance(task, str):
+            # Guard (issue #582): a truthy non-string task passes the falsy check
+            # below and raises TypeError inside _validate_task_name -> HTTP 500.
+            log_security_event("llm_task_run", "rejected", reason="invalid_task_value_type")
+            return {"error": "task must be a string"}, 400
         if task:
             validation_error = app_module._validate_task_name(task)
             if validation_error is not None:

@@ -629,6 +629,98 @@ def test_llm_task_run_non_object_body_does_not_spawn_subprocess(monkeypatch, tmp
         assert "must be an object" in resp.get_json()["error"]
 
 
+# ---------------------------------------------------------------------------
+# #582: non-string ``task`` values on /api/llm/task/run must be rejected with
+# a consistent 400 JSON error before task-name validation runs. A truthy
+# non-string (5, 3.5, ["echo"], {"task": "echo"}, True) previously passed the
+# old ``if task:`` gate and TypeError'd inside ``_validate_task_name``'s regex
+# match as HTTP 500; falsy non-strings (None, 0, False, [], {}) slipped past
+# the gate and only 400'd via ``str()``-coercion in ``run_configured_task``
+# ("Invalid task name: '0'", "'None'"). Cover both so the rejection is uniform
+# instead of status-500/400-by-truthiness.
+# ---------------------------------------------------------------------------
+
+_NON_STRING_TASK_VALUES = [
+    5,  # truthy int
+    3.5,  # truthy float
+    True,  # truthy bool
+    0,  # falsy int (str(0) -> "0", was a coerced 400)
+    False,  # falsy bool (str(False) -> "False", was a coerced 400)
+    None,  # falsy JSON null (str(None) -> "None", was a coerced 400)
+    [],  # falsy empty array
+    ["echo"],  # truthy array
+    {},  # falsy empty object
+    {"task": "echo"},  # truthy object
+]
+
+
+def test_llm_task_run_rejects_non_string_task_values(monkeypatch, tmp_path):
+    """#582: numbers, booleans, null, arrays, and objects must 400, not 500."""
+    import thumbnails
+
+    monkeypatch.setenv("WEBHOOK_ENABLED", "true")
+    monkeypatch.setenv("WEBHOOK_TASK_ECHO", "python3 -c \"import sys;print(sys.argv[1])\" {params.value}")
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    app_module = _fresh_app()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(f"task subprocess must not run: {args}")
+
+    monkeypatch.setattr(app_module.subprocess, "run", _boom)
+
+    # A cached thumbnail for sample.png makes "no gallery state mutated"
+    # observable: the purge path deletes cache files by identity prefix, so a
+    # body that reached the run path would have removed this file.
+    thumb_file = data_dir / ".thumb_cache" / thumbnails.thumbnail_filename(
+        "sample.png", data_dir / "sample.png"
+    )
+    thumb_file.write_bytes(b"cached-thumbnail")
+
+    for raw in _NON_STRING_TASK_VALUES:
+        _reset_rate_limiters()
+        resp = client.post("/api/llm/task/run", json={"task": raw}, headers=auth_header())
+        assert resp.status_code == 400, (raw, resp.status_code)
+        assert resp.get_json() == {"error": "task must be a string"}, raw
+
+    # No task subprocess ran, and no gallery state mutated.
+    assert (data_dir / "sample.png").exists()
+    assert (data_dir / "copy.png").exists()
+    assert (data_dir / "cats" / "cat.jpg").exists()
+    assert _trash_entries(data_dir) == []
+    # The tag store is opened lazily on first use, so a rejected body must
+    # never have created its SQLite database (mirror of the #574 sibling).
+    assert not (data_dir / ".miso-gallery-tags.sqlite3").exists()
+    assert thumb_file.exists()
+
+    # Control: string tasks with invalid characters still reach name validation.
+    _reset_rate_limiters()
+    invalid_name = client.post("/api/llm/task/run", json={"task": "echo;"}, headers=auth_header())
+    assert invalid_name.status_code == 400
+    assert "Invalid task name" in invalid_name.get_json()["error"]
+
+
+def test_llm_task_run_non_string_task_type_precedes_webhook_disabled_gate(monkeypatch, tmp_path):
+    """#582: the field-type rejection fails before the webhook 404 gate.
+
+    The body-shape check (#574) already treats malformed requests this way --
+    a non-object body 400s even when webhooks are disabled -- so the field-type
+    guard sits in the same validation layer, ahead of ``run_configured_task``.
+    String tasks keep hitting the disabled gate (404) unchanged.
+    """
+    client, _ = build_client(monkeypatch, tmp_path, extra_env={"WEBHOOK_ENABLED": "false"})
+
+    _reset_rate_limiters()
+    resp = client.post("/api/llm/task/run", json={"task": {"name": "echo"}}, headers=auth_header())
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "task must be a string"}
+
+    _reset_rate_limiters()
+    string_task = client.post("/api/llm/task/run", json={"task": "echo"}, headers=auth_header())
+    assert string_task.status_code == 404
+    assert "disabled" in string_task.get_json()["error"]
+
+
 def test_llm_mutation_endpoints_keep_absent_and_empty_body_behavior(monkeypatch, tmp_path):
     """#574: absent and empty-object bodies keep their pre-fix fallback behavior.
 
