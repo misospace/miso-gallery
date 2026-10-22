@@ -530,6 +530,18 @@ def test_webhook_run_rejects_non_object_json_bodies(monkeypatch, tmp_path):
         assert resp.status_code == 400, (raw, resp.status_code)
         assert "must be an object" in resp.get_json()["error"], raw
 
+    # A body sent with a non-JSON content type is not parsed as JSON, so it
+    # keeps the pre-fix empty-payload fallback ("task is required"), not the
+    # body-shape rejection.
+    resp_text = client.post(
+        "/api/webhook/run",
+        data='{"task": "generate"}',
+        content_type="text/plain",
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+    assert resp_text.status_code == 400
+    assert resp_text.get_json()["error"] == "task is required"
+
     # The bearer-secret check still precedes body validation.
     resp_unauth = client.post(
         "/api/webhook/run",

@@ -48,7 +48,14 @@ def load_env_config() -> None:
 load_env_config()
 
 
-_NON_OBJECT_JSON_BODY_ERROR = ({"error": "JSON body must be an object"}, 400)
+def _non_object_json_body_error() -> tuple[dict, int]:
+    """Return a fresh 400 response for a request body that is not a JSON object.
+
+    The body is built per call rather than shared from a module-level
+    constant: it is handed to Flask's JSON provider as the response body, so
+    a shared dict could carry an in-place mutation across requests.
+    """
+    return {"error": "JSON body must be an object"}, 400
 
 
 def json_object_payload() -> tuple[dict | None, tuple[dict, int] | None]:
@@ -68,13 +75,13 @@ def json_object_payload() -> tuple[dict | None, tuple[dict, int] | None]:
     if isinstance(body, dict):
         return body, None
     if body is not None:
-        return None, _NON_OBJECT_JSON_BODY_ERROR
+        return None, _non_object_json_body_error()
     # ``get_json(silent=True)`` collapses absent, malformed, and literal
-    # ``null`` bodies to None. A JSON content type with a non-empty body is
+    # ``null`` bodies to None. A JSON content type with a non-blank body is
     # one of the latter two: reject it instead of silently treating it as an
-    # empty payload.
+    # empty payload. A blank body is treated as absent.
     if request.is_json and request.get_data(as_text=True).strip():
-        return None, _NON_OBJECT_JSON_BODY_ERROR
+        return None, _non_object_json_body_error()
     return {}, None
 
 

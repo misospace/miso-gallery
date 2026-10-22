@@ -569,7 +569,17 @@ _LLM_MUTATION_ROUTES = [
 
 def test_llm_mutation_endpoints_reject_non_object_json_bodies(monkeypatch, tmp_path):
     """#574: arrays/strings/numbers/booleans/null must 400, not 500, with no mutation."""
+    import thumbnails
+
     client, data_dir = build_client(monkeypatch, tmp_path)
+
+    # A cached thumbnail for sample.png makes "no thumbnail was purged"
+    # observable: the purge path deletes cache files by identity prefix, so
+    # this file would have been removed by a body that reached that code.
+    thumb_file = data_dir / ".thumb_cache" / thumbnails.thumbnail_filename(
+        "sample.png", data_dir / "sample.png"
+    )
+    thumb_file.write_bytes(b"cached-thumbnail")
 
     for route in _LLM_MUTATION_ROUTES:
         for raw in _NON_OBJECT_JSON_BODIES:
@@ -580,11 +590,21 @@ def test_llm_mutation_endpoints_reject_non_object_json_bodies(monkeypatch, tmp_p
             assert resp.status_code == 400, (route, raw, resp.status_code)
             assert "must be an object" in resp.get_json()["error"], (route, raw)
 
-    # No gallery file was trashed and no tag mutation happened en route.
+    # No gallery file was trashed, no tag was written, and no thumbnail was
+    # purged en route.
     assert (data_dir / "sample.png").exists()
     assert (data_dir / "copy.png").exists()
     assert (data_dir / "cats" / "cat.jpg").exists()
     assert _trash_entries(data_dir) == []
+    # The tag store is opened lazily on first use, so a rejected body must
+    # never have created its SQLite database.
+    assert not (data_dir / ".miso-gallery-tags.sqlite3").exists()
+    assert thumb_file.exists()
+
+    # Control: the cached thumbnail is purgeable, so its survival above is
+    # meaningful rather than vacuous.
+    thumbnails.batch_remove_thumbnails(["sample.png"])
+    assert not thumb_file.exists()
 
 
 def test_llm_task_run_non_object_body_does_not_spawn_subprocess(monkeypatch, tmp_path):
@@ -615,7 +635,9 @@ def test_llm_mutation_endpoints_keep_absent_and_empty_body_behavior(monkeypatch,
     The fix must only reject *present* bodies that parse to a non-object. An
     absent body still falls back to an empty payload: dedup runs its dry run,
     task/run keeps failing on the webhook-disabled gate (404) rather than on
-    body shape, and ``{}`` still passes the shape check.
+    body shape, and ``{}`` still passes the shape check. A body sent with a
+    non-JSON content type is not parsed as JSON at all, so it also falls back
+    to the empty payload and fails on field validation, not on body shape.
     """
     client, data_dir = build_client(monkeypatch, tmp_path, extra_env={"WEBHOOK_ENABLED": "false"})
 
@@ -633,6 +655,19 @@ def test_llm_mutation_endpoints_keep_absent_and_empty_body_behavior(monkeypatch,
     _reset_rate_limiters()
     empty = client.post("/api/llm/dedup", json={}, headers=auth_header())
     assert empty.status_code == 200
+
+    _reset_rate_limiters()
+    text_body = client.post(
+        "/api/llm/tags",
+        data='{"rel_paths": ["sample.png"], "tags": ["portrait"], "action": "add"}',
+        content_type="text/plain",
+        headers=auth_header(),
+    )
+    assert text_body.status_code == 400
+    assert "must be an object" not in text_body.get_json()["error"]
+    assert "rel_paths/images" in text_body.get_json()["error"]
+    # The non-JSON body was not applied as a tag mutation either.
+    assert not (data_dir / ".miso-gallery-tags.sqlite3").exists()
 
 
 def test_legacy_llm_api_keys_work_as_both_read_and_write(monkeypatch, tmp_path):
