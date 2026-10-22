@@ -520,7 +520,7 @@ def test_webhook_run_rejects_non_object_json_bodies(monkeypatch, tmp_path):
 
     monkeypatch.setattr(app_module.subprocess, "run", _boom)
 
-    for raw in ['["not-an-object"]', '"just-a-string"', "123", "true", "null"]:
+    for raw in ['["not-an-object"]', '"just-a-string"', "123", "true", "false", "0", "null", "{"]:
         resp = client.post(
             "/api/webhook/run",
             data=raw,

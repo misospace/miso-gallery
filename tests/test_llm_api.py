@@ -550,8 +550,12 @@ _NON_OBJECT_JSON_BODIES = [
     '["not-an-object"]',  # array
     '"just-a-string"',  # string
     "123",  # number
+    "3.5",  # number
     "true",  # boolean
+    "false",  # boolean (falsy parses the old `or {}` silently swallowed)
+    "0",  # number (falsy parse, same)
     "null",  # null
+    "{",  # malformed JSON with a JSON content type
 ]
 
 _LLM_MUTATION_ROUTES = [
@@ -613,7 +617,7 @@ def test_llm_mutation_endpoints_keep_absent_and_empty_body_behavior(monkeypatch,
     task/run keeps failing on the webhook-disabled gate (404) rather than on
     body shape, and ``{}`` still passes the shape check.
     """
-    client, data_dir = build_client(monkeypatch, tmp_path)
+    client, data_dir = build_client(monkeypatch, tmp_path, extra_env={"WEBHOOK_ENABLED": "false"})
 
     _reset_rate_limiters()
     dedup = client.post("/api/llm/dedup", headers=auth_header())
