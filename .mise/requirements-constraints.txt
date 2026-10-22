@@ -1,4 +1,4 @@
-# Generated pip constraint lock for the pinned Python 3.14.8 toolchain.
+# Generated pip constraint lock for the pinned Python 3.15.1 toolchain.
 # pyproject.toml remains the single dependency authority: this file constrains
 # bootstrap resolution to the reviewed dependency set and is regenerated when
 # pyproject.toml or the pinned toolchain changes.
