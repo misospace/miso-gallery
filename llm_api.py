@@ -48,6 +48,43 @@ def load_env_config() -> None:
 load_env_config()
 
 
+def _non_object_json_body_error() -> tuple[dict, int]:
+    """Return a fresh 400 response for a request body that is not a JSON object.
+
+    The body is built per call rather than shared from a module-level
+    constant: it is handed to Flask's JSON provider as the response body, so
+    a shared dict could carry an in-place mutation across requests.
+    """
+    return {"error": "JSON body must be an object"}, 400
+
+
+def json_object_payload() -> tuple[dict | None, tuple[dict, int] | None]:
+    """Parse the request JSON body, requiring a JSON object when one is present.
+
+    Returns ``(payload, None)`` on success, or ``(None, (body, status))`` for
+    the caller to return directly. A body that parses to a non-object (array,
+    string, number, boolean, null) or fails to parse is rejected with 400
+    before any endpoint touches payload fields (issue #574): the historical
+    ``request.get_json(silent=True) or {}`` only caught falsy parses, so a
+    truthy non-object reached ``.get()`` and raised ``AttributeError`` — an
+    HTTP 500 for what is a client mistake. An absent body keeps the empty-dict
+    fallback so existing missing-body behavior (field-level 400s, dedup
+    dry-run, 404 on disabled task runs) is unchanged.
+    """
+    body = request.get_json(silent=True)
+    if isinstance(body, dict):
+        return body, None
+    if body is not None:
+        return None, _non_object_json_body_error()
+    # ``get_json(silent=True)`` collapses absent, malformed, and literal
+    # ``null`` bodies to None. A JSON content type with a non-blank body is
+    # one of the latter two: reject it instead of silently treating it as an
+    # empty payload. A blank body is treated as absent.
+    if request.is_json and request.get_data(as_text=True).strip():
+        return None, _non_object_json_body_error()
+    return {}, None
+
+
 def _invalid_bool_flag(payload: dict, *keys: str) -> str | None:
     """Return the first key in ``keys`` that is present but not a JSON boolean.
 
@@ -258,7 +295,10 @@ def register_llm_routes(app, log_security_event) -> None:
     @rate_limit(max_requests=30, window=60)
     def llm_tags():
         app_module = _app()
-        payload = request.get_json(silent=True) or {}
+        payload, payload_error = json_object_payload()
+        if payload_error is not None:
+            log_security_event("llm_tags", "rejected", reason="non_object_json_body")
+            return payload_error
         rel_paths = payload.get("rel_paths") or payload.get("images") or payload.get("rel_path")
         tags = payload.get("tags") or payload.get("tag")
         action = str(payload.get("action", "add")).strip().lower()
@@ -290,7 +330,10 @@ def register_llm_routes(app, log_security_event) -> None:
     @rate_limit(max_requests=20, window=60)
     def llm_delete():
         app_module = _app()
-        payload = request.get_json(silent=True) or {}
+        payload, payload_error = json_object_payload()
+        if payload_error is not None:
+            log_security_event("llm_delete", "rejected", reason="non_object_json_body")
+            return payload_error
         rel_path = str(payload.get("rel_path") or payload.get("image") or "")
         if not rel_path or not sanitize_path(rel_path):
             return {"error": "Valid rel_path is required"}, 400
@@ -317,7 +360,10 @@ def register_llm_routes(app, log_security_event) -> None:
     @rate_limit(max_requests=10, window=60)
     def llm_bulk_delete():
         app_module = _app()
-        payload = request.get_json(silent=True) or {}
+        payload, payload_error = json_object_payload()
+        if payload_error is not None:
+            log_security_event("llm_bulk_delete", "rejected", reason="non_object_json_body")
+            return payload_error
         rel_paths = payload.get("rel_paths") or payload.get("images") or []
         if not isinstance(rel_paths, list):
             return {"error": "rel_paths/images must be a list"}, 400
@@ -361,7 +407,10 @@ def register_llm_routes(app, log_security_event) -> None:
     @rate_limit(max_requests=5, window=60)
     def llm_dedup():
         app_module = _app()
-        payload = request.get_json(silent=True) or {}
+        payload, payload_error = json_object_payload()
+        if payload_error is not None:
+            log_security_event("llm_dedup", "rejected", reason="non_object_json_body")
+            return payload_error
         invalid = _invalid_bool_flag(payload, "remove", "delete")
         if invalid is not None:
             log_security_event("llm_dedup", "rejected", reason="non_boolean_flag", flag=invalid)
@@ -398,7 +447,10 @@ def register_llm_routes(app, log_security_event) -> None:
     @rate_limit(max_requests=10, window=60)
     def llm_task_run():
         app_module = _app()
-        data = request.get_json(silent=True) or {}
+        data, payload_error = json_object_payload()
+        if payload_error is not None:
+            log_security_event("llm_task_run", "rejected", reason="non_object_json_body")
+            return payload_error
         task = data.get("task", "")
         if task:
             validation_error = app_module._validate_task_name(task)
