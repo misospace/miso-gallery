@@ -539,6 +539,98 @@ def test_llm_bulk_delete_rejects_non_boolean_dry_run(monkeypatch, tmp_path):
     assert not (data_dir / "sample.png").exists()
 
 
+# ---------------------------------------------------------------------------
+# Regression tests for issue #574: the LLM mutation endpoints parsed bodies
+# with ``request.get_json(silent=True) or {}``, which only hides the falsy
+# parses, so a valid JSON array/string/number/boolean reached ``.get()`` and
+# raised AttributeError -> HTTP 500 instead of a client validation error.
+# ---------------------------------------------------------------------------
+
+_NON_OBJECT_JSON_BODIES = [
+    '["not-an-object"]',  # array
+    '"just-a-string"',  # string
+    "123",  # number
+    "true",  # boolean
+    "null",  # null
+]
+
+_LLM_MUTATION_ROUTES = [
+    "/api/llm/tags",
+    "/api/llm/delete",
+    "/api/llm/bulk-delete",
+    "/api/llm/dedup",
+    "/api/llm/task/run",
+]
+
+
+def test_llm_mutation_endpoints_reject_non_object_json_bodies(monkeypatch, tmp_path):
+    """#574: arrays/strings/numbers/booleans/null must 400, not 500, with no mutation."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    for route in _LLM_MUTATION_ROUTES:
+        for raw in _NON_OBJECT_JSON_BODIES:
+            _reset_rate_limiters()
+            resp = client.post(
+                route, data=raw, content_type="application/json", headers=auth_header()
+            )
+            assert resp.status_code == 400, (route, raw, resp.status_code)
+            assert "must be an object" in resp.get_json()["error"], (route, raw)
+
+    # No gallery file was trashed and no tag mutation happened en route.
+    assert (data_dir / "sample.png").exists()
+    assert (data_dir / "copy.png").exists()
+    assert (data_dir / "cats" / "cat.jpg").exists()
+    assert _trash_entries(data_dir) == []
+
+
+def test_llm_task_run_non_object_body_does_not_spawn_subprocess(monkeypatch, tmp_path):
+    """#574: with webhooks enabled, a non-object body must 400 before any task spawns."""
+    monkeypatch.setenv("WEBHOOK_ENABLED", "true")
+    monkeypatch.setenv("WEBHOOK_TASK_ECHO", "python3 -c \"import sys;print(sys.argv[1])\" {params.value}")
+    client, _ = build_client(monkeypatch, tmp_path)
+
+    app_module = _fresh_app()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(f"task subprocess must not run: {args}")
+
+    monkeypatch.setattr(app_module.subprocess, "run", _boom)
+
+    for raw in _NON_OBJECT_JSON_BODIES:
+        _reset_rate_limiters()
+        resp = client.post(
+            "/api/llm/task/run", data=raw, content_type="application/json", headers=auth_header()
+        )
+        assert resp.status_code == 400, (raw, resp.status_code)
+        assert "must be an object" in resp.get_json()["error"]
+
+
+def test_llm_mutation_endpoints_keep_absent_and_empty_body_behavior(monkeypatch, tmp_path):
+    """#574: absent and empty-object bodies keep their pre-fix fallback behavior.
+
+    The fix must only reject *present* bodies that parse to a non-object. An
+    absent body still falls back to an empty payload: dedup runs its dry run,
+    task/run keeps failing on the webhook-disabled gate (404) rather than on
+    body shape, and ``{}`` still passes the shape check.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    _reset_rate_limiters()
+    dedup = client.post("/api/llm/dedup", headers=auth_header())
+    assert dedup.status_code == 200
+    assert dedup.get_json()["dry_run"] is True
+    assert (data_dir / "sample.png").exists()
+
+    _reset_rate_limiters()
+    task = client.post("/api/llm/task/run", headers=auth_header())
+    assert task.status_code == 404
+    assert "disabled" in task.get_json()["error"]
+
+    _reset_rate_limiters()
+    empty = client.post("/api/llm/dedup", json={}, headers=auth_header())
+    assert empty.status_code == 200
+
+
 def test_legacy_llm_api_keys_work_as_both_read_and_write(monkeypatch, tmp_path):
     """Legacy LLM_API_KEYS should function as both read and write keys.
 

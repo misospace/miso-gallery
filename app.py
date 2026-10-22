@@ -72,7 +72,7 @@ from gallery_scan import (
     source_file_path,
 )
 from health import health, storage_health, storage_health_read, storage_health_write
-from llm_api import load_env_config as load_llm_env_config
+from llm_api import json_object_payload, load_env_config as load_llm_env_config
 from llm_api import register_llm_routes
 from metadata import read_image_metadata
 from oidc import register_oidc_routes
@@ -409,6 +409,12 @@ def _render_task_command(template: str, params: dict[str, object]) -> str:
 def run_configured_task(payload: dict[str, object]) -> tuple[dict[str, object], int]:
     if not _webhook_enabled():
         return {"error": "Webhook tasks are disabled"}, 404
+
+    # Defense-in-depth (issue #574): both HTTP callers validate the body shape
+    # with llm_api.json_object_payload() first; this keeps any future caller
+    # from forwarding a parsed array/string/number into payload.get below.
+    if not isinstance(payload, dict):
+        return {"error": "JSON body must be an object"}, 400
 
     task = str(payload.get("task", "")).strip()
     params = payload.get("params") or {}
@@ -1383,7 +1389,12 @@ def webhook_run_task():
     if scheme.lower() != "bearer" or not _verify_webhook_secret(token):
         return jsonify({"error": "Webhook secret required"}), 401
 
-    body, status = run_configured_task(request.get_json(silent=True) or {})
+    payload, payload_error = json_object_payload()
+    if payload_error is not None:
+        log_security_event("webhook_task", "rejected", reason="non_object_json_body")
+        return payload_error
+
+    body, status = run_configured_task(payload)
     _invalidate_gallery_scan_cache()
     return body, status
 

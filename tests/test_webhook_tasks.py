@@ -488,3 +488,53 @@ def test_webhook_task_slot_released_after_timeout(monkeypatch, tmp_path):
     )
     assert resp_ok.status_code == 200, resp_ok.get_json()
     assert resp_ok.get_json()["stdout"].strip() == "done-ok"
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #574: /api/webhook/run forwarded
+# ``request.get_json(silent=True) or {}`` into run_configured_task, so a
+# present non-object JSON body (array, string, number, boolean) reached
+# ``payload.get`` and raised AttributeError -> HTTP 500 instead of a client
+# validation error, and null/empty fell through to "task is required".
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_run_rejects_non_object_json_bodies(monkeypatch, tmp_path):
+    """#574: a valid bearer secret must still 400 on non-object JSON bodies.
+
+    The body-shape check runs after the secret gate (so unauthenticated
+    callers get 401, not body-validation detail) and before
+    run_configured_task touches payload fields or spawns a subprocess.
+    """
+    import sys
+
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd='python3 -c "print(\'executed\')"',
+    )
+
+    app_module = sys.modules["app"]
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(f"task subprocess must not run: {args}")
+
+    monkeypatch.setattr(app_module.subprocess, "run", _boom)
+
+    for raw in ['["not-an-object"]', '"just-a-string"', "123", "true", "null"]:
+        resp = client.post(
+            "/api/webhook/run",
+            data=raw,
+            content_type="application/json",
+            headers={"Authorization": "Bearer test-secret-123"},
+        )
+        assert resp.status_code == 400, (raw, resp.status_code)
+        assert "must be an object" in resp.get_json()["error"], raw
+
+    # The bearer-secret check still precedes body validation.
+    resp_unauth = client.post(
+        "/api/webhook/run",
+        data="[]",
+        content_type="application/json",
+    )
+    assert resp_unauth.status_code == 401
+    assert "secret" in resp_unauth.get_json()["error"].lower()
