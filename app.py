@@ -72,8 +72,8 @@ from gallery_scan import (
     source_file_path,
 )
 from health import health, storage_health, storage_health_read, storage_health_write
-from llm_api import json_object_payload, load_env_config as load_llm_env_config
-from llm_api import register_llm_routes
+from llm_api import json_object_payload, register_llm_routes
+from llm_api import load_env_config as load_llm_env_config
 from metadata import read_image_metadata
 from oidc import register_oidc_routes
 from security import (
