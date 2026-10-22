@@ -48,6 +48,21 @@ def load_env_config() -> None:
 load_env_config()
 
 
+def _invalid_bool_flag(payload: dict, *keys: str) -> str | None:
+    """Return the first key in ``keys`` that is present but not a JSON boolean.
+
+    Destructive/behavioral LLM flags (``remove``, ``delete``, ``dry_run``) must
+    be JSON booleans (issue #572): Python truthiness made the string ``"false"``
+    authorize deletion, and ``bool(...)`` silently accepted any arbitrary value.
+    A present-but-non-boolean value fails closed with a 400 before any file or
+    thumbnail mutation; absent keys keep their documented defaults.
+    """
+    for key in keys:
+        if key in payload and not isinstance(payload[key], bool):
+            return key
+    return None
+
+
 def _app():
     """Return the live ``app`` module.
 
@@ -283,7 +298,11 @@ def register_llm_routes(app, log_security_event) -> None:
         media_path = app_module.source_file_path(safe_rel_path)
         if not media_path.exists() or not app_module.is_media_file(media_path) or app_module.is_excluded_gallery_path(media_path):
             return {"error": "Image not found"}, 404
-        dry_run = bool(payload.get("dry_run", False))
+        invalid = _invalid_bool_flag(payload, "dry_run")
+        if invalid is not None:
+            log_security_event("llm_delete", "rejected", reason="non_boolean_flag", flag=invalid)
+            return {"error": "dry_run must be a boolean"}, 400
+        dry_run = payload.get("dry_run", False)
         moved = False
         if not dry_run:
             moved = move_to_trash(media_path, app_module.DATA_FOLDER)
@@ -306,7 +325,11 @@ def register_llm_routes(app, log_security_event) -> None:
         if len(rel_paths) > LLM_BULK_DELETE_MAX_ITEMS:
             log_security_event("llm_bulk_delete", "rejected", reason="exceeds_max_items", count=len(rel_paths), max_items=LLM_BULK_DELETE_MAX_ITEMS)
             return {"error": f"Too many items. Maximum is {LLM_BULK_DELETE_MAX_ITEMS}."}, 422
-        dry_run = bool(payload.get("dry_run", False))
+        invalid = _invalid_bool_flag(payload, "dry_run")
+        if invalid is not None:
+            log_security_event("llm_bulk_delete", "rejected", reason="non_boolean_flag", flag=invalid)
+            return {"error": "dry_run must be a boolean"}, 400
+        dry_run = payload.get("dry_run", False)
         deleted = []
         skipped = []
         purged_thumbnails: list[str] = []
@@ -339,6 +362,10 @@ def register_llm_routes(app, log_security_event) -> None:
     def llm_dedup():
         app_module = _app()
         payload = request.get_json(silent=True) or {}
+        invalid = _invalid_bool_flag(payload, "remove", "delete")
+        if invalid is not None:
+            log_security_event("llm_dedup", "rejected", reason="non_boolean_flag", flag=invalid)
+            return {"error": f"{invalid} must be a boolean"}, 400
         remove = bool(payload.get("remove") or payload.get("delete"))
         try:
             limit = max(1, min(100, int(payload.get("limit", "0") or "0"))) if payload.get("limit") else None
