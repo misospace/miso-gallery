@@ -1,5 +1,65 @@
 # Changelog
 
+## [0.4.0](https://github.com/misospace/miso-gallery/compare/0.3.0...0.4.0) (2026-10-23)
+
+
+### Features
+
+* **deps:** update dependency certifi (2026.7.22 → 2026.10.18) ([#560](https://github.com/misospace/miso-gallery/issues/560)) ([9b1401e](https://github.com/misospace/miso-gallery/commit/9b1401efec1b8745be653046b8d66b6389c8b568))
+* **deps:** update dependency pillow (12.3.0 → 13.0.0) ([#550](https://github.com/misospace/miso-gallery/issues/550)) ([52a5141](https://github.com/misospace/miso-gallery/commit/52a5141577c639ce460f00284e25dcb31938dea0))
+* **deps:** update dependency pillow (12.3.0 → 13.0.0) ([#551](https://github.com/misospace/miso-gallery/issues/551)) ([bd071d2](https://github.com/misospace/miso-gallery/commit/bd071d25bee0d6dfaf14133e1d30027ce9b22122))
+* **deps:** update dependency pycparser (3.11 → 3.12) ([#584](https://github.com/misospace/miso-gallery/issues/584)) ([c343833](https://github.com/misospace/miso-gallery/commit/c34383361dd57cfc2ac9648fccaa3002dbe52bc6))
+* **deps:** update dependency python (3.14.8 → 3.15.0) ([#559](https://github.com/misospace/miso-gallery/issues/559)) ([5f7e3c7](https://github.com/misospace/miso-gallery/commit/5f7e3c7d323a203d63132bdfff8fde0f83dc4c90))
+* **deps:** update dependency setuptools (84.0.0 → 84.1.0) ([#566](https://github.com/misospace/miso-gallery/issues/566)) ([022d17f](https://github.com/misospace/miso-gallery/commit/022d17fa334331090dcdd1cf2b3c7f6b906f791c))
+* **deps:** update dependency setuptools (84.1.0 → 84.2.0) ([#567](https://github.com/misospace/miso-gallery/issues/567)) ([5c64c07](https://github.com/misospace/miso-gallery/commit/5c64c0716e76a3ce26153a24c3fd49bd39ebe0be))
+* **deps:** update python dependencies ([#586](https://github.com/misospace/miso-gallery/issues/586)) ([c61215b](https://github.com/misospace/miso-gallery/commit/c61215b12cd9f3a700a620157a1d15fb072c0a53))
+* **review:** adopt repository skills and v3.6.0 ([#561](https://github.com/misospace/miso-gallery/issues/561)) ([1e85d6c](https://github.com/misospace/miso-gallery/commit/1e85d6c8b27d0abd5aefd4d562eda949b5f50712))
+
+
+### Bug Fixes
+
+* **api:** reject non-object JSON bodies on machine mutation endpoints ([#583](https://github.com/misospace/miso-gallery/issues/583)) ([d14924c](https://github.com/misospace/miso-gallery/commit/d14924c089683d7661488165216db68687f9efc6))
+* **csp:** pass the per-request CSP nonce into template contexts (issue [#534](https://github.com/misospace/miso-gallery/issues/534)) ([#548](https://github.com/misospace/miso-gallery/issues/548)) ([59b396f](https://github.com/misospace/miso-gallery/commit/59b396f74910a68efcd5ac98c799b69ddf7c62c9))
+* **deps:** update dependency certifi (2026.10.19 → 2026.10.23) ([#591](https://github.com/misospace/miso-gallery/issues/591)) ([c7b3915](https://github.com/misospace/miso-gallery/commit/c7b3915627d6ba50ae182eea1a24f3ab7ed24030))
+* **deps:** update dependency joserfc (1.7.5 → 1.7.7) ([#563](https://github.com/misospace/miso-gallery/issues/563)) ([09af703](https://github.com/misospace/miso-gallery/commit/09af7030662b649f3fe9f7d06004fdd81ddb44b9))
+* **deps:** update dependency python (3.15.0 → 3.15.1) ([#575](https://github.com/misospace/miso-gallery/issues/575)) ([9be1da0](https://github.com/misospace/miso-gallery/commit/9be1da0f9343e2dd30844990f86161d3382e9233))
+* **deps:** update dependency python (3.15.0 → 3.15.1) ([#576](https://github.com/misospace/miso-gallery/issues/576)) ([2bbb33d](https://github.com/misospace/miso-gallery/commit/2bbb33d1e6e63e81bb085d762cf808f59dc355cd))
+* **deps:** update python dependencies ([#568](https://github.com/misospace/miso-gallery/issues/568)) ([dd9755a](https://github.com/misospace/miso-gallery/commit/dd9755a7ba721f399f2d0c7c6058297ae8de6b7b))
+* **dev:** follow the constraint lock in the bootstrap task (issue [#571](https://github.com/misospace/miso-gallery/issues/571)) ([#578](https://github.com/misospace/miso-gallery/issues/578)) ([77669b5](https://github.com/misospace/miso-gallery/commit/77669b5f836f73db6c106937727becfc3fc71d4f))
+* **llm-api:** reject non-boolean destructive flags before media mutation ([#580](https://github.com/misospace/miso-gallery/issues/580)) ([f381ebd](https://github.com/misospace/miso-gallery/commit/f381ebdde9bb1fde1a9148aa653f23eebc45397b)), closes [#572](https://github.com/misospace/miso-gallery/issues/572)
+* **llm-api:** reject non-string task values on task/run with 400 ([#582](https://github.com/misospace/miso-gallery/issues/582)) ([#587](https://github.com/misospace/miso-gallery/issues/587)) ([7795c78](https://github.com/misospace/miso-gallery/commit/7795c78962deb57de558e1d4a686c8dd1b096d90))
+* **review:** enable specialist Anthropic effort support ([#585](https://github.com/misospace/miso-gallery/issues/585)) ([c8e7388](https://github.com/misospace/miso-gallery/commit/c8e73883dcc9798bf7cd9a9bf70ed6fe6b9b368c))
+* **security:** bound and expire idle in-memory rate-limit histories ([#558](https://github.com/misospace/miso-gallery/issues/558)) ([#588](https://github.com/misospace/miso-gallery/issues/588)) ([4a81a3d](https://github.com/misospace/miso-gallery/commit/4a81a3d513cf40abf8b245b62eac76ce2754a257))
+* **security:** remove duplicate _to_positive_int definition (issue [#522](https://github.com/misospace/miso-gallery/issues/522)) ([#554](https://github.com/misospace/miso-gallery/issues/554)) ([4d445d4](https://github.com/misospace/miso-gallery/commit/4d445d4a1c4484a536610b1ac287158ebb6b2163))
+* **thumbnails:** bind cache identity to full path digest (issue [#515](https://github.com/misospace/miso-gallery/issues/515)) ([016e93d](https://github.com/misospace/miso-gallery/commit/016e93dd46396b2271a6c0a15e9220596000631f))
+* **thumbnails:** bind cache identity to full path digest (issue [#515](https://github.com/misospace/miso-gallery/issues/515)) ([06b5bd8](https://github.com/misospace/miso-gallery/commit/06b5bd83eed4a846df025cc562117f32944af2f0))
+* **thumbnails:** contain Pillow decompression-bomb failures ([#573](https://github.com/misospace/miso-gallery/issues/573)) ([#577](https://github.com/misospace/miso-gallery/issues/577)) ([f1772b1](https://github.com/misospace/miso-gallery/commit/f1772b11a5e348a7c4a65d2df2ee056fb96ff7d7))
+* **trash:** consume trashed directory on successful restore ([3c1483d](https://github.com/misospace/miso-gallery/commit/3c1483d93af6abe4255114868165404a65d7af24))
+* **trash:** consume trashed directory on successful restore ([2352265](https://github.com/misospace/miso-gallery/commit/2352265df795bb2900460c8ade173e7108c9524c))
+* **trash:** log unrecoverable trash source after cross-device restore and cover fallback ([ec30c17](https://github.com/misospace/miso-gallery/commit/ec30c170ded707edf2919c5fb524750a58eee13e))
+* **trash:** protect active restore stages from concurrent trash maintenance ([#564](https://github.com/misospace/miso-gallery/issues/564)) ([7d3c69c](https://github.com/misospace/miso-gallery/commit/7d3c69c47deadeea0476442ab2b4a4997eda5f16))
+* **trash:** skip entries that vanish mid-purge sweep ([#565](https://github.com/misospace/miso-gallery/issues/565)) ([#589](https://github.com/misospace/miso-gallery/issues/589)) ([40fe037](https://github.com/misospace/miso-gallery/commit/40fe037108cadb3ad2cad05c3b2c8fc009dcd111))
+* **trash:** stage cross-device restore copy to avoid clobbering concurrent winner ([106f680](https://github.com/misospace/miso-gallery/commit/106f680d8d30b3e19226984124e0ee3852dafb08))
+* **trash:** stage cross-device restore on dest filesystem, not source ([b0833a1](https://github.com/misospace/miso-gallery/commit/b0833a1736d47de423e9ddfa5ed3c8cb4b969a4d))
+* **upload:** accept valid non-faststart MP4/MOV uploads (issue [#494](https://github.com/misospace/miso-gallery/issues/494)) ([#552](https://github.com/misospace/miso-gallery/issues/552)) ([b481bec](https://github.com/misospace/miso-gallery/commit/b481beccf4de469d1c38014a6121babc3ceecbac))
+
+
+### Chores
+
+* **ci:** disable experimental requirement tracing ([#544](https://github.com/misospace/miso-gallery/issues/544)) ([83fbce9](https://github.com/misospace/miso-gallery/commit/83fbce9763f10d32e599c28dddc11ce7de309436))
+* **dev:** add reproducible Python development bootstrap (issue [#553](https://github.com/misospace/miso-gallery/issues/553)) ([#556](https://github.com/misospace/miso-gallery/issues/556)) ([20fa205](https://github.com/misospace/miso-gallery/commit/20fa20529598016742dbf9c7a757f0d4233f4566))
+* **packaging:** declare pip install library-only and surface it at import (issue [#547](https://github.com/misospace/miso-gallery/issues/547)) ([#549](https://github.com/misospace/miso-gallery/issues/549)) ([8ce3e99](https://github.com/misospace/miso-gallery/commit/8ce3e99d89312e7cf5d28fe19d776ae267c45592))
+
+
+### Refactors
+
+* **gallery:** extract gallery scanning and media helpers into gallery_scan.py ([#543](https://github.com/misospace/miso-gallery/issues/543)) ([bb85c6f](https://github.com/misospace/miso-gallery/commit/bb85c6f265cd04930401730078cedaadc41dcd75))
+* **health:** consolidate duplicated storage probe sweep ([#593](https://github.com/misospace/miso-gallery/issues/593)) ([c46931f](https://github.com/misospace/miso-gallery/commit/c46931f85cbed2b00e91b44b2e56aa09709d8bdd))
+* **llm:** extract /api/llm/* REST API from app.py into llm_api.py (issue [#519](https://github.com/misospace/miso-gallery/issues/519)) ([84aeb17](https://github.com/misospace/miso-gallery/commit/84aeb171f9f920844fa1fea2c3fb433eaf38ed8f))
+* **llm:** extract /api/llm/* REST API from app.py into llm_api.py (issue [#519](https://github.com/misospace/miso-gallery/issues/519)) ([4564f96](https://github.com/misospace/miso-gallery/commit/4564f961e53db507f0e5b3d4e77b701991afd19a))
+* **oidc:** extract OIDC login/callback/refresh flow from app.py into oidc.py ([d424d4c](https://github.com/misospace/miso-gallery/commit/d424d4cad19af0301dd561360fe53639b2fd61bb))
+* **oidc:** extract OIDC login/callback/refresh flow from app.py into oidc.py ([3956339](https://github.com/misospace/miso-gallery/commit/3956339419a729468934cbdac1f4367253e31dbb))
+
 ## [0.3.0](https://github.com/misospace/miso-gallery/compare/0.2.1...0.3.0) (2026-10-14)
 
 
