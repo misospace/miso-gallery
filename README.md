@@ -107,6 +107,8 @@ Any conformant OIDC provider works (Authentik, Keycloak, Auth0, Okta, ...): the 
 | `RATE_LIMIT_REDIS_URL` | No | - | Redis/Dragonfly URL for shared rate-limit state (falls back to in-memory if unset/unreachable) |
 | `RATE_LIMIT_PREFIX` | No | `miso-gallery:ratelimit` | Key prefix for rate-limit entries |
 | `RATE_LIMIT_ROUTE_LIMITS` | No | - | JSON overrides per endpoint, e.g. `{"auth":{"max_requests":5,"window":300}}` |
+| `INMEMORY_RATE_LIMIT_MAX_KEYS` | No | `10000` | Maximum number of client keys tracked by the in-memory rate-limit fallback (dev only). New keys are denied while the cap is reached |
+| `INMEMORY_RATE_LIMIT_CLEANUP_INTERVAL` | No | `60` | Seconds between sweeps that reclaim expired in-memory rate-limit histories (dev only) |
 
 See [docs/rate-limit-shared-backend.md](docs/rate-limit-shared-backend.md) for recommended production rollout and migration plan.
 

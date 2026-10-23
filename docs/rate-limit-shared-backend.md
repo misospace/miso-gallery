@@ -58,3 +58,28 @@ Optional:
 1. Remove `RATE_LIMIT_REDIS_URL` from deployment env.
 2. Redeploy; the app now refuses to start without a Redis URL. To run on the in-memory limiter instead, explicitly set `ALLOW_INMEMORY_RATE_LIMIT=1` and `WEB_CONCURRENCY=1` (single worker — the per-worker quota is not shared across workers).
 3. Investigate Redis connectivity or script errors before retrying migration.
+
+## In-memory fallback limits (development only)
+
+The per-process in-memory fallback is bounded so it cannot grow with client
+cardinality (issue #558):
+
+- `INMEMORY_RATE_LIMIT_MAX_KEYS` (default `10000`) caps the number of tracked
+  client-IP/endpoint keys.
+- `INMEMORY_RATE_LIMIT_CLEANUP_INTERVAL` (default `60` seconds) controls how
+  often expired histories are reclaimed; expired entries are also reclaimed
+  before a capacity decision, with those sweeps spaced at least one second
+  apart (a brand-new key can therefore be denied for up to a second after
+  room frees).
+
+Overflow policy:
+
+- Expired entries are reclaimed first, so idle clients free their slot.
+- Tracked keys are never evicted. Evicting a live key would reset its
+  remaining quota and silently grant extra retries.
+- A brand-new key is denied (fail closed, `429`) while the store is at
+  capacity, until expired entries are reclaimed. A throttled warning naming
+  the cap is logged at most once per cleanup interval.
+
+Production deployments should use the shared Redis/Dragonfly backend; these
+limits exist to keep the single-worker development fallback safe to run.
