@@ -144,6 +144,50 @@ def test_restore_rejects_escaping_original_and_purge_falls_back_to_mtime(tmp_pat
     assert not old.exists()
 
 
+def test_purge_old_trash_survives_item_vanishing_mid_sweep(tmp_path, monkeypatch):
+    """A restore renaming an expired entry away mid-sweep skips it (#565).
+
+    ``purge_old_trash`` stats each entry *before* acquiring the source
+    lock, so a concurrent ``restore_from_trash`` fast-path rename landing
+    between ``iterdir()`` and ``stat()`` used to raise FileNotFoundError
+    out of the sweep. The interleaving is made deterministic: the victim's
+    stat unlinks the entry first (exactly what the racing restore does to
+    it), so the pre-lock probe sees the same FileNotFoundError the race
+    produces. A second expired entry proves the sweep continues past the
+    vanished one, and the victim's orphaned meta stays behind for
+    ``empty_trash`` (the purge loop skips meta entries entirely).
+    """
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+    old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+
+    victim = td / "victim.txt"
+    victim.write_text("victim")
+    victim_meta = victim.with_name(victim.name + trash.META_SUFFIX)
+    victim_meta.write_text(json.dumps({"original": "victim.txt", "deleted_at": old_iso}))
+    expired = td / "expired.txt"
+    expired.write_text("expired")
+    expired.with_name(expired.name + trash.META_SUFFIX).write_text(
+        json.dumps({"original": "expired.txt", "deleted_at": old_iso})
+    )
+
+    original_stat = trash.Path.stat
+
+    def racy_stat(path, *args, **kwargs):
+        if path == victim:
+            # The concurrent restore's rename wins the race against this
+            # entry's stat: by the time the sweep examines it, it is gone.
+            victim.unlink(missing_ok=True)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(trash.Path, "stat", racy_stat)
+    assert purge_old_trash(data, retention_days=1) == 1
+
+    assert not expired.exists()
+    assert not victim.exists()
+    assert victim_meta.exists()
+
+
 class TestMoveToTrashSingleFile:
     """Verify single-file trash behavior (regression guard)."""
 
