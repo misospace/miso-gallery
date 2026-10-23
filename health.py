@@ -92,82 +92,52 @@ def _new_health_payload() -> dict[str, Any]:
     }
 
 
-def get_storage_read_health() -> dict[str, Any]:
-    """Get read-only storage health status without write probes or signal updates."""
+STORAGE_PROBE_TARGETS: tuple[str, ...] = ("data_folder", "thumbnail_cache")
+
+
+def _collect_storage_health(kinds: tuple[str, ...]) -> dict[str, Any]:
+    """Run the given probe kinds against both storage targets and merge results.
+
+    One shared loop for the three endpoint variants (read-only, write-only,
+    comprehensive): every variant probed the same two paths with the same
+    checkers. Paths and checkers resolve through module globals at call time,
+    so tests keep monkeypatching ``DATA_FOLDER`` / ``check_storage_read`` etc.
+    """
+    checkers = {"read": check_storage_read, "write": check_storage_write}
+    paths = {"data_folder": DATA_FOLDER, "thumbnail_cache": THUMBNAIL_CACHE_DIR}
+
     health: dict[str, Any] = _new_health_payload()
+    all_ok = True
+    for target in STORAGE_PROBE_TARGETS:
+        for kind in kinds:
+            ok, message = checkers[kind](paths[target])
+            health["checks"][target][kind] = {
+                "ok": ok,
+                "message": message,
+            }
+            all_ok = all_ok and ok
 
-    read_ok, read_msg = check_storage_read(DATA_FOLDER)
-    health["checks"]["data_folder"]["read"] = {
-        "ok": read_ok,
-        "message": read_msg,
-    }
-
-    thumb_read_ok, thumb_read_msg = check_storage_read(THUMBNAIL_CACHE_DIR)
-    health["checks"]["thumbnail_cache"]["read"] = {
-        "ok": thumb_read_ok,
-        "message": thumb_read_msg,
-    }
-
-    if not (read_ok and thumb_read_ok):
+    if not all_ok:
         health["status"] = "unhealthy"
 
     return health
 
 
+def get_storage_read_health() -> dict[str, Any]:
+    """Get read-only storage health status without write probes or signal updates."""
+    return _collect_storage_health(("read",))
+
+
 def get_storage_write_health() -> dict[str, Any]:
     """Get write-probe storage health status."""
-    health: dict[str, Any] = _new_health_payload()
-
-    write_ok, write_msg = check_storage_write(DATA_FOLDER)
-    health["checks"]["data_folder"]["write"] = {
-        "ok": write_ok,
-        "message": write_msg,
-    }
-
-    thumb_write_ok, thumb_write_msg = check_storage_write(THUMBNAIL_CACHE_DIR)
-    health["checks"]["thumbnail_cache"]["write"] = {
-        "ok": thumb_write_ok,
-        "message": thumb_write_msg,
-    }
-
-    if not (write_ok and thumb_write_ok):
-        health["status"] = "unhealthy"
-
+    health = _collect_storage_health(("write",))
     update_unhealthy_signal(health)
     return health
 
 
 def get_storage_health() -> dict[str, Any]:
     """Get comprehensive storage health status."""
-    health: dict[str, Any] = _new_health_payload()
-
-    read_ok, read_msg = check_storage_read(DATA_FOLDER)
-    health["checks"]["data_folder"]["read"] = {
-        "ok": read_ok,
-        "message": read_msg,
-    }
-
-    write_ok, write_msg = check_storage_write(DATA_FOLDER)
-    health["checks"]["data_folder"]["write"] = {
-        "ok": write_ok,
-        "message": write_msg,
-    }
-
-    thumb_read_ok, thumb_read_msg = check_storage_read(THUMBNAIL_CACHE_DIR)
-    health["checks"]["thumbnail_cache"]["read"] = {
-        "ok": thumb_read_ok,
-        "message": thumb_read_msg,
-    }
-
-    thumb_write_ok, thumb_write_msg = check_storage_write(THUMBNAIL_CACHE_DIR)
-    health["checks"]["thumbnail_cache"]["write"] = {
-        "ok": thumb_write_ok,
-        "message": thumb_write_msg,
-    }
-
-    if not (read_ok and write_ok and thumb_read_ok and thumb_write_ok):
-        health["status"] = "unhealthy"
-
+    health = _collect_storage_health(("read", "write"))
     update_unhealthy_signal(health)
     return health
 
