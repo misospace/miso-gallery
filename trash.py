@@ -496,6 +496,9 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
     worker (active restore or concurrent maintenance) skips the item AND
     its meta without counting, while an unverifiable lock state falls back
     to the historical unconditional delete. See ``_acquire_source_lock``.
+    An entry whose pre-lock age probes raise ``OSError`` (it vanished
+    mid-sweep, e.g. a concurrent restore renamed it away, or it is
+    otherwise unprobeable) is skipped and logged at debug level.
     """
     td = trash_dir(data_folder)
     cutoff = _utcnow() - timedelta(days=retention_days)
@@ -504,13 +507,25 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
         if item.name.endswith(META_SUFFIX):
             continue
         meta_file = _meta_path(item)
-        deleted_at = _from_timestamp(item.stat().st_mtime)
-        if meta_file.exists():
-            try:
-                meta = json.loads(meta_file.read_text())
-                deleted_at = _parse_deleted_at(meta.get("deleted_at", deleted_at.isoformat()))
-            except Exception:
-                pass
+        try:
+            deleted_at = _from_timestamp(item.stat().st_mtime)
+            if meta_file.exists():
+                try:
+                    meta = json.loads(meta_file.read_text())
+                    deleted_at = _parse_deleted_at(meta.get("deleted_at", deleted_at.isoformat()))
+                except Exception:
+                    pass
+        except OSError as exc:
+            # A concurrent restore's rename can move the entry away between
+            # iterdir() and these pre-lock probes: the source lock only
+            # exists once the expiry decision is made, so it cannot cover
+            # this window. A vanished entry is a benign sweep outcome, not a
+            # purge error: skip it and continue (#565). Other OSErrors (a
+            # dangling symlink, an inaccessible entry) get the same skip,
+            # logged so a permanently unprobeable entry is at least visible
+            # in the logs instead of silently surviving every sweep.
+            logger.debug("purge_old_trash: skipping trash entry %s: %s", item, exc)
+            continue
         if deleted_at < cutoff:
             lock_fh, lock_state = _acquire_source_lock(meta_file)
             if lock_state == SOURCE_LOCK_HELD:
