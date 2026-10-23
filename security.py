@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from functools import wraps
 from ipaddress import ip_address, ip_network
 from threading import Lock
-from typing import Any
+from typing import Any, NamedTuple
 
 from flask import g, jsonify, request, session
 
@@ -74,28 +74,149 @@ def _load_route_overrides() -> dict[str, RateLimitConfig]:
     return overrides
 
 
-class InMemoryRateLimiter:
-    """Fallback in-memory limiter (single-process only)."""
+INMEMORY_RATE_LIMIT_MAX_KEYS = _to_positive_int(
+    os.environ.get("INMEMORY_RATE_LIMIT_MAX_KEYS"), 10000
+)
+INMEMORY_RATE_LIMIT_CLEANUP_INTERVAL = _to_positive_int(
+    os.environ.get("INMEMORY_RATE_LIMIT_CLEANUP_INTERVAL"), 60
+)
 
-    def __init__(self) -> None:
-        self._storage: dict[str, list[float]] = {}
+
+class InMemoryRateLimiter:
+    """Fallback in-memory limiter (single-process only).
+
+    The limiter keeps one sliding-window history per client-IP/endpoint key.
+    That key space is attacker-influenced, so the store is bounded:
+
+    - Maximum cardinality: ``INMEMORY_RATE_LIMIT_MAX_KEYS`` tracked keys
+      (default 10000), overridable with the same-named environment variable.
+    - Cleanup interval: ``INMEMORY_RATE_LIMIT_CLEANUP_INTERVAL`` seconds
+      (default 60). Expired histories are reclaimed on that cadence, and
+      additionally whenever the store is at capacity (at most once per
+      second), so expired room is normally reclaimed before a capacity
+      decision; a brand-new key can still be denied for up to a second
+      after room frees.
+    - Overflow policy: expired entries are reclaimed first; tracked keys are
+      never evicted (evicting a live key would reset its remaining quota and
+      hand out extra retries); a brand-new key is denied (fail closed) while
+      the store is at capacity.
+    """
+
+    class _Entry(NamedTuple):
+        """Tracked key state: its pruned request history plus the timestamp at
+        which that whole history becomes fully expired."""
+
+        history: list[float]
+        expires_at: float
+
+    # A full store is attacker-reachable, so capacity-triggered sweeps are
+    # spaced out: without this floor every request would rescan the whole
+    # store once the cap is reached.
+    _CAPACITY_SWEEP_MIN_INTERVAL = 1.0
+
+    def __init__(
+        self,
+        max_keys: int | None = None,
+        cleanup_interval: int | None = None,
+    ) -> None:
+        # Module globals are read at construction time so tests can patch them.
+        resolved_max_keys = (
+            INMEMORY_RATE_LIMIT_MAX_KEYS if max_keys is None else max_keys
+        )
+        resolved_interval = (
+            INMEMORY_RATE_LIMIT_CLEANUP_INTERVAL
+            if cleanup_interval is None
+            else cleanup_interval
+        )
+        self._max_keys = _to_positive_int(resolved_max_keys, 1)
+        self._cleanup_interval = _to_positive_int(resolved_interval, 1)
+        self._storage: dict[str, InMemoryRateLimiter._Entry] = {}
         self._lock = Lock()
+        self._last_cleanup = 0.0
+        self._last_capacity_sweep = 0.0
+        self._last_overflow_log = 0.0
 
     def allow(self, key: str, max_requests: int, window: int) -> bool:
         now = time.time()
         with self._lock:
-            history = [ts for ts in self._storage.get(key, []) if now - ts < window]
+            self._reclaim_expired(now)
+
+            tracked = key in self._storage
+            if not tracked and len(self._storage) >= self._max_keys:
+                # Capacity reached: fail closed for brand-new keys. Tracked
+                # keys keep their exact sliding-window limit; evicting a live
+                # key would silently grant it extra retries.
+                self._log_overflow(now)
+                return False
+
+            entry = self._storage.get(key)
+            history = [
+                ts for ts in (entry.history if entry is not None else [])
+                if now - ts < window
+            ]
             if len(history) >= max_requests:
-                self._storage[key] = history
+                expires_at = self._expiry(history, now, window)
+                self._storage[key] = self._Entry(history, expires_at)
                 return False
             history.append(now)
-            self._storage[key] = history
+            self._storage[key] = self._Entry(history, now + window)
             return True
 
     def reset(self) -> None:
         """Clear all rate-limit state (for testing)."""
         with self._lock:
             self._storage.clear()
+            self._last_cleanup = 0.0
+            self._last_capacity_sweep = 0.0
+            self._last_overflow_log = 0.0
+
+    def _reclaim_expired(self, now: float) -> None:
+        """Drop tracked keys whose whole history has expired.
+
+        Only fully expired entries are removed, so reclaiming them cannot
+        weaken any limit. Runs on the cleanup interval and, when the store is
+        at capacity, at most once per second, so expired room is reclaimed
+        before a capacity decision (a brand-new key can still be denied for
+        up to a second after room frees). Must be called with ``self._lock``
+        held.
+        """
+        interval_elapsed = now - self._last_cleanup >= self._cleanup_interval
+        at_capacity = len(self._storage) >= self._max_keys
+        capacity_due = (
+            at_capacity
+            and now - self._last_capacity_sweep >= self._CAPACITY_SWEEP_MIN_INTERVAL
+        )
+        if not (interval_elapsed or capacity_due):
+            return
+
+        expired = [
+            key
+            for key, entry in self._storage.items()
+            if entry.expires_at <= now
+        ]
+        for key in expired:
+            del self._storage[key]
+        self._last_cleanup = now
+        if at_capacity:
+            self._last_capacity_sweep = now
+
+    @staticmethod
+    def _expiry(history: list[float], now: float, window: int) -> float:
+        """Return the time at which ``history`` is fully expired."""
+        if not history:
+            return now
+        return max(history) + window
+
+    def _log_overflow(self, now: float) -> None:
+        """Warn (throttled) that new keys are denied at capacity."""
+        if now - self._last_overflow_log < self._cleanup_interval:
+            return
+        self._last_overflow_log = now
+        logger.warning(
+            "In-memory rate limiter reached its key cap (%d); denying new keys "
+            "until expired entries are reclaimed.",
+            self._max_keys,
+        )
 
 
 class RedisRateLimiter:

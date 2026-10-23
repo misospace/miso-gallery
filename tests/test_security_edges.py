@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+from unittest.mock import patch
 
 from conftest import TEST_SECRET, auth_header, build_client
 
@@ -865,3 +866,271 @@ def test_index_hides_directory_symlink(tmp_path, monkeypatch):
     assert 'class="folder-name">dir<' not in body, (
         "index() must not render directory symlinks as subfolders"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #558: the in-memory rate limiter must expire idle histories and bound
+# its cardinality. The clock is patched so every assertion is deterministic
+# (no wall-clock sleeps).
+# ---------------------------------------------------------------------------
+
+
+class _FakeClock:
+    """Deterministic stand-in for ``time.time``."""
+
+    def __init__(self, now: float = 1000.0) -> None:
+        self.now = now
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+class TestInMemoryRateLimiterBounds:
+    """``InMemoryRateLimiter`` must not grow with client cardinality.
+
+    Issue #558: the limiter kept one dict entry per client-IP/endpoint key
+    forever, so the single-worker dev fallback grew for the lifetime of its
+    worker even after every request window had expired.
+    """
+
+    def test_expired_histories_are_reclaimed(self):
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        limiter = InMemoryRateLimiter(max_keys=1000, cleanup_interval=1)
+
+        with patch("security.time.time", clock):
+            for i in range(100):
+                assert limiter.allow(f"ip-{i}:auth", 5, 60) is True
+            assert len(limiter._storage) == 100
+
+            # Every window has elapsed: the stale entries are reclaimable.
+            clock.advance(1000)
+            assert limiter.allow("ip-new:auth", 5, 60) is True
+
+        # Only the freshly accepted key remains tracked.
+        assert len(limiter._storage) == 1
+        assert "ip-new:auth" in limiter._storage
+
+    def test_cleanup_runs_on_the_interval(self):
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        limiter = InMemoryRateLimiter(max_keys=100, cleanup_interval=60)
+
+        with patch("security.time.time", clock):
+            for i in range(5):
+                assert limiter.allow(f"ip-{i}:auth", 5, 60) is True
+            assert len(limiter._storage) == 5
+
+            # The cleanup interval elapses: idle histories are dropped even
+            # though the store is far below the cardinality cap.
+            clock.advance(61)
+            assert limiter.allow("ip-new:auth", 5, 60) is True
+
+        assert len(limiter._storage) == 1
+
+    def test_cardinality_is_bounded(self):
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        limiter = InMemoryRateLimiter(max_keys=64)
+
+        with patch("security.time.time", clock):
+            for i in range(1000):
+                limiter.allow(f"ip-{i}:auth", 5, 60)
+                assert len(limiter._storage) <= 64
+
+            # More distinct keys must not push the store past the cap.
+            for i in range(1000, 1200):
+                limiter.allow(f"ip-{i}:auth", 5, 60)
+                assert len(limiter._storage) <= 64
+
+        assert len(limiter._storage) == 64
+
+    def test_active_key_keeps_its_limit_under_capacity_pressure(self):
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        limiter = InMemoryRateLimiter(max_keys=4, cleanup_interval=60)
+
+        with patch("security.time.time", clock):
+            assert limiter.allow("active:auth", 2, 60) is True
+
+            # Fill the store with other keys; the extras are denied at capacity.
+            for i in range(10):
+                limiter.allow(f"other-{i}:auth", 5, 60)
+            assert len(limiter._storage) <= 4
+
+            # The active key kept its own history: it is still limited to 2.
+            assert limiter.allow("active:auth", 2, 60) is True
+            assert limiter.allow("active:auth", 2, 60) is False
+            assert "active:auth" in limiter._storage
+
+    def test_new_key_is_denied_at_capacity(self):
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        limiter = InMemoryRateLimiter(max_keys=4)
+
+        with patch("security.time.time", clock):
+            for i in range(4):
+                assert limiter.allow(f"ip-{i}:auth", 5, 60) is True
+            assert len(limiter._storage) == 4
+
+            # A brand-new key fails closed and is not tracked.
+            assert limiter.allow("brand-new:auth", 5, 60) is False
+            assert "brand-new:auth" not in limiter._storage
+            assert len(limiter._storage) == 4
+
+    def test_default_max_keys_follows_module_global(self, monkeypatch):
+        import security
+
+        monkeypatch.setattr(security, "INMEMORY_RATE_LIMIT_MAX_KEYS", 3)
+
+        limiter = security.InMemoryRateLimiter()
+        assert limiter._max_keys == 3
+
+        clock = _FakeClock()
+        with patch("security.time.time", clock):
+            for i in range(50):
+                limiter.allow(f"ip-{i}:auth", 5, 60)
+
+        assert len(limiter._storage) <= 3
+
+    def test_capacity_pressure_reclaims_expired_entries_first(self):
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        # A long cleanup interval: reclamation must come from capacity
+        # pressure, not from the periodic sweep.
+        limiter = InMemoryRateLimiter(max_keys=2, cleanup_interval=3600)
+
+        with patch("security.time.time", clock):
+            assert limiter.allow("ip-a:auth", 5, 60) is True
+            assert limiter.allow("ip-b:auth", 5, 60) is True
+            assert len(limiter._storage) == 2
+
+            clock.advance(120)
+            # Both windows elapsed, so the expired slots are reclaimed and the
+            # new key is admitted instead of being denied at capacity.
+            assert limiter.allow("ip-c:auth", 5, 60) is True
+
+        assert "ip-c:auth" in limiter._storage
+        assert len(limiter._storage) == 1
+
+    def test_capacity_sweeps_are_throttled(self):
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        limiter = InMemoryRateLimiter(max_keys=2)
+
+        with patch("security.time.time", clock):
+            limiter.allow("ip-a:auth", 5, 60)
+            limiter.allow("ip-b:auth", 5, 60)
+            assert limiter.allow("ip-c:auth", 5, 60) is False
+            first_sweep = limiter._last_capacity_sweep
+
+            # A full store must not rescan every tracked key on every request.
+            assert limiter.allow("ip-d:auth", 5, 60) is False
+            assert limiter._last_capacity_sweep == first_sweep
+
+            clock.advance(1)
+            assert limiter.allow("ip-e:auth", 5, 60) is False
+            assert limiter._last_capacity_sweep == clock.now
+
+    def test_partially_live_entry_is_not_reclaimed(self):
+        """A sweep must not drop an entry that still holds a live timestamp.
+
+        Reclaiming it would reset that client's remaining quota and silently
+        grant extra retries.
+        """
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        limiter = InMemoryRateLimiter(max_keys=100, cleanup_interval=1)
+
+        with patch("security.time.time", clock):
+            assert limiter.allow("ip:auth", 3, 60) is True  # t=1000
+            clock.advance(30)
+            assert limiter.allow("ip:auth", 3, 60) is True  # t=1030
+            clock.advance(40)  # t=1070: the first request expired, the second is live
+            assert limiter.allow("ip:auth", 3, 60) is True  # sweep runs; live history survives
+            clock.advance(1)
+            assert limiter.allow("ip:auth", 3, 60) is True  # t=1071
+            assert limiter.allow("ip:auth", 3, 60) is False  # t=1072: quota is still 3
+
+        assert "ip:auth" in limiter._storage
+
+    def test_reset_clears_state_and_timers(self):
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        limiter = InMemoryRateLimiter(max_keys=4)
+
+        with patch("security.time.time", clock):
+            limiter.allow("ip-a:auth", 5, 60)
+            assert len(limiter._storage) == 1
+
+            limiter.reset()
+
+        assert len(limiter._storage) == 0
+        assert limiter._last_cleanup == 0.0
+        assert limiter._last_capacity_sweep == 0.0
+        assert limiter._last_overflow_log == 0.0
+
+    def test_zero_max_requests_is_denied_without_error(self):
+        from security import InMemoryRateLimiter
+
+        clock = _FakeClock()
+        limiter = InMemoryRateLimiter()
+
+        with patch("security.time.time", clock):
+            assert limiter.allow("ip:auth", 0, 60) is False
+
+        assert limiter.allow("ip:auth", 0, 60) is False
+
+    def test_capacity_denial_surfaces_as_429(self, monkeypatch, tmp_path):
+        """A key denied at capacity must reach the client as 429, not a crash."""
+        import security
+
+        client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
+        limiter = security.InMemoryRateLimiter(max_keys=1)
+        monkeypatch.setattr(security, "_primary_limiter", limiter)
+
+        _seed_csrf(client)
+        assert _auth_post(client).status_code == 302
+
+        # A different endpoint is a different limiter key, and the store is
+        # already at its cap.
+        resp = client.get("/thumb/missing.png")
+        assert resp.status_code == 429
+        assert resp.get_json()["error"] == "Rate limit exceeded"
+
+    def test_overflow_warning_is_throttled(self, caplog):
+        import security
+
+        clock = _FakeClock()
+        limiter = security.InMemoryRateLimiter(max_keys=2, cleanup_interval=60)
+
+        with (
+            caplog.at_level(logging.WARNING, logger="security"),
+            patch("security.time.time", clock),
+        ):
+            for i in range(2):
+                limiter.allow(f"ip-{i}:auth", 5, 60)
+            for i in range(20):
+                assert limiter.allow(f"other-{i}:auth", 5, 60) is False
+
+        warnings = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.WARNING
+            and "key cap" in record.getMessage()
+        ]
+        # One warning per cleanup interval, not one per denied request.
+        assert len(warnings) == 1
+        assert "2" in warnings[0].getMessage()
