@@ -466,7 +466,19 @@ def empty_trash(data_folder: Path) -> int:
                 # restore of media that is only partially copied (#557).
                 continue
             try:
-                if item.is_dir():
+                # Symlink-aware delete, mirrored from purge_old_trash (#595):
+                # is_symlink() is lstat-based and never follows the link,
+                # and a symlink to a live directory is True for both
+                # is_symlink() and is_dir() — so rmtree() would fail on it
+                # (OSError swallowed), the meta would still be deleted, and
+                # the link would survive every empty_trash call. Unlink the
+                # link itself; is_symlink() catches a loop first, and
+                # is_dir() would also return False on a loop (ELOOP is
+                # swallowed by Path.is_dir()) so the unlinked loop under
+                # the old order already worked.
+                if item.is_symlink():
+                    item.unlink(missing_ok=True)
+                elif item.is_dir():
                     shutil.rmtree(item, ignore_errors=True)
                 else:
                     item.unlink(missing_ok=True)
@@ -503,7 +515,13 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
     ``stat()`` (which follows the link) while ``lstat()`` succeeds; it is
     aged from the link inode's mtime, or the meta's ``deleted_at`` when
     present, so retention eventually collects it instead of skipping it
-    on every sweep forever (#590).
+    on every sweep forever (#590). The same pre-lock probe covers a
+    symlink-loop entry: ``stat()`` follows the link, hits ELOOP and raises
+    a bare ``OSError`` (errno ELOOP, never FileNotFoundError), so the loop
+    also falls back to the link inode — a symlink loop will not vanish on
+    its own, so retention must eventually collect it (#595). If lstat()
+    also fails the entry really vanished mid-sweep and the skip below
+    still applies.
     """
     td = trash_dir(data_folder)
     cutoff = _utcnow() - timedelta(days=retention_days)
@@ -516,14 +534,17 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
             try:
                 st = item.stat()
             except FileNotFoundError:
-                # move_to_trash preserves symlinks (atomic rename, and the
-                # copytree(symlinks=True) fallback), so a trash entry can
-                # itself be a link whose target is deleted later. stat()
-                # follows the link and raises ENOENT even though the entry
-                # remains on disk: aging only via stat() would skip such an
-                # entry on every sweep forever (#590). Fall back to the
-                # link inode's own mtime. If lstat() also fails the entry
-                # really vanished mid-sweep and the skip below still applies.
+                st = item.lstat()
+            except OSError as exc:
+                if exc.errno != errno.ELOOP:
+                    raise
+                # A symlink-loop entry raises ELOOP from stat(): ELOOP is
+                # not FileNotFoundError, so it would never reach the lstat
+                # fallback and the entry would be skipped by every sweep
+                # forever — a loop will not vanish on its own, so age the
+                # link inode exactly like the dangling case (#590/#595). If
+                # lstat() fails too the entry really vanished and the skip
+                # below still applies.
                 st = item.lstat()
             deleted_at = _from_timestamp(st.st_mtime)
             if meta_file.exists():
@@ -550,7 +571,20 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
                 # item and its meta both stay, uncounted.
                 continue
             try:
-                if item.is_dir():
+                # is_symlink() is checked FIRST: it is lstat-based and never
+                # follows the link, while a symlink to a live directory is
+                # True for both is_symlink() and is_dir(). rmtree() cannot
+                # remove a symlink (its OSError is swallowed by
+                # ignore_errors) and the link must never be followed to its
+                # still-live target — the old order deleted the meta,
+                # counted the entry as purged, and let the link survive
+                # every sweep forever (#595). Checking is_symlink() first
+                # also closes the reviewed race where a dangling link's
+                # target reappears as a directory between the age decision
+                # and the is_dir() check.
+                if item.is_symlink():
+                    item.unlink(missing_ok=True)
+                elif item.is_dir():
                     shutil.rmtree(item, ignore_errors=True)
                 else:
                     item.unlink(missing_ok=True)
