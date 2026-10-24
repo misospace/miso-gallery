@@ -251,6 +251,172 @@ def test_purge_old_trash_expires_dangling_symlink_entries(tmp_path):
     assert not (outside / "gone.txt").exists()
 
 
+def test_purge_old_trash_unlinks_symlink_to_live_dir_entry(tmp_path):
+    """An expired symlink-to-live-directory entry is unlinked, target kept (#595).
+
+    ``move_to_trash`` preserves symlinks, so a trash entry can be a link
+    to a directory that still exists. The delete used to test
+    ``is_dir()`` first: that follows the link, reports True, and
+    ``rmtree(ignore_errors=True)`` swallows the OSError a symlink causes,
+    so the sweep deleted the meta, counted the entry as purged, and left
+    the link — and thus the entry — behind forever. The delete must
+    unlink the link itself and never touch the live target.
+    """
+    import os
+
+    data = tmp_path / "data"
+    outside = tmp_path / "outside"
+    target = outside / "live-dir"
+    target.mkdir(parents=True)
+    (target / "keep.txt").write_text("keep")
+    td = trash.trash_dir(data)
+    old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+
+    link = td / "linked-dir"
+    link.symlink_to(target)
+    link_meta = link.with_name(link.name + trash.META_SUFFIX)
+    link_meta.write_text(json.dumps({"deleted_at": old_iso}))
+
+    assert purge_old_trash(data, retention_days=30) == 1
+    assert not link.exists() and not os.path.islink(link)
+    assert not link_meta.exists(), "no leftover meta after the purge"
+    assert (target / "keep.txt").read_text() == "keep"
+    assert target.is_dir()
+
+
+def test_purge_old_trash_expires_symlink_loop_entries(tmp_path):
+    """A symlink-loop trash entry ages via lstat and expires (#595).
+
+    ``stat()`` on a symlink loop raises ELOOP, a bare ``OSError`` that is
+    not FileNotFoundError, so the probe's dangling-link fallback never
+    fired and the outer skip (#565) kept the loop alive on every sweep. A
+    loop will not vanish on its own, so the probe must fall back to the
+    link inode for ELOOP too, letting the meta's ``deleted_at`` (or the
+    link's own mtime) age it into the delete path — where only the loop
+    link itself may be unlinked.
+    """
+    import os
+
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+    old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+
+    loop = td / "loop"
+    loop.symlink_to(loop)
+    loop_meta = loop.with_name(loop.name + trash.META_SUFFIX)
+    loop_meta.write_text(json.dumps({"deleted_at": old_iso}))
+
+    assert purge_old_trash(data, retention_days=30) == 1
+    assert not loop.exists() and not os.path.islink(loop)
+    assert not loop_meta.exists()
+    assert not list(td.iterdir()), "no leftover entries after the purge"
+
+
+def test_purge_old_trash_ages_fresh_symlink_loop_until_retention(tmp_path):
+    """A fresh symlink-loop entry survives a sweep and is collected when old (#595).
+
+    Before the ELOOP fallback the loop entry was never aged — it hit the
+    #565 skip on every sweep regardless of age, so freshness was
+    indistinguishable from expiry. Now the probe reads the link inode via
+    lstat(): with a fresh ``deleted_at`` in its meta the entry is inside
+    the retention window and must survive, and once the meta's
+    ``deleted_at`` ages past it, the very next sweep deletes the loop.
+    """
+    import os
+
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+    fresh_iso = (trash._utcnow() - timedelta(hours=1)).isoformat()
+    old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+
+    loop = td / "loop"
+    loop.symlink_to(loop)
+    loop_meta = loop.with_name(loop.name + trash.META_SUFFIX)
+    loop_meta.write_text(json.dumps({"deleted_at": fresh_iso}))
+
+    assert purge_old_trash(data, retention_days=30) == 0
+    assert os.path.islink(loop), "fresh loop must survive the sweep"
+
+    loop_meta.write_text(json.dumps({"deleted_at": old_iso}))
+    assert purge_old_trash(data, retention_days=30) == 1
+    assert not os.path.islink(loop) and not loop_meta.exists()
+
+
+def test_purge_old_trash_ages_symlink_loop_by_link_inode_without_meta(tmp_path):
+    """A meta-less symlink-loop entry ages from the link's own mtime (#595).
+
+    Without a meta the deleted_at falls back to the probe's ``st_mtime`` —
+    for a loop that is the lstat-ed link inode (the #590 dangling-link
+    fallback lane). ``os.utime(..., follow_symlinks=False)`` backdates the
+    link inode itself; the entry must then expire on the next sweep.
+    """
+    import os
+
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+
+    loop = td / "loop"
+    loop.symlink_to(loop)
+    old_epoch = (trash._utcnow() - timedelta(days=40)).timestamp()
+    os.utime(loop, (old_epoch, old_epoch), follow_symlinks=False)
+
+    assert purge_old_trash(data, retention_days=30) == 1
+    assert not os.path.islink(loop) and not list(td.iterdir())
+
+
+def test_empty_trash_unlinks_symlink_to_live_dir_entry(tmp_path):
+    """``empty_trash`` unlinks a symlink-to-live-dir entry, target kept (#595).
+
+    The same ``is_dir()``/``rmtree`` shape as the purge delete path: for a
+    link to a live directory, rmtree fails on the symlink, the meta still
+    gets deleted, and the entry (item + meta) is miscounted while the
+    link survives. The empty must unlink the link itself — never rmtree
+    through it — and leave the target's contents intact.
+    """
+    import os
+
+    data = tmp_path / "data"
+    outside = tmp_path / "outside"
+    target = outside / "live-dir"
+    target.mkdir(parents=True)
+    (target / "keep.txt").write_text("keep")
+    td = trash.trash_dir(data)
+
+    link = td / "linked-dir"
+    link.symlink_to(target)
+    link_meta = link.with_name(link.name + trash.META_SUFFIX)
+    link_meta.write_text(json.dumps({"deleted_at": (trash._utcnow() - timedelta(days=40)).isoformat()}))
+
+    assert trash.empty_trash(data) == 2
+    assert not link.exists() and not os.path.islink(link)
+    assert not link_meta.exists()
+    assert (target / "keep.txt").read_text() == "keep"
+    assert target.is_dir()
+
+
+def test_empty_trash_unlinks_symlink_loop_entry(tmp_path):
+    """``empty_trash`` deletes a symlink-loop entry, item and meta (#595).
+
+    A loop is True for ``is_symlink()`` but False for ``is_dir()`` (its
+    ELOOP is swallowed), so the fixed delete unlinks it through the
+    first branch. Under the historical unconditional delete this entry
+    was already collected, so this guards the link-aware delete against
+    regressing that behavior while item + meta still count 2.
+    """
+    import os
+
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+
+    loop = td / "loop"
+    loop.symlink_to(loop)
+    loop_meta = loop.with_name(loop.name + trash.META_SUFFIX)
+    loop_meta.write_text(json.dumps({"deleted_at": (trash._utcnow() - timedelta(days=40)).isoformat()}))
+
+    assert trash.empty_trash(data) == 2
+    assert not os.path.islink(loop) and not loop_meta.exists()
+
+
 class TestMoveToTrashSingleFile:
     """Verify single-file trash behavior (regression guard)."""
 
