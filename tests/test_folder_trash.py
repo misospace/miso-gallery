@@ -188,6 +188,95 @@ def test_purge_old_trash_survives_item_vanishing_mid_sweep(tmp_path, monkeypatch
     assert victim_meta.exists()
 
 
+def test_purge_old_trash_tolerates_failed_entry_mid_sweep(tmp_path, monkeypatch, caplog):
+    """One raced non-ENOENT OSError no longer aborts the purge sweep (#597).
+
+    The post-lock delete block only suppresses ENOENT, so a raced
+    ``EACCES``-style OSError escaping the entry's ``unlink()`` used to
+    bubble out of the sweep, 500 the route, and starve the remaining
+    expired entries. The delete is now the same skip-and-continue policy
+    as the pre-lock probes: the victim is debug-logged, left uncounted
+    with its meta intact, and the sibling expired entry is still purged.
+    """
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+    old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+
+    victim = td / "victim.txt"
+    victim.write_text("victim")
+    victim.with_name(victim.name + trash.META_SUFFIX).write_text(
+        json.dumps({"original": "victim.txt", "deleted_at": old_iso})
+    )
+    expired = td / "expired.txt"
+    expired.write_text("expired")
+    expired.with_name(expired.name + trash.META_SUFFIX).write_text(
+        json.dumps({"original": "expired.txt", "deleted_at": old_iso})
+    )
+
+    original_unlink = trash.Path.unlink
+
+    def racy_unlink(path, *args, **kwargs):
+        if path == victim:
+            raise OSError(errno.EACCES, "permission denied")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(trash.Path, "unlink", racy_unlink)
+    with caplog.at_level("DEBUG", logger="trash"):
+        assert purge_old_trash(data, retention_days=1) == 1
+
+    assert not expired.exists()
+    assert victim.exists()
+    assert victim.with_name(victim.name + trash.META_SUFFIX).exists()
+    victim_skips = [
+        r for r in caplog.records
+        if "purge_old_trash: skipping trash entry" in r.message and "victim.txt" in r.getMessage()
+    ]
+    assert victim_skips, "the failed entry must be debug-logged, not raised"
+
+
+def test_empty_trash_tolerates_failed_entry_mid_sweep(tmp_path, monkeypatch, caplog):
+    """Same skip-and-continue delete policy as the purge sweep (#597).
+
+    A raced non-ENOENT OSError from an entry's ``unlink()`` used to vanish
+    silently into the loop's broad catch, skipping the rest of that
+    entry's deletes (its meta) with no trace in the logs. The failed
+    entry is now debug-logged, left uncounted with its meta intact, and
+    the sweep still empties the sibling entries.
+    """
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+
+    victim = td / "victim.txt"
+    victim.write_text("victim")
+    victim_meta = victim.with_name(victim.name + trash.META_SUFFIX)
+    victim_meta.write_text(json.dumps({"original": "victim.txt"}))
+    expired = td / "expired.txt"
+    expired.write_text("expired")
+    expired_meta = expired.with_name(expired.name + trash.META_SUFFIX)
+    expired_meta.write_text(json.dumps({"original": "expired.txt"}))
+
+    original_unlink = trash.Path.unlink
+
+    def racy_unlink(path, *args, **kwargs):
+        if path == victim:
+            raise OSError(errno.EACCES, "permission denied")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(trash.Path, "unlink", racy_unlink)
+    with caplog.at_level("DEBUG", logger="trash"):
+        assert trash.empty_trash(data) == 2
+
+    assert not expired.exists()
+    assert not expired_meta.exists()
+    assert victim.exists()
+    assert victim_meta.exists()
+    victim_skips = [
+        r for r in caplog.records
+        if "empty_trash: skipping trash entry" in r.message and "victim.txt" in r.getMessage()
+    ]
+    assert victim_skips, "the failed entry must be debug-logged, not raised"
+
+
 def test_purge_old_trash_expires_dangling_symlink_entries(tmp_path):
     """A dangling-symlink trash entry ages via lstat and expires (#590).
 
@@ -2058,3 +2147,63 @@ class TestTrashPurgeValidation:
             follow_redirects=False,
         )
         assert response.status_code == 302
+
+    def test_trash_purge_route_survives_failed_entry_in_sweep(self, monkeypatch, tmp_path):
+        """A raced non-ENOENT OSError mid-sweep no longer 500s /trash/purge (#597).
+
+        The purge sweep skips (and debug-logs) an entry whose delete raises,
+        so the route still redirects instead of erroring while the sibling
+        expired entries are purged.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        td = trash.trash_dir(data_dir)
+        old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+
+        victim = td / "victim.txt"
+        victim.write_text("victim")
+        victim.with_name(victim.name + trash.META_SUFFIX).write_text(
+            json.dumps({"original": "victim.txt", "deleted_at": old_iso})
+        )
+        expired = td / "expired.txt"
+        expired.write_text("expired")
+        expired.with_name(expired.name + trash.META_SUFFIX).write_text(
+            json.dumps({"original": "expired.txt", "deleted_at": old_iso})
+        )
+
+        original_unlink = trash.Path.unlink
+
+        def racy_unlink(path, *args, **kwargs):
+            if path == victim:
+                raise OSError(errno.EACCES, "permission denied")
+            return original_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(trash.Path, "unlink", racy_unlink)
+
+        # Login first
+        login_resp = client.get("/login")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', login_resp.data.decode())
+        assert csrf_match, "CSRF token not found in login form"
+        login_csrf = csrf_match.group(1)
+        auth_resp = client.post(
+            "/auth",
+            data={"password": "pass123", "next": "/", "csrf_token": login_csrf},
+            follow_redirects=False,
+        )
+        assert auth_resp.status_code == 302
+
+        # Get CSRF token from trash page
+        trash_resp = client.get("/trash")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', trash_resp.data.decode())
+        assert csrf_match, "CSRF token not found on trash page"
+        csrf_token = csrf_match.group(1)
+
+        response = client.post(
+            "/trash/purge",
+            data={"csrf_token": csrf_token, "days": "1"},
+            follow_redirects=False,
+        )
+        assert response.status_code == 302
+
+        assert not expired.exists(), "the sweep must continue past the failed entry"
+        assert victim.exists()
+        assert victim.with_name(victim.name + trash.META_SUFFIX).exists()

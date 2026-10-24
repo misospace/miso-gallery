@@ -440,7 +440,11 @@ def empty_trash(data_folder: Path) -> int:
     and its meta are skipped entirely and not counted. If the lock cannot
     be acquired for any other reason (no meta file, ``fcntl`` is None, or
     flock unsupported/unexpectedly failing), the historical unconditional
-    delete is kept for lockless filesystems.
+    delete is kept for lockless filesystems. A raced non-ENOENT
+    ``OSError`` from a delete is skipped with a debug log instead of
+    vanishing silently (#597); only entries the sweep actually deleted
+    are counted, preserving the sweep's do-not-propagate guarantee for
+    the remaining entries.
     """
     td = trash_dir(data_folder)
     deleted = 0
@@ -456,8 +460,15 @@ def empty_trash(data_folder: Path) -> int:
                 if item.with_name(item.name[:-len(META_SUFFIX)]).exists():
                     continue
                 if item.exists():
-                    item.unlink(missing_ok=True)
-                    deleted += 1
+                    try:
+                        item.unlink(missing_ok=True)
+                    except OSError as exc:
+                        # Same skip-and-debug policy as the delete block
+                        # below (#597): the entry stays retryable by later
+                        # sweeps, and only a successful unlink counts.
+                        logger.debug("empty_trash: skipping stale meta %s: %s", item, exc)
+                    else:
+                        deleted += 1
                 continue
             lock_fh, lock_state = _acquire_source_lock(_meta_path(item))
             if lock_state == SOURCE_LOCK_HELD:
@@ -487,6 +498,13 @@ def empty_trash(data_folder: Path) -> int:
                 if meta_file.exists():
                     meta_file.unlink(missing_ok=True)
                     deleted += 1
+            except OSError as exc:
+                # Same skip-and-continue policy as ``purge_old_trash`` (#597):
+                # a raced non-ENOENT OSError from this single entry's delete
+                # is debug-logged instead of vanishing silently into the
+                # broad catch below; the sweep continues and only entries it
+                # actually deleted are counted.
+                logger.debug("empty_trash: skipping trash entry %s: %s", item, exc)
             finally:
                 # Release by closing only; the meta was just deleted (or is
                 # gone with it) and must never be re-unlinked from here.
@@ -510,7 +528,12 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
     to the historical unconditional delete. See ``_acquire_source_lock``.
     An entry whose pre-lock age probes raise ``OSError`` (it vanished
     mid-sweep, e.g. a concurrent restore renamed it away, or it is
-    otherwise unprobeable) is skipped and logged at debug level. An entry
+    otherwise unprobeable) is skipped and logged at debug level. The
+    post-lock delete applies the same policy to a raced non-ENOENT
+    ``OSError`` from the entry's own ``unlink()``/meta delete (#597): the
+    sweep skips the failed entry with a debug log instead of escaping the
+    sweep and 500ing the route, so one bad entry never denies service to
+    the remaining trash, and only entries actually deleted are counted. An entry
     that is itself a dangling symlink raises ``FileNotFoundError`` from
     ``stat()`` (which follows the link) while ``lstat()`` succeeds; it is
     aged from the link inode's mtime, or the meta's ``deleted_at`` when
@@ -590,6 +613,17 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
                     item.unlink(missing_ok=True)
                 meta_file.unlink(missing_ok=True)
                 deleted += 1
+            except OSError as exc:
+                # Same skip-and-continue policy as the pre-lock probes above:
+                # a raced non-ENOENT OSError from this single entry's
+                # unlink() or meta delete (a restore replacing the entry
+                # mid-delete, an EACCES-like fault) must not escape the
+                # sweep and 500 the route while the remaining trash goes
+                # unpurged (#597). Only entries the sweep actually deleted
+                # are counted; an item deleted with a failed meta delete
+                # leaves a stale meta that the next empty_trash sweep
+                # reclaims.
+                logger.debug("purge_old_trash: skipping trash entry %s: %s", item, exc)
             finally:
                 if lock_fh is not None:
                     with contextlib.suppress(OSError):
