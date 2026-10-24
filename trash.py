@@ -498,7 +498,12 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
     to the historical unconditional delete. See ``_acquire_source_lock``.
     An entry whose pre-lock age probes raise ``OSError`` (it vanished
     mid-sweep, e.g. a concurrent restore renamed it away, or it is
-    otherwise unprobeable) is skipped and logged at debug level.
+    otherwise unprobeable) is skipped and logged at debug level. An entry
+    that is itself a dangling symlink raises ``FileNotFoundError`` from
+    ``stat()`` (which follows the link) while ``lstat()`` succeeds; it is
+    aged from the link inode's mtime, or the meta's ``deleted_at`` when
+    present, so retention eventually collects it instead of skipping it
+    on every sweep forever (#590).
     """
     td = trash_dir(data_folder)
     cutoff = _utcnow() - timedelta(days=retention_days)
@@ -508,7 +513,19 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
             continue
         meta_file = _meta_path(item)
         try:
-            deleted_at = _from_timestamp(item.stat().st_mtime)
+            try:
+                st = item.stat()
+            except FileNotFoundError:
+                # move_to_trash preserves symlinks (atomic rename, and the
+                # copytree(symlinks=True) fallback), so a trash entry can
+                # itself be a link whose target is deleted later. stat()
+                # follows the link and raises ENOENT even though the entry
+                # remains on disk: aging only via stat() would skip such an
+                # entry on every sweep forever (#590). Fall back to the
+                # link inode's own mtime. If lstat() also fails the entry
+                # really vanished mid-sweep and the skip below still applies.
+                st = item.lstat()
+            deleted_at = _from_timestamp(st.st_mtime)
             if meta_file.exists():
                 try:
                     meta = json.loads(meta_file.read_text())
@@ -520,10 +537,10 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
             # iterdir() and these pre-lock probes: the source lock only
             # exists once the expiry decision is made, so it cannot cover
             # this window. A vanished entry is a benign sweep outcome, not a
-            # purge error: skip it and continue (#565). Other OSErrors (a
-            # dangling symlink, an inaccessible entry) get the same skip,
-            # logged so a permanently unprobeable entry is at least visible
-            # in the logs instead of silently surviving every sweep.
+            # purge error: skip it and continue (#565). Other OSErrors (an
+            # inaccessible entry) get the same skip, logged so a permanently
+            # unprobeable entry is at least visible in the logs instead of
+            # silently surviving every sweep.
             logger.debug("purge_old_trash: skipping trash entry %s: %s", item, exc)
             continue
         if deleted_at < cutoff:
