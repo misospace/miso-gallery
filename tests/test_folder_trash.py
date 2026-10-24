@@ -188,6 +188,69 @@ def test_purge_old_trash_survives_item_vanishing_mid_sweep(tmp_path, monkeypatch
     assert victim_meta.exists()
 
 
+def test_purge_old_trash_expires_dangling_symlink_entries(tmp_path):
+    """A dangling-symlink trash entry ages via lstat and expires (#590).
+
+    ``move_to_trash`` preserves symlinks, so a trash entry can itself be a
+    link whose target is deleted later. The pre-lock age probe's ``stat()``
+    follows the link and raises ENOENT, which used to mean the entry was
+    skipped by every sweep forever. The probe must fall back to the link
+    inode's own mtime (or the meta's ``deleted_at``) so retention
+    eventually collects it, and the delete must unlink the link without
+    following it or touching anything near its (missing) target.
+    """
+    import os
+
+    data = tmp_path / "data"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "sibling.txt").write_text("sibling")
+    td = trash.trash_dir(data)
+    old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+    fresh_iso = (trash._utcnow() - timedelta(hours=1)).isoformat()
+
+    # Expired through the link inode's own mtime (no meta to consult).
+    by_inode = td / "by-inode.txt"
+    target = outside / "gone.txt"
+    target.write_text("gone")
+    by_inode.symlink_to(target)
+    target.unlink()
+    old_ts = time.time() - 40 * 86400
+    os.utime(by_inode, (old_ts, old_ts), follow_symlinks=False)
+
+    # Expired through the meta's deleted_at even though the link inode is fresh.
+    by_meta = td / "by-meta.txt"
+    by_meta.symlink_to(outside / "never-existed.txt")
+    by_meta.with_name(by_meta.name + trash.META_SUFFIX).write_text(
+        json.dumps({"deleted_at": old_iso})
+    )
+
+    # Meta present but unusable: the link inode's mtime still ages it.
+    broken_meta = td / "broken-meta.txt"
+    broken_meta.symlink_to(outside / "was-here.txt")
+    broken_meta.with_name(broken_meta.name + trash.META_SUFFIX).write_text("not-json")
+    os.utime(broken_meta, (old_ts, old_ts), follow_symlinks=False)
+
+    # Fresh dangling link: the retention window must still protect it.
+    kept = td / "kept.txt"
+    kept.symlink_to(outside / "also-missing.txt")
+    kept.with_name(kept.name + trash.META_SUFFIX).write_text(
+        json.dumps({"deleted_at": fresh_iso})
+    )
+
+    for entry in (by_inode, by_meta, broken_meta, kept):
+        assert os.path.islink(entry)
+
+    assert purge_old_trash(data, retention_days=30) == 3
+    assert not by_inode.exists() and not os.path.islink(by_inode)
+    assert not by_meta.exists() and not os.path.islink(by_meta)
+    assert not by_meta.with_name(by_meta.name + trash.META_SUFFIX).exists()
+    assert not broken_meta.exists() and not os.path.islink(broken_meta)
+    assert kept.is_symlink()
+    assert (outside / "sibling.txt").read_text() == "sibling"
+    assert not (outside / "gone.txt").exists()
+
+
 class TestMoveToTrashSingleFile:
     """Verify single-file trash behavior (regression guard)."""
 
