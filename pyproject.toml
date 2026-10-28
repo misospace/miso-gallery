@@ -47,6 +47,7 @@ py-modules = [
     "tag_store",
     "thumbnails",
     "trash",
+    "webhook_tasks",
 ]
 
 [tool.pytest.ini_options]
