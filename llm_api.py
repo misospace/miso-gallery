@@ -20,6 +20,7 @@ from auth import require_api_key_with_scope
 from security import rate_limit, sanitize_path
 from thumbnails import batch_remove_thumbnails, remove_thumbnail_cache_for
 from trash import move_to_trash
+from webhook_tasks import _validate_task_name
 
 # Destructive-operation guardrails for the LLM endpoints (issue #199)
 LLM_BULK_DELETE_MAX_ITEMS = int(os.environ.get("LLM_BULK_DELETE_MAX_ITEMS", "500"))
@@ -104,10 +105,10 @@ def _app():
     """Return the live ``app`` module.
 
     The endpoints below rely on ``DATA_FOLDER`` and the gallery-scan/pagination
-    helpers, the tag-store singleton, ``media_metadata``,
-    ``find_duplicate_media`` and the configured-task runner. The scan/media
-    helpers live in ``gallery_scan.py`` (issue #521) and the configured-task
-    runner stays in ``app.py``; ``app.py`` re-imports the ``gallery_scan``
+    helpers, the tag-store singleton, ``media_metadata`` and
+    ``find_duplicate_media``. The scan/media helpers live in
+    ``gallery_scan.py`` (issue #521) and the configured-task runner lives in
+    ``webhook_tasks.py`` (issue #497); ``app.py`` re-imports the moved
     symbols, so resolving through ``app`` at call time keeps monkeypatching of
     ``app`` attributes effective and avoids a circular import.
     """
@@ -458,9 +459,9 @@ def register_llm_routes(app, log_security_event) -> None:
             log_security_event("llm_task_run", "rejected", reason="invalid_task_value_type")
             return {"error": "task must be a string"}, 400
         if task:
-            validation_error = app_module._validate_task_name(task)
+            validation_error = _validate_task_name(task)
             if validation_error is not None:
                 return {"error": validation_error}, 400
-        body, status = app_module.run_configured_task(data)
+        body, status = app_module.run_configured_task(data, log_security_event)
         app_module._invalidate_gallery_scan_cache()
         return body, status

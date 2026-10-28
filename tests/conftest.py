@@ -108,7 +108,11 @@ def build_client(monkeypatch, tmp_path, *, api_keys: str = TEST_API_KEY, auth_ty
     # constants at import time and owns the scan cache and _tag_store
     # singleton, so a stale copy would keep the previous test's limits, TTLs,
     # cached scans, and SQLite handle after app is re-imported (issue #521).
-    for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
+    # "webhook_tasks" must be popped with "app": it binds WEBHOOK_SECRET from
+    # the environment and owns the per-process task semaphore at import time,
+    # so a stale copy would keep the previous test's secret and slot state
+    # after app is re-imported.
+    for mod in ("auth", "oidc", "llm_api", "gallery_scan", "webhook_tasks", "app"):
         sys.modules.pop(mod, None)
 
     app_module = importlib.import_module("app")
