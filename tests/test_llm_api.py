@@ -40,6 +40,17 @@ def _fresh_app():
     return sys.modules["app"]
 
 
+def _fresh_webhook_tasks():
+    """The freshly re-imported ``webhook_tasks`` module owning the task subprocess.
+
+    ``build_client`` pops and re-imports ``app`` (and with it ``webhook_tasks``,
+    which binds ``WEBHOOK_SECRET`` and the task slot at import time), so a
+    top-level ``import webhook_tasks`` would be stale; this grabs the live
+    module whose ``subprocess`` the task runner actually calls.
+    """
+    return sys.modules["webhook_tasks"]
+
+
 def test_llm_api_requires_configured_valid_bearer_token(monkeypatch, tmp_path):
     client, _ = build_client(monkeypatch, tmp_path)
 
@@ -613,12 +624,12 @@ def test_llm_task_run_non_object_body_does_not_spawn_subprocess(monkeypatch, tmp
     monkeypatch.setenv("WEBHOOK_TASK_ECHO", "python3 -c \"import sys;print(sys.argv[1])\" {params.value}")
     client, _ = build_client(monkeypatch, tmp_path)
 
-    app_module = _fresh_app()
+    webhook_tasks_module = _fresh_webhook_tasks()
 
     def _boom(*args, **kwargs):
         raise AssertionError(f"task subprocess must not run: {args}")
 
-    monkeypatch.setattr(app_module.subprocess, "run", _boom)
+    monkeypatch.setattr(webhook_tasks_module.subprocess, "run", _boom)
 
     for raw in _NON_OBJECT_JSON_BODIES:
         _reset_rate_limiters()
@@ -662,12 +673,12 @@ def test_llm_task_run_rejects_non_string_task_values(monkeypatch, tmp_path):
     monkeypatch.setenv("WEBHOOK_TASK_ECHO", "python3 -c \"import sys;print(sys.argv[1])\" {params.value}")
     client, data_dir = build_client(monkeypatch, tmp_path)
 
-    app_module = _fresh_app()
+    webhook_tasks_module = _fresh_webhook_tasks()
 
     def _boom(*args, **kwargs):
         raise AssertionError(f"task subprocess must not run: {args}")
 
-    monkeypatch.setattr(app_module.subprocess, "run", _boom)
+    monkeypatch.setattr(webhook_tasks_module.subprocess, "run", _boom)
 
     # A cached thumbnail for sample.png makes "no gallery state mutated"
     # observable: the purge path deletes cache files by identity prefix, so a

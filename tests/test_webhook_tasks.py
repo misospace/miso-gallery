@@ -506,19 +506,17 @@ def test_webhook_run_rejects_non_object_json_bodies(monkeypatch, tmp_path):
     callers get 401, not body-validation detail) and before
     run_configured_task touches payload fields or spawns a subprocess.
     """
-    import sys
+    import webhook_tasks
 
     client = _build_webhook_client(
         monkeypatch, tmp_path,
         task_cmd='python3 -c "print(\'executed\')"',
     )
 
-    app_module = sys.modules["app"]
-
     def _boom(*args, **kwargs):
         raise AssertionError(f"task subprocess must not run: {args}")
 
-    monkeypatch.setattr(app_module.subprocess, "run", _boom)
+    monkeypatch.setattr(webhook_tasks.subprocess, "run", _boom)
 
     for raw in ['["not-an-object"]', '"just-a-string"', "123", "true", "false", "0", "null", "{"]:
         resp = client.post(
