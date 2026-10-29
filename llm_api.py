@@ -101,6 +101,33 @@ def _invalid_bool_flag(payload: dict, *keys: str) -> str | None:
     return None
 
 
+def _page_images(app_module, paginated) -> list[dict[str, object]]:
+    """Build the ``images`` list for a paginated media endpoint.
+
+    Shared tail of ``llm_images`` and ``llm_recent``: re-resolve each page item
+    against DATA_FOLDER (issue #480) so a vanished file cannot raise here, load
+    the page's tags in one tag-store query, then emit ``media_metadata`` per
+    item, dropping items that vanish between the walk and metadata so the page
+    stays 200.
+    """
+    page_rel: dict[Path, str] = {}
+    for item in paginated:
+        rel_path = app_module._gallery_item_rel_path(item)
+        if rel_path is not None:
+            page_rel[item] = rel_path
+    tags_by_path = app_module._tag_store().get_tags_for_paths(list(page_rel.values()))
+    images: list[dict[str, object]] = []
+    for item in paginated:
+        rel_path = page_rel.get(item)
+        if rel_path is None:
+            continue
+        try:
+            images.append(app_module.media_metadata(item, tags_by_path.get(rel_path, [])))
+        except (OSError, ValueError):
+            continue
+    return images
+
+
 def _app():
     """Return the live ``app`` module.
 
@@ -146,25 +173,7 @@ def register_llm_routes(app, log_security_event) -> None:
             filtered.append(item)
         paginated, total, pg, pp, has_more = app_module._paginate(filtered, page=page, per_page=per_page)
         has_more = app_module._apply_scan_limit(has_more, len(all_media))
-        # Re-resolve each page item; drop any that no longer resolve against
-        # DATA_FOLDER (issue #480) so a vanished file cannot raise here.
-        page_rel: dict[Path, str] = {}
-        for item in paginated:
-            rel_path = app_module._gallery_item_rel_path(item)
-            if rel_path is not None:
-                page_rel[item] = rel_path
-        tags_by_path = app_module._tag_store().get_tags_for_paths(list(page_rel.values()))
-        # Guard the per-item media_metadata() stat/relative_to calls (issue #480):
-        # drop items that vanish between the walk and metadata so the page stays 200.
-        images: list[dict[str, object]] = []
-        for item in paginated:
-            rel_path = page_rel.get(item)
-            if rel_path is None:
-                continue
-            try:
-                images.append(app_module.media_metadata(item, tags_by_path.get(rel_path, [])))
-            except (OSError, ValueError):
-                continue
+        images = _page_images(app_module, paginated)
         return {
             "images": images,
             "count": len(images),
@@ -220,25 +229,7 @@ def register_llm_routes(app, log_security_event) -> None:
         all_media.sort(key=lambda entry: entry[0], reverse=True)
         paginated, total, pg, pp, has_more = app_module._paginate(all_media, page=page, per_page=per_page)
         has_more = app_module._apply_scan_limit(has_more, len(all_media))
-        # Re-resolve each page item; drop any that no longer resolve against
-        # DATA_FOLDER (issue #480) so a vanished file cannot raise here.
-        page_rel: dict[Path, str] = {}
-        for _mtime, item in paginated:
-            rel_path = app_module._gallery_item_rel_path(item)
-            if rel_path is not None:
-                page_rel[item] = rel_path
-        tags_by_path = app_module._tag_store().get_tags_for_paths(list(page_rel.values()))
-        # Guard the per-item media_metadata() stat/relative_to calls (issue #480):
-        # drop items that vanish between the walk and metadata so the page stays 200.
-        images: list[dict[str, object]] = []
-        for _mtime, item in paginated:
-            rel_path = page_rel.get(item)
-            if rel_path is None:
-                continue
-            try:
-                images.append(app_module.media_metadata(item, tags_by_path.get(rel_path, [])))
-            except (OSError, ValueError):
-                continue
+        images = _page_images(app_module, [item for _mtime, item in paginated])
         return {
             "images": images,
             "count": len(images),
