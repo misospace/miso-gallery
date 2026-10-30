@@ -106,3 +106,64 @@ def test_build_primary_limiter_treats_truthy_opt_in_case_insensitively(monkeypat
         assert isinstance(limiter, security.InMemoryRateLimiter), (
             f"opt-in value {truthy!r} should enable the fallback"
         )
+
+
+class _FailingRedisRateLimiter:
+    """Stand-in for ``RedisRateLimiter`` whose construction always raises."""
+
+    def __init__(self, redis_url: str, prefix: str) -> None:
+        raise RuntimeError("redis connection refused")
+
+
+def test_redis_init_failure_refuses_fallback_with_multi_worker(monkeypatch):
+    """Issue #523: Redis init failure + opt-in + WEB_CONCURRENCY>1 must raise.
+
+    The startup opt-in fallback after a failed ``RedisRateLimiter`` construction
+    must honor the same worker-count guard as the no-Redis branch: at
+    ``WEB_CONCURRENCY > 1`` the per-process fallback multiplies the effective
+    quota, so it must be refused rather than returned.
+    """
+    security = _reload_security(
+        monkeypatch,
+        REDIS_URL="redis://127.0.0.1:6379/0",
+        ALLOW_INMEMORY_RATE_LIMIT="1",
+        WEB_CONCURRENCY="4",
+    )
+    monkeypatch.setattr(security, "RedisRateLimiter", _FailingRedisRateLimiter)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        security._build_primary_limiter()
+
+    message = str(excinfo.value)
+    assert "redis connection refused" in message
+    assert "WEB_CONCURRENCY" in message
+
+
+def test_redis_init_failure_allows_fallback_with_single_worker(monkeypatch):
+    """Issue #523: Redis init failure + opt-in + WEB_CONCURRENCY=1 still falls back."""
+    security = _reload_security(
+        monkeypatch,
+        REDIS_URL="redis://127.0.0.1:6379/0",
+        ALLOW_INMEMORY_RATE_LIMIT="1",
+        WEB_CONCURRENCY="1",
+    )
+    monkeypatch.setattr(security, "RedisRateLimiter", _FailingRedisRateLimiter)
+
+    limiter = security._build_primary_limiter()
+
+    assert isinstance(limiter, security.InMemoryRateLimiter)
+    assert limiter is security.FALLBACK_LIMITER
+
+
+def test_redis_init_failure_refuses_without_opt_in_multi_worker(monkeypatch):
+    """Redis init failure without the opt-in still refuses, whatever the worker count."""
+    for workers in ("1", "4"):
+        security = _reload_security(
+            monkeypatch,
+            REDIS_URL="redis://127.0.0.1:6379/0",
+            WEB_CONCURRENCY=workers,
+        )
+        monkeypatch.setattr(security, "RedisRateLimiter", _FailingRedisRateLimiter)
+
+        with pytest.raises(RuntimeError):
+            security._build_primary_limiter()
