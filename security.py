@@ -328,18 +328,35 @@ def _build_primary_limiter() -> RedisRateLimiter | InMemoryRateLimiter:
         limiter = RedisRateLimiter(redis_url=redis_url, prefix=redis_prefix)
         logger.info("Rate limiter backend: redis")
         return limiter
-    except Exception as exc:  # pragma: no cover - runtime fallback
+    except Exception as exc:
         # The Redis backend failed to initialize. Do NOT silently degrade to the
         # in-memory fallback: that is exactly the weak configuration this guard
         # is meant to stop. The operator must fix the Redis configuration or
-        # explicitly opt out for a single-worker dev setup.
-        if _allow_inmemory_opt_in():
+        # explicitly opt out for a single-worker dev setup. The opt-in is honored
+        # only when it is also safe (single worker), mirroring the no-Redis branch
+        # above: at WEB_CONCURRENCY > 1 the per-process fallback would multiply
+        # the effective quota by the worker count.
+        allow_inmemory = _allow_inmemory_opt_in()
+        workers = _to_positive_int(os.environ.get("WEB_CONCURRENCY", "").strip(), 1)
+
+        if allow_inmemory and workers <= 1:
             logger.warning(
                 "Failed to initialize Redis rate limiter (%s); "
-                "ALLOW_INMEMORY_RATE_LIMIT=1 set, using in-memory fallback",
+                "ALLOW_INMEMORY_RATE_LIMIT=1 set with WEB_CONCURRENCY=1, "
+                "using in-memory fallback (single-process only).",
                 exc,
             )
             return FALLBACK_LIMITER
+
+        if allow_inmemory and workers > 1:
+            raise RuntimeError(
+                f"Failed to initialize Redis rate limiter ({exc}) and "
+                f"ALLOW_INMEMORY_RATE_LIMIT=1 is set but WEB_CONCURRENCY={workers} "
+                "> 1. The in-memory fallback is per-worker and would multiply the "
+                "effective quota; fix REDIS_URL / RATE_LIMIT_REDIS_URL, or set "
+                "WEB_CONCURRENCY=1 for local development only."
+            ) from exc
+
         raise RuntimeError(
             f"Failed to initialize Redis rate limiter ({exc}). Refusing to fall "
             "back to the per-process in-memory limiter because that is unsafe "
