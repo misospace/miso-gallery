@@ -473,7 +473,20 @@ def _acquire_source_lock(meta_file: Path):
 
 RESTORE_CLAIM_ACQUIRED = "acquired"
 RESTORE_CLAIM_HELD = "held"
-RESTORE_CLAIM_UNAVAILABLE = "unavailable"
+# The claim file of this candidate name cannot be used. Only that name is
+# affected: the next candidate has its own claim file.
+RESTORE_CLAIM_UNUSABLE = "unusable"
+# The platform or the file system offers no usable ``flock`` at all. Every
+# claim is equally unreservable, so the restore fails at once instead of
+# walking the candidate names.
+RESTORE_CLAIM_UNSUPPORTED = "unsupported"
+
+# How many candidate names one restore tries before it gives up. A candidate
+# that cannot be reserved (another worker holds its claim, or its claim file
+# cannot be opened) is skipped, and the next name has its own claim file, so
+# the walk ends at the first reservable name. The bound keeps a file system
+# that refuses every claim from spinning forever.
+RESTORE_CLAIM_MAX_CANDIDATES = 64
 
 
 class RestoreDestinationUnavailable(ValueError):
@@ -526,12 +539,16 @@ def _restore_claim_path(td: Path, dest: Path) -> Path:
 def _acquire_restore_claim(claim_path: Path, create: bool = True):
     """Reserve a restore destination with an exclusive ``flock`` on its claim.
 
-    Returns ``(claim_fd, state)`` where *state* is ``RESTORE_CLAIM_ACQUIRED``
-    (the caller holds the reservation through that raw descriptor and closes it
-    once it is done with the destination), ``RESTORE_CLAIM_HELD`` (a live
-    restore owns it) or ``RESTORE_CLAIM_UNAVAILABLE`` (no verdict possible). A
-    descriptor rather than a file object so the claim is created with a private
-    mode and without truncation.
+    Returns ``(claim_fd, state, reason)`` where *state* is
+    ``RESTORE_CLAIM_ACQUIRED`` (the caller holds the reservation through that
+    raw descriptor and closes it once it is done with the destination),
+    ``RESTORE_CLAIM_HELD`` (a live restore owns this candidate name),
+    ``RESTORE_CLAIM_UNUSABLE`` (the claim file for this candidate name cannot
+    be used, so the caller can try the next name) or ``RESTORE_CLAIM_UNSUPPORTED``
+    (no usable ``flock`` on this platform or file system, so no candidate name
+    can be reserved). *reason* is a plain sentence that names the cause for the
+    operator and the user. A descriptor rather than a file object so the claim
+    is created with a fixed mode and without truncation.
 
     *create* selects who may bring the file into existence: a restore always
     does, while ``_reclaim_restore_claims`` passes ``False`` so a claim another
@@ -545,25 +562,47 @@ def _acquire_restore_claim(claim_path: Path, create: bool = True):
     ``O_NOFOLLOW`` keeps a claim path planted as a symlink (the trash directory
     is the one place gallery media lands) from turning the reservation into an
     ``flock`` on somebody else's inode; the open then fails and the restore
-    fails closed (see ``RestoreDestinationUnavailable``).
+    moves on to another candidate name.
+
+    The claim is opened for reading and writing when possible, and read-only
+    when the file belongs to another user. ``flock`` needs no write access on
+    a local file system, so a read-only descriptor still locks the claim; that
+    way a claim another user created cannot block a destination forever. The
+    read-only fallback is a fallback: on a file system that emulates ``flock``
+    with ``fcntl`` byte-range locks (NFS), an exclusive lock needs a writable
+    descriptor, so the writable open stays the primary one.
     """
     if fcntl is None:
-        return None, RESTORE_CLAIM_UNAVAILABLE
+        return None, RESTORE_CLAIM_UNSUPPORTED, "the system has no file locking"
     flags = os.O_RDWR | os.O_NOFOLLOW | (os.O_CREAT if create else 0)
     try:
         # No truncation: the claim is inert bookkeeping and rewriting it would
         # reset the abandon age maintenance relies on.
-        claim_fd = os.open(claim_path, flags, 0o600)  # noqa: SIM115
-    except OSError:
-        return None, RESTORE_CLAIM_UNAVAILABLE
+        claim_fd = os.open(claim_path, flags, 0o644)  # noqa: SIM115
+    except PermissionError:
+        try:
+            claim_fd = os.open(claim_path, os.O_RDONLY | os.O_NOFOLLOW, 0o644)  # noqa: SIM115
+        except OSError as exc:
+            return None, RESTORE_CLAIM_UNUSABLE, (
+                f"the trash directory could not be used for the reservation ({exc.strerror})"
+            )
+    except OSError as exc:
+        # Only this candidate name is affected: the next candidate has its own
+        # claim file, so the restore can still reserve one.
+        return None, RESTORE_CLAIM_UNUSABLE, (
+            f"the trash directory could not be used for the reservation ({exc.strerror})"
+        )
     try:
         fcntl.flock(claim_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
         os.close(claim_fd)
         if exc.errno in (errno.EAGAIN, errno.EACCES):
-            return None, RESTORE_CLAIM_HELD
-        return None, RESTORE_CLAIM_UNAVAILABLE
-    return claim_fd, RESTORE_CLAIM_ACQUIRED
+            return None, RESTORE_CLAIM_HELD, "another restore holds this destination"
+        return None, RESTORE_CLAIM_UNSUPPORTED, (
+            f"the file system does not support file locking ({exc.strerror})"
+        )
+    return claim_fd, RESTORE_CLAIM_ACQUIRED, ""
+
 
 
 def _release_restore_claim(claim_fd) -> None:
@@ -634,19 +673,26 @@ def _reserve_restore_dest(
     entries. The per-item source flock does not help here: it serializes
     restores of one trash item, not two items pointing at one destination.
 
-    When no lock verdict is possible (``fcntl`` is None, the trash directory
-    cannot hold the claim, or the filesystem refuses ``flock``) the restore
-    fails closed with ``RestoreDestinationUnavailable``. Renaming without the
-    claim would reintroduce the very check-then-rename race the claim closes:
-    two restores could pass the same existence probe and the later ``rename``
-    would overwrite the earlier payload. Failing keeps both payloads — in the
-    trash — instead of losing one of them.
+    When no lock verdict is possible at all (the platform has no ``flock``, or
+    the file system refuses it) the restore fails closed with
+    ``RestoreDestinationUnavailable``. Renaming without the claim would
+    reintroduce the very check-then-rename race the claim closes: two restores
+    could pass the same existence probe and the later ``rename`` would
+    overwrite the earlier payload. Failing keeps both payloads — in the trash
+    — instead of losing one of them.
+
+    A candidate whose claim file cannot be *used* (a file planted at that
+    exact claim path) only rules out that one name: the next candidate has its
+    own claim file, so the walk continues. The walk is bounded, and a file
+    system that refuses every claim ends the restore with a failure rather
+    than an endless loop.
     """
     name = dest.name
     ts = int(time.time())
-    while True:
+    blocked_reason = ""
+    for _ in range(RESTORE_CLAIM_MAX_CANDIDATES):
         candidate = dest.with_name(name)
-        claim_fd, state = _acquire_restore_claim(_restore_claim_path(td, canonical_parent / name))
+        claim_fd, state, reason = _acquire_restore_claim(_restore_claim_path(td, canonical_parent / name))
         if state == RESTORE_CLAIM_ACQUIRED:
             if not _restore_dest_is_occupied(candidate, payload_is_dir):
                 return candidate, claim_fd
@@ -655,22 +701,33 @@ def _reserve_restore_dest(
             # there (a directory payload cannot replace one). Hand the claim
             # back and try the next name.
             _release_restore_claim(claim_fd)
-        elif state == RESTORE_CLAIM_UNAVAILABLE:
-            # Fail closed: without the claim's exclusive lock this restore
-            # cannot tell an owned destination from a free one, so renaming
-            # now could discard another restore's payload (issue #608). The
-            # item stays in the trash for a retry.
+        elif state == RESTORE_CLAIM_UNSUPPORTED:
+            # No usable file locking at all, so no candidate can be reserved.
+            # Failing closed keeps a payload from overwriting another one.
             logger.warning(
-                "Cannot restore to %s: the destination reservation is unavailable",
-                candidate,
+                "Cannot reserve the restore destination %s: %s", candidate, reason
             )
             raise RestoreDestinationUnavailable(
-                f"Cannot restore {dest.name!r}: the destination could not be reserved. "
-                "The trash directory must be writable and support file locking. "
-                "The item stays in the trash; try again later."
+                f"Cannot restore {dest.name!r}: the destination could not be reserved "
+                f"because {reason}. The item stays in the trash. Try again later."
             )
+        else:
+            # Another restore holds this name, or a file was planted at this
+            # candidate's claim path. Either way this name is unusable and the
+            # next one has its own claim file.
+            blocked_reason = reason
         name = f"{dest.stem}_{ts}{dest.suffix}"
         ts += 1
+    logger.warning(
+        "Cannot reserve the restore destination %s: no candidate name was free (%s)",
+        dest,
+        blocked_reason or "every candidate name was taken",
+    )
+    raise RestoreDestinationUnavailable(
+        f"Cannot restore {dest.name!r}: no free destination name was found"
+        f"{f' because {blocked_reason}' if blocked_reason else ''}. "
+        "The item stays in the trash. Try again later."
+    )
 
 
 def restore_from_trash(item_name: str, data_folder: Path) -> bool:
@@ -1348,8 +1405,8 @@ def _reclaim_restore_claims(td: Path) -> None:
     A claim is retired only when this sweep can hold its ``flock`` itself
     (nobody else reserves it) *and* it is older than
     ``STAGE_ABANDON_GRACE_SECONDS``; anything held, or whose lock state cannot
-    be verified (``RESTORE_CLAIM_UNAVAILABLE``), is kept, so a lock-deprived or
-    contested filesystem never loses a reservation.
+    be verified, is kept, so a lock-deprived or contested filesystem never
+    loses a reservation.
 
     Retiring takes the lock *before* the ``unlink`` and drops it only
     afterwards, which is what closes the gap a probe-then-unlink would leave:
@@ -1372,7 +1429,7 @@ def _reclaim_restore_claims(td: Path) -> None:
     for entry in entries:
         if not _is_restore_claim_name(entry.name):
             continue
-        claim_fd, state = _acquire_restore_claim(entry, create=False)
+        claim_fd, state, _reason = _acquire_restore_claim(entry, create=False)
         if state != RESTORE_CLAIM_ACQUIRED:
             continue
         try:

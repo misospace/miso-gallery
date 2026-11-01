@@ -1857,6 +1857,33 @@ class TestConcurrentRestoreDestinationAllocation:
         assert dest.read_bytes() == b"occupied"
         assert [t["name"] for t in list_trash(data)] == ["a.bin"]
 
+    def test_failed_restore_releases_the_source_lock(self, monkeypatch, tmp_path):
+        """A failed restore must not leave the trash item locked.
+
+        The source lock lives on the item's metadata file. If a failed restore
+        kept it, the next restore of the same item would fail with
+        ``SOURCE_LOCK_HELD`` even though nothing else holds the item, and the
+        item would sit in the trash forever.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+
+        def no_locking(*args, **kwargs):
+            return None, trash.RESTORE_CLAIM_UNSUPPORTED, "the reservation is unavailable"
+
+        monkeypatch.setattr(trash, "_acquire_restore_claim", no_locking)
+        with pytest.raises(trash.RestoreDestinationUnavailable):
+            restore_from_trash(item.name, data)
+        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
+
+        # The source lock is gone: the same item restores once the
+        # reservation works again, and it keeps its bytes.
+        monkeypatch.undo()
+        assert restore_from_trash(item.name, data) is True
+        assert (data / "albums/photo.txt").read_bytes() == b"payload"
+
     def test_symlinked_claim_fails_the_restore_closed(self, monkeypatch, tmp_path):
         """A claim path planted as a symlink is never opened through."""
         import fcntl
@@ -1889,17 +1916,19 @@ class TestConcurrentRestoreDestinationAllocation:
 
         monkeypatch.setattr(trash.Path, "rename", check_victim)
 
-        # ELOOP on the claim makes the lock verdict unavailable, so the
-        # restore fails closed instead of renaming onto a destination it could
-        # not reserve. The planted link is never opened through, so the
-        # reservation never becomes an flock on whatever it points at.
-        with pytest.raises(trash.RestoreDestinationUnavailable):
-            restore_from_trash(item.name, data)
-        assert victim_lockable == []
-        assert not (data / "albums/photo.txt").exists()
+        # O_NOFOLLOW refuses to open the planted link, so the reservation for
+        # this candidate name is unusable and the restore walks on to the
+        # next candidate name. The planted link is never opened through, so
+        # the reservation never becomes an flock on whatever it points at:
+        # the victim is still free to lock at rename time.
+        assert restore_from_trash(item.name, data) is True
+        assert victim_lockable == [True]
         assert victim.read_text() == "victim"
         assert claim.is_symlink()
-        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
+        # The payload landed on a suffixed name, not on the reserved one.
+        restored = [p for p in (data / "albums").iterdir() if p.name != "photo.txt"]
+        assert [p.read_bytes() for p in restored] == [b"payload"]
+        assert [t["name"] for t in list_trash(data)] == []
 
     def test_failed_restore_releases_the_reservation(self, monkeypatch, tmp_path):
         """A failed restore must not pin the destination name it wanted."""
@@ -3173,3 +3202,50 @@ class TestTrashPurgeValidation:
         assert not expired.exists(), "the sweep must continue past the failed entry"
         assert victim.exists()
         assert victim.with_name(victim.name + trash.META_SUFFIX).exists()
+
+    def test_trash_restore_route_reports_an_unreservable_destination(self, monkeypatch, tmp_path):
+        """A restore that cannot reserve its destination reports the reason.
+
+        The route must not report the failure as a rejected request: the
+        destination could not be reserved because the file system refused the
+        lock, so the item stays in the trash and the user is told why.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        td = trash.trash_dir(data_dir)
+        item = td / "a.bin"
+        item.write_bytes(b"payload")
+        item.with_name(item.name + trash.META_SUFFIX).write_text(
+            json.dumps({"original": "photo.txt", "deleted_at": "2026-01-01T00:00:00+00:00"})
+        )
+
+        def no_locking(*args, **kwargs):
+            return None, trash.RESTORE_CLAIM_UNSUPPORTED, "the reservation is unavailable"
+
+        monkeypatch.setattr(trash, "_acquire_restore_claim", no_locking)
+
+        login_resp = client.get("/login")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', login_resp.data.decode())
+        assert csrf_match, "CSRF token not found in login form"
+        login_csrf = csrf_match.group(1)
+        auth_resp = client.post(
+            "/auth",
+            data={"password": "pass123", "next": "/", "csrf_token": login_csrf},
+            follow_redirects=False,
+        )
+        assert auth_resp.status_code == 302
+
+        trash_resp = client.get("/trash")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', trash_resp.data.decode())
+        assert csrf_match, "CSRF token not found on trash page"
+        csrf_token = csrf_match.group(1)
+
+        response = client.post(
+            "/trash/restore/a.bin",
+            data={"csrf_token": csrf_token},
+            follow_redirects=True,
+        )
+
+        assert response.status_code == 200
+        assert b"the destination could not be reserved" in response.data
+        # The item is still in the trash and its payload is untouched.
+        assert [t["name"] for t in list_trash(data_dir)] == ["a.bin"]
