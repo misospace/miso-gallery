@@ -1187,6 +1187,56 @@ class TestConcurrentRestoreDestinationAllocation:
         assert link.read_bytes() == b"payload"
         assert not victim.exists(), "the restore must not write through the planted link"
 
+    def test_restore_replaces_a_symlink_pointing_at_an_existing_file(self, tmp_path):
+        """A symlink to a live file is replaced too, and its target survives.
+
+        ``Path.exists()`` follows a symlink, so probing the destination with
+        it made a link to an existing file look occupied: the restore took a
+        timestamped name and left the link in place. The rename targets the
+        unresolved path, so the link itself is replaced — the file it pointed
+        at keeps its own bytes and is never written through.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        albums = data / "albums"
+        albums.mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        victim = albums / "victim.txt"
+        victim.write_bytes(b"victim")
+        link = albums / "photo.txt"
+        link.symlink_to(victim)
+
+        assert restore_from_trash(item.name, data) is True
+        assert not link.is_symlink()
+        assert link.read_bytes() == b"payload"
+        assert victim.read_bytes() == b"victim", "the restore must not write through the link"
+        assert list_trash(data) == []
+
+    def test_directory_restore_does_not_replace_a_symlink_at_the_destination(self, tmp_path):
+        """A directory payload cannot take a symlink's name, so it suffixes.
+
+        ``rename(2)`` refuses a directory onto a symlink (``ENOTDIR``), so the
+        restore must not pick that name: the planted link stays and the tree
+        lands on a timestamped name instead.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        albums = data / "albums"
+        albums.mkdir(parents=True)
+        item = self._dir_item(td, "dir_a", "albums/folder", "a.txt", b"A")
+        victim = albums / "victim.txt"
+        victim.write_bytes(b"victim")
+        link = albums / "folder"
+        link.symlink_to(victim)
+
+        assert restore_from_trash(item.name, data) is True
+        assert link.is_symlink(), "a directory payload must not take a symlink's name"
+        assert victim.read_bytes() == b"victim"
+        restored = list(albums.glob("folder_*"))
+        assert len(restored) == 1
+        assert (restored[0] / "a.txt").read_bytes() == b"A"
+        assert list_trash(data) == []
+
     def test_concurrent_restores_via_a_symlinked_album_dir_retain_both_payloads(
         self, monkeypatch, tmp_path
     ):
@@ -2156,6 +2206,34 @@ class TestRestorePathTraversal:
 
         # Nothing was read, created, or deleted in the trash directory.
         assert list(td.iterdir()) == []
+
+    def test_restore_rejects_null_byte_in_meta_original(self, monkeypatch, tmp_path):
+        """A null byte in the stored original path is refused, not crashed on.
+
+        The stored path never reaches the filesystem: the guard raises the
+        canonical ``ValueError`` the restore route turns into a flash
+        message, and the trash entry stays intact for a retry.
+        """
+        from trash import restore_from_trash, trash_dir
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        td = trash_dir(data_dir)
+        td.mkdir(parents=True, exist_ok=True)
+
+        fake_item = td / "fake_item.txt"
+        fake_item.write_text("harmless")
+        meta_file = td / "fake_item.txt.meta.json"
+        meta_file.write_text(
+            json.dumps({"original": "albums/bad\x00name.txt", "deleted_at": 0})
+        )
+
+        with pytest.raises(ValueError):
+            restore_from_trash("fake_item.txt", data_dir)
+
+        # The entry stays in the trash: nothing was consumed.
+        assert fake_item.exists()
+        assert meta_file.exists()
 
     def test_restore_rejects_malicious_meta_original(self, monkeypatch, tmp_path):
         """Even if item_name is valid, a crafted .meta.json 'original' must not escape."""

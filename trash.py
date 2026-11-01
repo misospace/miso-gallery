@@ -345,10 +345,32 @@ def _release_restore_claim(claim_fd) -> None:
             os.close(claim_fd)
 
 
+def _restore_dest_is_occupied(candidate: Path, payload_is_dir: bool) -> bool:
+    """True when a restore must not rename its payload onto *candidate*.
+
+    The rename targets the *unresolved* destination path, so a symlink
+    sitting there is swapped out by the rename itself and never written
+    through to its target: the link's own target is left untouched, and the
+    payload takes the link's place. A file payload may therefore take a name
+    a symlink holds.
+
+    A directory payload may not: ``rename(2)`` refuses a directory onto a
+    symlink (``ENOTDIR``), whatever the symlink points at. For a directory
+    payload a symlink therefore counts as occupied and the restore moves on
+    to the next candidate name, which keeps the restore working instead of
+    failing on a rename the kernel would reject.
+    """
+    if candidate.is_symlink():
+        return payload_is_dir
+    return candidate.exists()
+
+
 def _reserve_restore_dest(
     td: Path,
     dest: Path,
     canonical_parent: Path,
+    *,
+    payload_is_dir: bool,
 ) -> tuple[Path, int | None]:
     """Pick a restore destination for *dest* and reserve it before it is used.
 
@@ -365,9 +387,13 @@ def _reserve_restore_dest(
     caller's ``rename`` must keep replacing a symlink at the destination rather
     writing through it to whatever it points at.
 
+    *payload_is_dir* tells the occupancy probe what the rename will carry: a
+    file payload may replace a symlink at the destination, a directory payload
+    cannot (see ``_restore_dest_is_occupied``).
+
     Candidates are the original name first, then ``{stem}_{ts}{suffix}`` with an
     incrementing timestamp. A candidate is only accepted while its claim is
-    held, and ``candidate.exists()`` is probed *inside* that claim, so a
+    held, and the occupancy probe runs *inside* that claim, so a
     concurrent restore of a different trash item that shares the same
     ``original`` path (the same gallery path deleted twice over time) either
     sees the claim held and moves to the next candidate, or acquires it later,
@@ -390,12 +416,14 @@ def _reserve_restore_dest(
         candidate = dest.with_name(name)
         claim_fd, state = _acquire_restore_claim(_restore_claim_path(td, canonical_parent / name))
         if state == RESTORE_CLAIM_ACQUIRED:
-            if not candidate.exists():
+            if not _restore_dest_is_occupied(candidate, payload_is_dir):
                 return candidate, claim_fd
             # A finished restore released this claim and left its payload at
             # the candidate; hand the claim back and try the next name.
             _release_restore_claim(claim_fd)
-        elif state == RESTORE_CLAIM_UNAVAILABLE and not candidate.exists():
+        elif state == RESTORE_CLAIM_UNAVAILABLE and not _restore_dest_is_occupied(
+            candidate, payload_is_dir
+        ):
             # Lockless fallback: the historical probe-only choice.
             return candidate, None
         name = f"{dest.stem}_{ts}{dest.suffix}"
@@ -497,6 +525,12 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         except OSError:
             return False
         if not (str(resolved_dest).startswith(str(resolved_data) + "/") or resolved_dest == resolved_data):
+            # A symlink at the destination resolves to its target here, so a
+            # link pointing out of the data folder refuses the whole restore.
+            # The rename itself would replace the link instead of writing
+            # through it, so this is stricter than the rename needs; it is
+            # kept deliberately: the destination path must stay inside the
+            # data folder either way.
             raise ValueError(f"Destination path escapes data folder: {rel!r}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Reserve the destination before anything is renamed onto it, so a
@@ -505,7 +539,9 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         # claim is keyed on the resolved parent (it exists by now); *dest*
         # stays unresolved so the rename below replaces a planted symlink at
         # the destination instead of writing through it.
-        dest, claim_fd = _reserve_restore_dest(td, dest, dest.parent.resolve())
+        dest, claim_fd = _reserve_restore_dest(
+            td, dest, dest.parent.resolve(), payload_is_dir=item.is_dir()
+        )
         if item.is_dir():
             try:
                 # Move consumes the trash source so a successful restore
