@@ -1075,6 +1075,186 @@ class TestRestoreConsumesTrashedDirectory:
         stages = [p for p in data_dir.rglob(".restore-stage-*") if p.is_dir()]
         assert stages == [], f"stage directory leaked: {stages}"
 
+class TestConcurrentRestoreDestinationAllocation:
+    """Regression tests for issue #608: a restore must reserve its destination.
+
+    ``restore_from_trash`` used to probe ``dest.exists()`` and only then
+    ``rename`` onto it. POSIX ``rename`` overwrites, so two restores of
+    *different* trash items whose metadata share one ``original`` path (the
+    same gallery path deleted twice over time) could both pass the probe, and
+    the later ``rename`` silently discarded the earlier payload while both
+    calls reported success. The per-item source flock does not cover this: it
+    serializes restores of one trash item, not two items pointing at one
+    destination.
+
+    Destinations are now reserved with an exclusive ``flock`` on a per-path
+    claim file inside the trash directory (see ``_reserve_restore_dest``). The
+    race is reproduced deterministically in a single process by pausing the
+    first restore inside its ``rename`` and running the rival restore in that
+    window — the exact window the old check-then-rename order lost data in.
+    ``flock`` is taken per open file description, so a second claim conflicts
+    inside one process just as it would between Gunicorn workers.
+    """
+
+    def _meta(self, item, original):
+        item.with_name(item.name + trash.META_SUFFIX).write_text(
+            json.dumps({"original": original, "deleted_at": "2026-01-01T00:00:00+00:00"})
+        )
+        return item
+
+    def _file_item(self, td, name, original, payload):
+        item = td / name
+        item.write_bytes(payload)
+        return self._meta(item, original)
+
+    def _dir_item(self, td, name, original, filename, payload):
+        item = td / name
+        (item / "sub").mkdir(parents=True)
+        (item / filename).write_bytes(payload)
+        return self._meta(item, original)
+
+    def test_concurrent_file_restores_retain_both_payloads(self, monkeypatch, tmp_path):
+        """The payload-loss case: each restore must end up with its own file."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        first = self._file_item(td, "a.bin", "albums/photo.txt", b"first")
+        self._file_item(td, "b.bin", "albums/photo.txt", b"second")
+        base = data / "albums/photo.txt"
+
+        real_rename = trash.Path.rename
+        rival_results: list[bool] = []
+
+        def interleaved_rename(path, destination):
+            if path == first and not rival_results:
+                # The rival restore runs after the first restore picked
+                # ``base`` and before its rename lands: with the old
+                # probe-then-rename order both saw a free destination.
+                rival_results.append(restore_from_trash("b.bin", data))
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(trash.Path, "rename", interleaved_rename)
+
+        assert restore_from_trash("a.bin", data) is True
+        assert rival_results == [True]
+        # Both payloads survive: the winner holds the name, the rival took a
+        # timestamped one instead of overwriting through it.
+        assert base.read_bytes() == b"first"
+        rival = list((data / "albums").glob("photo_*.txt"))
+        assert [p.read_bytes() for p in rival] == [b"second"]
+        assert list_trash(data) == []
+
+    def test_concurrent_directory_restores_retain_both_trees(self, monkeypatch, tmp_path):
+        """The same race on the directory branch keeps both trees."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        first = self._dir_item(td, "dir_a", "album", "a.txt", b"A")
+        self._dir_item(td, "dir_b", "album", "b.txt", b"B")
+
+        real_rename = trash.Path.rename
+        rival_results: list[bool] = []
+
+        def interleaved_rename(path, destination):
+            if path == first and not rival_results:
+                rival_results.append(restore_from_trash("dir_b", data))
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(trash.Path, "rename", interleaved_rename)
+
+        assert restore_from_trash("dir_a", data) is True
+        assert rival_results == [True]
+        assert (data / "album" / "a.txt").read_bytes() == b"A"
+        renamed = [p for p in data.iterdir() if p.is_dir() and p.name.startswith("album_")]
+        assert len(renamed) == 1
+        assert (renamed[0] / "b.txt").read_bytes() == b"B"
+        assert list_trash(data) == []
+        stages = [p for p in data.rglob(f"{trash.STAGE_PREFIX}*")]
+        assert stages == [], f"stage directory leaked: {stages}"
+
+    def test_claim_files_are_bookkeeping_for_the_trash_sweeps(self, monkeypatch, tmp_path):
+        """Claim files are not trash items, and only free+aged ones retire."""
+        import fcntl
+        import os
+
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        dest = data / "albums/photo.txt"
+        dest.write_bytes(b"occupied")
+
+        assert restore_from_trash(item.name, data) is True
+        claims = [p for p in td.iterdir() if trash._is_restore_claim_name(p.name)]
+        assert claims, "the reservation must leave a claim file in the trash dir"
+        claim = trash._restore_claim_path(td, dest.resolve())
+        assert claim in claims
+
+        # Neither listed nor deleted, and not counted as deleted trash.
+        assert list_trash(data) == []
+        assert trash.empty_trash(data) == 0
+        assert purge_old_trash(data, retention_days=30) == 0
+        assert claim.exists()
+
+        # A live holder protects the claim even with the grace switched off:
+        # freeing it would let the next reservation create a second inode for
+        # the same destination, and two inodes means no mutual exclusion.
+        fh = os.open(claim, os.O_RDWR)
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+            trash.empty_trash(data)
+            assert claim.exists(), "maintenance must not free a claim a restore holds"
+        finally:
+            os.close(fh)
+
+        # Free and past the grace: retired with the rest of the debris.
+        trash.empty_trash(data)
+        assert not claim.exists()
+        assert list_trash(data) == []
+
+    def test_restore_without_fcntl_falls_back_to_the_existence_probe(self, monkeypatch, tmp_path):
+        """Without flock support the historical probe-only behavior is kept."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        dest = data / "albums/photo.txt"
+        dest.write_bytes(b"occupied")
+
+        monkeypatch.setattr(trash, "fcntl", None)
+
+        assert restore_from_trash(item.name, data) is True
+        assert dest.read_bytes() == b"occupied"
+        assert [p.read_bytes() for p in (data / "albums").glob("photo_*.txt")] == [b"payload"]
+        assert [p for p in td.iterdir() if trash._is_restore_claim_name(p.name)] == []
+
+    def test_claim_reclaim_survives_entries_vanishing_mid_sweep(self, monkeypatch, tmp_path):
+        """Claim upkeep never 500s a sweep over bookkeeping that disappeared.
+
+        Two workers can run the same sweep, so a claim file can be retired
+        between this sweep's listing and its probe — the same vanished-entry
+        policy ``empty_trash``/``purge_old_trash`` already apply to items.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        claim = trash._restore_claim_path(td, (data / "album").resolve())
+        claim.write_text("")
+
+        def rival_retired(path):
+            path.unlink(missing_ok=True)
+            raise OSError("claim vanished mid-sweep")
+
+        monkeypatch.setattr(trash, "_stage_lock_state", rival_retired)
+        trash._reclaim_restore_claims(td)
+        assert not claim.exists()
+
+        def vanished_trash_dir(self):
+            raise OSError("trash directory vanished")
+
+        monkeypatch.setattr(trash.Path, "iterdir", vanished_trash_dir)
+        trash._reclaim_restore_claims(td)
+
+
 class TestActiveRestoreStageProtection:
     """Regression tests for issue #557: trash maintenance must never
     reclaim a ``.restore-stage-*`` directory that an in-flight cross-device
