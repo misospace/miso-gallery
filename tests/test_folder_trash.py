@@ -1186,7 +1186,7 @@ class TestConcurrentRestoreDestinationAllocation:
         assert restore_from_trash(item.name, data) is True
         claims = [p for p in td.iterdir() if trash._is_restore_claim_name(p.name)]
         assert claims, "the reservation must leave a claim file in the trash dir"
-        claim = trash._restore_claim_path(td, dest.resolve())
+        claim = trash._restore_claim_path(td, data.resolve() / "albums/photo.txt")
         assert claim in claims
 
         # Neither listed nor deleted, and not counted as deleted trash.
@@ -1228,25 +1228,147 @@ class TestConcurrentRestoreDestinationAllocation:
         assert [p.read_bytes() for p in (data / "albums").glob("photo_*.txt")] == [b"payload"]
         assert [p for p in td.iterdir() if trash._is_restore_claim_name(p.name)] == []
 
-    def test_claim_reclaim_survives_entries_vanishing_mid_sweep(self, monkeypatch, tmp_path):
-        """Claim upkeep never 500s a sweep over bookkeeping that disappeared.
+    def test_symlinked_claim_degrades_to_the_existence_probe(self, monkeypatch, tmp_path):
+        """A claim path planted as a symlink is never opened through."""
+        import fcntl
+        import os
 
-        Two workers can run the same sweep, so a claim file can be retired
-        between this sweep's listing and its probe — the same vanished-entry
-        policy ``empty_trash``/``purge_old_trash`` already apply to items.
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        victim = data / "victim.txt"
+        victim.write_text("victim")
+        claim = trash._restore_claim_path(td, data.resolve() / "albums/photo.txt")
+        claim.symlink_to(victim)
+
+        victim_lockable: list[bool] = []
+        real_rename = trash.Path.rename
+
+        def check_victim(path, destination):
+            if path == item:
+                fd = os.open(victim, os.O_RDWR)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    victim_lockable.append(False)
+                else:
+                    victim_lockable.append(True)
+                finally:
+                    os.close(fd)
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(trash.Path, "rename", check_victim)
+
+        # ELOOP on the claim makes the lock verdict unavailable, so the restore
+        # falls back to the historical probe instead of reserving: it still
+        # succeeds, and the reservation never becomes an flock on whatever the
+        # planted link points at.
+        assert restore_from_trash(item.name, data) is True
+        assert victim_lockable == [True]
+        assert (data / "albums/photo.txt").read_bytes() == b"payload"
+        assert victim.read_text() == "victim"
+        assert claim.is_symlink()
+
+    def test_failed_restore_releases_the_reservation(self, monkeypatch, tmp_path):
+        """A failed restore must not pin the destination name it wanted."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        first = self._file_item(td, "a.bin", "albums/photo.txt", b"first")
+        self._file_item(td, "b.bin", "albums/photo.txt", b"second")
+
+        real_rename = trash.Path.rename
+
+        def failing_first_rename(path, destination):
+            if path == first:
+                raise OSError("disk full")
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(trash.Path, "rename", failing_first_rename)
+        assert restore_from_trash("a.bin", data) is False
+        monkeypatch.setattr(trash.Path, "rename", real_rename)
+
+        # The rival gets the original name, not a timestamped fallback, and the
+        # failed item stays in trash for its own retry.
+        assert restore_from_trash("b.bin", data) is True
+        assert (data / "albums/photo.txt").read_bytes() == b"second"
+        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
+
+    def test_concurrent_directory_restores_retain_both_trees_across_devices(
+        self, monkeypatch, tmp_path
+    ):
+        """The cross-device staging fallback reserves the same destination."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        first = self._dir_item(td, "dir_a", "album", "a.txt", b"A")
+        self._dir_item(td, "dir_b", "album", "b.txt", b"B")
+        trash_root = td.resolve()
+
+        real_rename = trash.Path.rename
+        rival_results: list[bool] = []
+
+        def cross_device_rename(path, destination):
+            # Every rename out of the trash fails, so both restores must use
+            # the staged copytree fallback; the rival runs while the first one
+            # holds the reservation for ``album``.
+            resolved = path.resolve()
+            if trash_root in resolved.parents or resolved == trash_root:
+                if path == first and not rival_results:
+                    rival_results.append(restore_from_trash("dir_b", data))
+                raise OSError("cross-device")
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+
+        assert restore_from_trash("dir_a", data) is True
+        assert rival_results == [True]
+        # The staged restore that reserved ``album`` first keeps the name; the
+        # rival staged its way to a timestamped one instead.
+        assert (data / "album" / "a.txt").read_bytes() == b"A"
+        renamed = [p for p in data.iterdir() if p.is_dir() and p.name.startswith("album_")]
+        assert len(renamed) == 1
+        assert (renamed[0] / "b.txt").read_bytes() == b"B"
+        stages = [p for p in data.rglob(f"{trash.STAGE_PREFIX}*")]
+        assert stages == [], f"stage directory leaked: {stages}"
+        assert list_trash(data) == []
+
+    def test_claim_reclaim_keeps_claims_it_cannot_verify(self, monkeypatch, tmp_path):
+        """No lock verdict means no delete, however old the claim looks."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        claim = trash._restore_claim_path(td, data.resolve() / "album/photo.txt")
+        claim.write_text("")
+
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+        monkeypatch.setattr(trash, "fcntl", None)
+        trash._reclaim_restore_claims(td)
+        assert claim.exists(), "an unverifiable claim must survive upkeep"
+
+    def test_claim_reclaim_never_resurrects_a_vanished_claim(self, monkeypatch, tmp_path):
+        """Upkeep tolerates bookkeeping another sweep retired first.
+
+        Two workers can run the same sweep, so a claim can be gone between this
+        sweep's listing and its reservation. The sweep must neither raise (a
+        sweep runs inside request handlers) nor recreate the file: a fresh
+        inode for a name somebody else still holds breaks the one-inode rule
+        the reservation depends on.
         """
         data = tmp_path / "data"
         td = trash.trash_dir(data)
-        claim = trash._restore_claim_path(td, (data / "album").resolve())
+        claim = trash._restore_claim_path(td, data.resolve() / "album/photo.txt")
         claim.write_text("")
 
-        def rival_retired(path):
-            path.unlink(missing_ok=True)
-            raise OSError("claim vanished mid-sweep")
+        real_acquire = trash._acquire_restore_claim
 
-        monkeypatch.setattr(trash, "_stage_lock_state", rival_retired)
+        def rival_retired(claim_path, create=True):
+            claim_path.unlink(missing_ok=True)
+            return real_acquire(claim_path, create=create)
+
+        monkeypatch.setattr(trash, "_acquire_restore_claim", rival_retired)
         trash._reclaim_restore_claims(td)
-        assert not claim.exists()
+        assert not claim.exists(), "upkeep must not recreate a claim it did not reserve"
+
+        monkeypatch.setattr(trash, "_acquire_restore_claim", real_acquire)
 
         def vanished_trash_dir(self):
             raise OSError("trash directory vanished")
