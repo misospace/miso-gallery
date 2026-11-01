@@ -35,10 +35,25 @@ STAGE_ABANDON_GRACE_SECONDS = 24 * 3600
 # an in-flight one whose mover has not renamed its payload onto the name
 # yet (``_claim_trash_dest`` creates the sidecar *before* the move). Deleting
 # a live claim's sidecar re-opens the name to a second claimer and the two
-# renames then clobber a payload (#606), so lone sidecars are only reclaimed
-# past this grace, which must exceed any plausible move duration
-# (cross-device copytree included) — mirroring the stage-abandon policy.
+# renames then clobber a payload (#606). The live claim is identified by the
+# exclusive ``flock`` it holds on that sidecar for the whole move, which
+# every sweep consults; this grace is the fallback for a crashed owner (whose
+# lock the kernel released) and for filesystems without ``flock`` support.
+# It must exceed any plausible move duration (cross-device copytree
+# included) — mirroring the stage-abandon policy.
 CLAIM_ABANDON_GRACE_SECONDS = 24 * 3600
+
+# Attempts to take the claim lock. The claim creates its sidecar and locks
+# it immediately; a sweep that opened the fresh sidecar in that instant can
+# hold the lock for the length of one sweep step, so the claim retries
+# briefly before giving up.
+CLAIM_LOCK_ATTEMPTS = 20
+CLAIM_LOCK_RETRY_SECONDS = 0.01
+
+# Outcomes of taking the claim lock.
+CLAIM_LOCK_HELD = "held"  # the claim owns the name exclusively
+CLAIM_LOCK_UNSUPPORTED = "unsupported"  # no flock on this platform/filesystem
+CLAIM_LOCK_CONTENDED = "contended"  # another worker holds the lock right now
 
 
 def _utcnow() -> datetime:
@@ -59,12 +74,50 @@ def _parse_deleted_at(raw: str) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
-def _claim_trash_dest(td: Path, name: str, ts: int) -> Path | None:
+def _lock_claim(fd: int) -> str:
+    """Take the move's exclusive ``flock`` on a freshly created sidecar.
+
+    The lock is taken on the very descriptor that created the sidecar, so
+    no other worker can ever see the sidecar unlocked for longer than the
+    single syscall between the create and the lock. A sweep that opened the
+    brand-new sidecar in that instant can hold the lock for the length of
+    one sweep step, so the claim retries briefly before giving up.
+
+    Returns one of:
+
+    - ``CLAIM_LOCK_HELD``: the claim owns the name exclusively, and every
+      sweep and restore skips the sidecar until the move completes.
+    - ``CLAIM_LOCK_UNSUPPORTED``: this platform or filesystem has no
+      usable ``flock``. The claim is then protected by the sidecar's own
+      existence (a second delete cannot claim the same name) and by the
+      age-based reclaim policy, as before the lock protocol.
+    - ``CLAIM_LOCK_CONTENDED``: another worker holds the lock on this
+      sidecar right now. The claim cannot be made exclusive, so the caller
+      must abandon it rather than proceed unprotected — proceeding would
+      re-open exactly the race the lock closes.
+    """
+    if fcntl is None:
+        return CLAIM_LOCK_UNSUPPORTED
+    for _ in range(CLAIM_LOCK_ATTEMPTS):
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return CLAIM_LOCK_HELD
+        except OSError as exc:
+            if exc.errno not in (errno.EAGAIN, errno.EACCES):
+                # This filesystem does not support flock at all.
+                return CLAIM_LOCK_UNSUPPORTED
+            time.sleep(CLAIM_LOCK_RETRY_SECONDS)
+    return CLAIM_LOCK_CONTENDED
+
+
+def _claim_trash_dest(td: Path, name: str, ts: int) -> tuple[Path, int] | None:
     """Atomically claim a non-clashing destination path under the trash dir.
 
-    Returns the destination whose metadata sidecar this call has just
-    created, or ``None`` if no sidecar could be created (e.g. the trash
-    directory became unwritable).
+    Returns ``(dest, claim_fd)`` on success and ``None`` if no sidecar
+    could be created (e.g. the trash directory became unwritable).
+    *claim_fd* is the open descriptor of the sidecar; it carries the
+    exclusive ``flock`` that marks the claim as live and must be closed
+    once the move is done (closing releases the lock).
 
     The sidecar ``<dest>.meta.json`` is created with ``O_CREAT | O_EXCL``,
     which is atomic across threads *and* processes, and it doubles as the
@@ -76,10 +129,24 @@ def _claim_trash_dest(td: Path, name: str, ts: int) -> Path | None:
     window between those probes and the caller's ``rename`` — a bare
     existence loop cannot do that, because POSIX ``rename`` overwrites and
     two deletes that both pass the loop would clobber each other (issue
-    #606). A failed move must release the claim by unlinking the sidecar;
-    a crash between claim and move leaves only a lone sidecar, which
-    ``empty_trash`` reclaims once it exceeds ``CLAIM_ABANDON_GRACE_SECONDS``
-    (never while it may still belong to an in-flight mover).
+    #606).
+
+    The sidecar also serves as the move's lock file, following the same
+    protocol ``_acquire_source_lock`` uses for restores and maintenance:
+    the caller holds an exclusive ``flock`` on it from the claim until the
+    move and its metadata write are complete. Without that lock a sweep
+    could free the claimed name while the move is still in flight — the
+    sweep would delete the claimed destination and its sidecar, a second
+    delete could then claim the freed name, and the first delete's failure
+    cleanup would remove the second delete's payload (issue #606 review).
+    Where ``flock`` is unavailable the sidecar's own existence still
+    reserves the name, and the age-based reclaim policy keeps a sweep away
+    from it; a claim that cannot be made exclusive is abandoned instead of
+    proceeding unprotected.
+    A failed move must release the claim by unlinking the sidecar; a crash
+    between claim and move leaves only a lone sidecar, which ``empty_trash``
+    reclaims once it exceeds ``CLAIM_ABANDON_GRACE_SECONDS`` (never while
+    it may still belong to an in-flight mover).
     """
     i = 0
     while True:
@@ -88,15 +155,28 @@ def _claim_trash_dest(td: Path, name: str, ts: int) -> Path | None:
             if dest.exists():
                 i += 1
                 continue
-            fd = os.open(_meta_path(dest), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            # The sidecar is created here rather than by the metadata write,
+            # so its mode is set explicitly: ``os.open`` would otherwise
+            # apply 0o777 masked by the umask, while the metadata file
+            # this replaces was created by ``write_text`` with 0o666
+            # masked by the umask.
+            fd = os.open(_meta_path(dest), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         except FileExistsError:
             i += 1
             continue
         except OSError:
             return None
-        with contextlib.suppress(OSError):
-            os.close(fd)
-        return dest
+        lock_state = _lock_claim(fd)
+        if lock_state == CLAIM_LOCK_CONTENDED:
+            # Another worker holds this sidecar right now, so the claim
+            # cannot be made exclusive. Proceeding would leave the move
+            # unprotected against that worker — the very race the lock
+            # closes — so give the name back and report the failure.
+            _close_claim(fd)
+            with contextlib.suppress(OSError):
+                _meta_path(dest).unlink(missing_ok=True)
+            return None
+        return dest, fd
 
 
 def dir_size(path: Path) -> int:
@@ -130,6 +210,62 @@ def _meta_path(item_path: Path) -> Path:
     return item_path.with_name(item_path.name + META_SUFFIX)
 
 
+def _claim_owns_name(claim_fd: int, dest: Path) -> bool:
+    """True while this call still owns the destination name.
+
+    The sidecar is the reservation token for a trash name: a second delete
+    can only claim a name by creating a sidecar of its own, so the
+    sidecar's identity proves ownership. While this call owns the name the
+    destination can only hold this call's own (possibly partial) payload
+    and may be cleaned up on failure. Once the sidecar has been replaced
+    the name belongs to another delete, and that delete's payload must not
+    be touched.
+    """
+    try:
+        claimed = os.fstat(claim_fd)
+    except OSError:
+        return False
+    try:
+        current = os.stat(_meta_path(dest))
+    except OSError:
+        return False
+    return (claimed.st_dev, claimed.st_ino) == (current.st_dev, current.st_ino)
+
+
+def _close_claim(claim_fd: int) -> None:
+    """Close the claim descriptor, releasing the lock it holds."""
+    with contextlib.suppress(OSError):
+        os.close(claim_fd)
+
+
+def _release_claim(dest: Path, claim_fd: int) -> None:
+    """Release a failed claim by dropping the sidecar that reserved the name.
+
+    The sidecar is unlinked only while this call still owns the name, so a
+    failed move can never free a name that another delete has taken over
+    in the meantime. The claim descriptor is closed by the caller's
+    ``finally`` block.
+    """
+    if _claim_owns_name(claim_fd, dest):
+        with contextlib.suppress(OSError):
+            _meta_path(dest).unlink(missing_ok=True)
+
+
+def _write_claim_meta(claim_fd: int, meta: dict) -> None:
+    """Write the item's metadata into the claimed sidecar.
+
+    The metadata goes through the claim descriptor itself, so it lands in
+    the very inode the claim reserved and never in a sidecar that another
+    delete may have taken over in the meantime.
+    """
+    payload = json.dumps(meta).encode("utf-8")
+    os.ftruncate(claim_fd, 0)
+    os.lseek(claim_fd, 0, os.SEEK_SET)
+    written = 0
+    while written < len(payload):
+        written += os.write(claim_fd, payload[written:])
+
+
 def move_to_trash(file_path: Path, data_folder: Path) -> bool:
     """Move a file or directory to the trash.
 
@@ -139,9 +275,17 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
     The destination is claimed atomically before the move (see
     ``_claim_trash_dest``), so a concurrent delete in this process or any
     other worker can never select the same path and have its payload
-    silently overwritten by the loser's ``rename`` (issue #606). A failed
-    move releases the claim so the trash dir keeps no residue for the
-    retry beyond what maintenance already reclaims.
+    silently overwritten by the loser's ``rename`` (issue #606).
+
+    The claim also holds an exclusive lock on its sidecar for the whole
+    move — the rename, the cross-device copy fallback, the source removal
+    and the metadata write. Trash maintenance consults that same lock, so
+    a sweep cannot free the claimed name while the move is in flight: the
+    sweep would otherwise delete the claimed destination and its sidecar, a
+    second delete could then claim the freed name, and this call's failure
+    cleanup would remove the second delete's payload (issue #606 review).
+    A failed move releases the claim so the trash dir keeps no residue for
+    the retry beyond what maintenance already reclaims.
     """
     if not file_path.exists():
         return False
@@ -151,48 +295,61 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
     ts = int(time.time())
 
     if file_path.is_file():
-        dest = _claim_trash_dest(td, file_path.name, ts)
-        if dest is None:
+        claim = _claim_trash_dest(td, file_path.name, ts)
+        if claim is None:
             return False
+        dest, claim_fd = claim
         try:
-            file_path.rename(dest)
-        except OSError:
-            with contextlib.suppress(OSError):
-                _meta_path(dest).unlink(missing_ok=True)
-            return False
-    elif file_path.is_dir():
-        dest = _claim_trash_dest(td, file_path.name, ts)
-        if dest is None:
-            return False
-        try:
-            # Prefer atomic rename (same filesystem) for immediate move.
-            # Fall back to copytree+rmtree only when cross-device rename fails.
             try:
                 file_path.rename(dest)
             except OSError:
-                # symlinks=True keeps links as links (matching rename) so the
-                # copy cannot inline symlink-target contents into the trash tree.
-                shutil.copytree(file_path, dest, symlinks=True)
-                shutil.rmtree(file_path)
-        except OSError:
-            # Clean up partial copy on failure and release the claim. The
-            # destination can only hold our own (partial) copy: no other
-            # delete can rename onto a name whose sidecar we created.
-            if dest.exists():
-                shutil.rmtree(dest, ignore_errors=True)
-            with contextlib.suppress(OSError):
-                _meta_path(dest).unlink(missing_ok=True)
+                _release_claim(dest, claim_fd)
+                return False
+            return _finish_trash_move(dest, claim_fd, rel)
+        finally:
+            _close_claim(claim_fd)
+    elif file_path.is_dir():
+        claim = _claim_trash_dest(td, file_path.name, ts)
+        if claim is None:
             return False
+        dest, claim_fd = claim
+        try:
+            try:
+                # Prefer atomic rename (same filesystem) for immediate move.
+                # Fall back to copytree+rmtree only when cross-device rename fails.
+                try:
+                    file_path.rename(dest)
+                except OSError:
+                    # symlinks=True keeps links as links (matching rename) so the
+                    # copy cannot inline symlink-target contents into the trash tree.
+                    shutil.copytree(file_path, dest, symlinks=True)
+                    shutil.rmtree(file_path)
+            except OSError:
+                # Clean up the partial copy on failure and release the claim.
+                # The destination can only hold our own (partial) copy while
+                # this call still owns the name: the sidecar reserves it, and
+                # the claim's lock keeps every other delete and every sweep
+                # away from it for the whole move.
+                if _claim_owns_name(claim_fd, dest) and dest.exists():
+                    shutil.rmtree(dest, ignore_errors=True)
+                _release_claim(dest, claim_fd)
+                return False
+            return _finish_trash_move(dest, claim_fd, rel)
+        finally:
+            _close_claim(claim_fd)
     else:
         return False
 
+
+def _finish_trash_move(dest: Path, claim_fd: int, rel: str) -> bool:
+    """Record the metadata of a moved item in its claimed sidecar."""
     try:
         meta = {
             "original": rel,
             "deleted_at": _utcnow().isoformat(),
             "size": dir_size(dest) if dest.is_dir() else dest.stat().st_size,
         }
-        _meta_path(dest).write_text(json.dumps(meta))
+        _write_claim_meta(claim_fd, meta)
         return True
     except OSError:
         return False
@@ -521,23 +678,40 @@ def empty_trash(data_folder: Path) -> int:
                 if item.with_name(item.name[:-len(META_SUFFIX)]).exists():
                     continue
                 if item.exists():
-                    if not _exceeds_abandon_grace(item, CLAIM_ABANDON_GRACE_SECONDS):
-                        # A lone sidecar fresher than the claim grace is
-                        # indistinguishable from an in-flight delete whose
-                        # mover created the sidecar moments ago but has not
-                        # renamed its payload yet; unlinking it would re-open
-                        # the name to a second claimer and let the two
-                        # renames clobber (#606). Leave it for a later sweep.
+                    # A lone sidecar is either a crashed claim or an
+                    # in-flight one whose mover has not renamed its payload
+                    # onto the name yet. The mover holds an exclusive flock
+                    # on the sidecar for the whole move, so a held lock
+                    # identifies the in-flight case exactly; a free lock
+                    # means the owner is gone and the sidecar is reclaimed
+                    # once it also exceeds the claim grace.
+                    lock_fh, lock_state = _acquire_source_lock(item)
+                    if lock_state == SOURCE_LOCK_HELD:
                         continue
                     try:
-                        item.unlink(missing_ok=True)
-                    except OSError as exc:
-                        # Same skip-and-debug policy as the delete block
-                        # below (#597): the entry stays retryable by later
-                        # sweeps, and only a successful unlink counts.
-                        logger.debug("empty_trash: skipping stale meta %s: %s", item, exc)
-                    else:
-                        deleted += 1
+                        if not _exceeds_abandon_grace(item, CLAIM_ABANDON_GRACE_SECONDS):
+                            # A lone sidecar fresher than the claim grace is
+                            # indistinguishable from an in-flight delete whose
+                            # mover created the sidecar moments ago but has not
+                            # renamed its payload yet; unlinking it would re-open
+                            # the name to a second claimer and let the two
+                            # renames clobber (#606). Leave it for a later sweep.
+                            continue
+                        try:
+                            item.unlink(missing_ok=True)
+                        except OSError as exc:
+                            # Same skip-and-debug policy as the delete block
+                            # below (#597): the entry stays retryable by later
+                            # sweeps, and only a successful unlink counts.
+                            logger.debug("empty_trash: skipping stale meta %s: %s", item, exc)
+                        else:
+                            deleted += 1
+                    finally:
+                        # Release by closing only; the meta file itself must
+                        # never be unlinked from here.
+                        if lock_fh is not None:
+                            with contextlib.suppress(OSError):
+                                lock_fh.close()
                 continue
             lock_fh, lock_state = _acquire_source_lock(_meta_path(item))
             if lock_state == SOURCE_LOCK_HELD:

@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import json
+import os
 import re
 import threading
 import time
@@ -98,9 +99,9 @@ def _concurrent_delete_with_claim_barrier(monkeypatch, paths, data):
     barrier = threading.Barrier(len(paths), timeout=10)
 
     def claim_then_sync(td, name, ts):
-        dest = real_claim(td, name, ts)
+        claim = real_claim(td, name, ts)
         barrier.wait()
-        return dest
+        return claim
 
     monkeypatch.setattr(trash, "_claim_trash_dest", claim_then_sync)
     monkeypatch.setattr(trash.time, "time", lambda: 1234)
@@ -191,23 +192,263 @@ def test_trash_claim_skips_inflight_claim_and_metaless_item(tmp_path, monkeypatc
     assert not (td / "1234_photo.png").exists()
 
 
-def test_empty_trash_keeps_live_claim_sidecar(tmp_path):
+def test_empty_trash_keeps_live_claim_sidecar(tmp_path, monkeypatch):
     """A claimed sidecar whose mover has not renamed its payload onto the
     name yet must survive an ``empty_trash`` sweep: reclaiming it would
     re-open the name to a second claimer and let the two renames clobber a
-    payload (#606). The stale-meta reclaim only collects lone sidecars once
-    they exceed the claim grace."""
+    payload (#606).
+
+    The mover holds an exclusive lock on its sidecar for the whole move, so
+    the sweep skips it even once it is older than the claim grace: the
+    lock, not the age, is what identifies a live claim. An unlocked
+    sidecar (a crashed owner, whose lock the kernel released) is still
+    collected only after the grace."""
     data = tmp_path / "data"
     data.mkdir()
     td = trash.trash_dir(data)
-    dest = trash._claim_trash_dest(td, "photo.png", 1234)
+    dest, claim_fd = trash._claim_trash_dest(td, "photo.png", 1234)
     assert dest == td / "1234_photo.png"
 
-    assert trash.empty_trash(data) == 0
-    assert trash._meta_path(dest).exists()
-    # The name stays pinned while the claim is fresh, so the next claimant
+    # The name stays pinned while the claim is live, so the next claimant
     # is forced to a different destination.
-    assert trash._claim_trash_dest(td, "photo.png", 1234) == td / "1234_1_photo.png"
+    next_dest, next_fd = trash._claim_trash_dest(td, "photo.png", 1234)
+    assert next_dest == td / "1234_1_photo.png"
+    os.close(next_fd)
+
+    # Age the sidecars past the claim grace: only the live lock keeps the
+    # claimed one, while the released one becomes reclaimable.
+    now = time.time()
+    monkeypatch.setattr(trash.time, "time", lambda: now + 25 * 86400)
+
+    assert trash.empty_trash(data) == 1
+    assert trash._meta_path(dest).exists(), "the sweep reclaimed a live claim"
+    assert not trash._meta_path(next_dest).exists()
+
+    # Once the owner is gone the lock is released, and the aged sidecar
+    # becomes reclaimable too.
+    os.close(claim_fd)
+    assert trash.empty_trash(data) == 1
+    assert not trash._meta_path(dest).exists()
+
+
+def test_empty_trash_reclaims_unlocked_stale_sidecar_after_grace(tmp_path, monkeypatch):
+    """A sidecar whose owner is gone (no lock held) is reclaimed once it
+    exceeds the claim grace.
+
+    The lock is the primary signal that a claim is live; the age is the
+    fallback that collects the sidecar of a crashed owner, whose lock the
+    kernel already released."""
+    data = tmp_path / "data"
+    data.mkdir()
+    td = trash.trash_dir(data)
+    stale = td / "ghost.txt.meta.json"
+    stale.write_text(json.dumps({"original": "ghost.txt"}))
+
+    now = time.time()
+    monkeypatch.setattr(trash.time, "time", lambda: now + 25 * 86400)
+
+    assert trash.empty_trash(data) == 1
+    assert not stale.exists()
+
+
+def test_concurrent_deletes_across_processes_keep_both_payloads(tmp_path):
+    """Two OS processes deleting same-basename files must both keep their
+    payload (issue #606).
+
+    The claim is an ``O_CREAT | O_EXCL`` create of the destination's
+    metadata sidecar, which the kernel makes atomic across processes, so
+    the two workers cannot pick the same destination name and the loser's
+    ``rename`` cannot overwrite the winner's payload.
+    """
+    data = tmp_path / "data"
+    (data / "a").mkdir(parents=True)
+    (data / "b").mkdir()
+    (data / "a/photo.png").write_text("first")
+    (data / "b/photo.png").write_text("second")
+
+    read_fd, write_fd = os.pipe()
+    pids = []
+    for src in (data / "a/photo.png", data / "b/photo.png"):
+        pid = os.fork()
+        if pid == 0:
+            os.close(read_fd)
+            # Pin the clock in the child so both workers target the same
+            # candidate name, then delete concurrently.
+            trash.time.time = lambda: 1234
+            ok = trash.move_to_trash(src, data)
+            os.write(write_fd, b"1" if ok else b"0")
+            os._exit(0)
+        pids.append(pid)
+    os.close(write_fd)
+
+    results = b""
+    while len(results) < 2:
+        chunk = os.read(read_fd, 2 - len(results))
+        if not chunk:
+            break
+        results += chunk
+    os.close(read_fd)
+    for pid in pids:
+        os.waitpid(pid, 0)
+
+    assert results == b"11", "both processes must report a successful delete"
+
+    td = trash.trash_dir(data)
+    items = [p for p in td.iterdir() if not p.name.endswith(trash.META_SUFFIX)]
+    assert len(items) == 2, "one payload was overwritten"
+    payload_original = set()
+    for item in items:
+        meta = json.loads(trash._meta_path(item).read_text())
+        payload_original.add((item.read_text(), meta["original"]))
+    assert payload_original == {("first", "a/photo.png"), ("second", "b/photo.png")}
+
+
+def test_move_to_trash_rejects_paths_with_null_bytes(tmp_path):
+    """A source path with an embedded null byte is rejected, not crashed on.
+
+    The trash names come from the source basename, so a name carrying a
+    null byte would otherwise reach the filesystem calls and raise
+    ``ValueError`` deep inside ``os.stat``."""
+    data = tmp_path / "data"
+    data.mkdir()
+    src = data / "bad\x00name"
+    assert src.exists() is False
+    assert move_to_trash(src, data) is False
+    assert list(trash.trash_dir(data).iterdir()) == []
+
+
+def test_move_to_trash_keeps_symlinks_as_links(tmp_path):
+    """A trashed symlink stays a symlink; its target is left alone.
+
+    The rename moves the link itself, and the sidecar records the link's
+    own path, so restoring can refuse it (as it does for any symlinked
+    trash item) instead of leaking the target's contents."""
+    data = tmp_path / "data"
+    data.mkdir()
+    outside = tmp_path / "outside.txt"
+    outside.write_text("SECRET")
+    link = data / "link.png"
+    link.symlink_to(outside)
+
+    assert move_to_trash(link, data) is True
+
+    td = trash.trash_dir(data)
+    trashed = [p for p in td.iterdir() if not p.name.endswith(trash.META_SUFFIX)]
+    assert len(trashed) == 1
+    assert trashed[0].is_symlink(), "the trashed entry must stay a link"
+    assert trashed[0].resolve() == outside.resolve()
+    # The link still points at the same target, which was never moved.
+    assert outside.read_text() == "SECRET"
+    assert json.loads(trash._meta_path(trashed[0]).read_text())["original"] == "link.png"
+
+
+def test_sweep_during_folder_move_cannot_free_the_claimed_name(tmp_path, monkeypatch):
+    """A sweep that lands mid-move must not free the claimed name (#606 review).
+
+    The folder path copies the tree into the claimed destination before the
+    source is removed, so a concurrent ``empty_trash`` used to delete the
+    half-copied destination and its sidecar. The name was then free for a
+    second delete to claim, and the first mover's metadata write and cleanup
+    ran against the second mover's payload.
+
+    The mover now holds an exclusive lock on its claim sidecar for the whole
+    move, so the sweep skips both the destination and the sidecar, and the
+    second delete is forced onto a different name."""
+    data = tmp_path / "data"
+    (data / "a").mkdir(parents=True)
+    (data / "b").mkdir()
+    (data / "a/album").mkdir()
+    (data / "a/album/first.txt").write_text("first")
+    (data / "b/album").mkdir()
+    (data / "b/album/second.txt").write_text("second")
+
+    real_rename = trash.Path.rename
+
+    def cross_device_rename(path, destination):
+        if path == data / "a/album":
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_rename(path, destination)
+
+    monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+
+    real_copytree = trash.shutil.copytree
+    events = []
+
+    def copytree_with_sweep(src, dest, *args, **kwargs):
+        result = real_copytree(src, dest, *args, **kwargs)
+        # shutil.copytree recurses through this same attribute; only the
+        # top-level call from move_to_trash passes Path objects.
+        if isinstance(dest, Path):
+            # The payload is in place and the mover still holds its claim:
+            # a sweep must not delete either.
+            events.append(("sweep", trash.empty_trash(data)))
+            # And a second delete of a same-named folder must not be able to
+            # take the claimed name.
+            events.append(("second", trash.move_to_trash(data / "b/album", data)))
+        return result
+
+    monkeypatch.setattr(trash.shutil, "copytree", copytree_with_sweep)
+
+    assert move_to_trash(data / "a/album", data) is True
+
+    assert events[0] == ("sweep", 0), "the sweep deleted the in-flight claim"
+    assert events[1][0] == "second"
+    assert events[1][1] is True
+
+    td = trash.trash_dir(data)
+    items = [p for p in td.iterdir() if not p.name.endswith(trash.META_SUFFIX)]
+    assert len(items) == 2, "the in-flight payload was lost"
+    payload_original = set()
+    for item in items:
+        meta = json.loads(trash._meta_path(item).read_text())
+        payload_original.add(((item / "first.txt").read_text()
+                              if (item / "first.txt").exists()
+                              else (item / "second.txt").read_text(), meta["original"]))
+    assert payload_original == {("first", "a/album"), ("second", "b/album")}
+
+
+def test_failed_move_does_not_remove_a_payload_the_move_no_longer_owns(tmp_path, monkeypatch):
+    """A failed move may only clean up while it still owns the name.
+
+    The sidecar is the reservation token, so a replaced sidecar means
+    another delete took the name over. The failing mover must then leave
+    that payload — and the new owner's sidecar — alone."""
+    data = tmp_path / "data"
+    data.mkdir()
+    td = trash.trash_dir(data)
+    source = data / "album"
+    source.mkdir()
+    (source / "marker.txt").write_text("mine")
+    monkeypatch.setattr(trash.time, "time", lambda: 1234)
+
+    real_rename = trash.Path.rename
+
+    def cross_device_rename(path, destination):
+        if path == source:
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_rename(path, destination)
+
+    monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+
+    def copytree_that_loses_the_name(src, dest, *args, **kwargs):
+        # Simulate the claim being taken over: the sidecar is replaced by
+        # another delete's sidecar, and that delete's payload occupies the
+        # destination.
+        dest.mkdir(parents=True, exist_ok=True)
+        (dest / "theirs.txt").write_text("theirs")
+        trash._meta_path(dest).unlink(missing_ok=True)
+        trash._meta_path(dest).write_text(json.dumps({"original": "theirs"}))
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(trash.shutil, "copytree", copytree_that_loses_the_name)
+
+    assert move_to_trash(source, data) is False
+
+    # The foreign payload and the foreign sidecar both survive.
+    assert (td / "1234_album/theirs.txt").read_text() == "theirs"
+    assert json.loads((td / "1234_album.meta.json").read_text())["original"] == "theirs"
+    # The source is untouched: the move failed.
+    assert (source / "marker.txt").read_text() == "mine"
 
 
 def test_list_trash_ignores_corrupt_metadata_and_unreadable_entries(tmp_path, monkeypatch):
