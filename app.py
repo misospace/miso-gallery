@@ -93,12 +93,16 @@ from thumbnails import (
     thumbnail_filename,
 )
 from trash import (
+    RESTORE_CLAIM_HELD,
+    RESTORE_CLAIM_UNUSABLE,
     RestoreDestinationUnavailable,
     dir_size,
     empty_trash,
     list_trash,
     move_to_trash,
     purge_old_trash,
+    release_upload_destination,
+    reserve_upload_destination,
     restore_from_trash,
 )
 from webhook_tasks import (
@@ -934,19 +938,40 @@ def _is_valid_upload_content(file, suffix: str) -> bool:
         stream.seek(0)
 
 
-def _new_upload_destination(safe_name: str) -> tuple[Path, int] | None:
-    """Atomically open a new regular destination under UPLOAD_DIR."""
+def _new_upload_destination(safe_name: str) -> tuple[Path, int, int | None] | None:
+    """Atomically open a new regular destination under UPLOAD_DIR.
+
+    Returns ``(destination, fd, claim_fd)`` or ``None``. *claim_fd* is the
+    per-destination reservation the caller must hold until it is done with
+    the destination and release via ``release_upload_destination``; it is
+    ``None`` only when the platform has no usable file locking, in which
+    case a restore refuses to rename at all, so no rival writer exists and
+    the plain exclusive create is as safe as it ever was.
+
+    The reservation is the same claim file a restore takes for the same
+    gallery path (see ``trash.reserve_upload_destination``): without it a
+    restore that has probed the name free could rename its payload over the
+    uploaded file created in its reserve-then-rename window (issue #613).
+    A held or unusable claim rules out only this candidate name, so the
+    walk moves to the next one exactly as it does on a ``FileExistsError``.
+    """
     stem, suffix = os.path.splitext(safe_name)
     for _ in range(10):
         candidate = UPLOAD_DIR / safe_name
+        claim_fd, state = reserve_upload_destination(DATA_FOLDER, candidate)
+        if state in (RESTORE_CLAIM_HELD, RESTORE_CLAIM_UNUSABLE):
+            safe_name = f"{stem}-{secrets.token_hex(4)}{suffix}"
+            continue
         try:
             fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         except FileExistsError:
+            release_upload_destination(claim_fd)
             safe_name = f"{stem}-{secrets.token_hex(4)}{suffix}"
             continue
         except OSError:
+            release_upload_destination(claim_fd)
             return None
-        return candidate, fd
+        return candidate, fd, claim_fd
     return None
 
 
@@ -979,7 +1004,7 @@ def upload():
             log_security_event("upload", "denied", reason="unsafe_destination", filename=raw_name)
             skipped.append(raw_name)
             continue
-        dest, fd = destination
+        dest, fd, claim_fd = destination
         try:
             with os.fdopen(fd, "wb") as output:
                 while chunk := file.stream.read(64 * 1024):
@@ -988,6 +1013,13 @@ def upload():
             dest.unlink(missing_ok=True)
             skipped.append(raw_name)
             continue
+        finally:
+            # The destination is ours from here: on success the file exists
+            # at the candidate, so a restore reserving the name afterwards
+            # sees it occupied and takes a timestamped one; on a failed
+            # write the unlink happens before this release, so a restore
+            # finds the name free again (issue #613).
+            release_upload_destination(claim_fd)
         stored.append(dest.name)
 
     outcome = "success" if stored else ("skipped" if skipped else "noop")
