@@ -482,8 +482,9 @@ RESTORE_CLAIM_UNUSABLE = "unusable"
 RESTORE_CLAIM_UNSUPPORTED = "unsupported"
 
 # How many candidate names one restore tries before it gives up. A candidate
-# that cannot be reserved (another worker holds its claim, or its claim file
-# cannot be opened) is skipped, and the next name has its own claim file, so
+# that cannot be reserved (another worker holds its claim, its claim file
+# cannot be used, or the claim was retired while its lock was being taken)
+# is skipped, and the next name has its own claim file, so
 # the walk ends at the first reservable name. The bound keeps a file system
 # that refuses every claim from spinning forever.
 RESTORE_CLAIM_MAX_CANDIDATES = 64
@@ -536,6 +537,33 @@ def _restore_claim_path(td: Path, dest: Path) -> Path:
     return td / f"{RESTORE_CLAIM_PREFIX}{digest}{RESTORE_CLAIM_SUFFIX}"
 
 
+def _fd_locks_path(fd: int, path: Path) -> bool:
+    """True while the locked descriptor still refers to the file at *path*.
+
+    A claim inode can be unlinked between a caller's ``open`` and its
+    ``flock``: the sweep takes the lock first, retires the claim, and
+    releases, and the caller then locks an inode that is no longer in the
+    trash directory. A lock on an unlinked inode excludes nobody — the next
+    restore creates a fresh inode for the same destination — so a caller
+    that cannot prove its descriptor and the path are still the same file
+    must not treat the lock as a reservation.
+
+    On a file system without a coherent attribute cache (some network mounts)
+    ``stat`` can serve stale attributes, so the check there is only as good
+    as the ``flock`` it guards — which the deployment already treats as
+    best-effort on such mounts.
+    """
+    try:
+        locked = os.fstat(fd)
+    except OSError:
+        return False
+    try:
+        current = os.stat(path)
+    except OSError:
+        return False
+    return (locked.st_dev, locked.st_ino) == (current.st_dev, current.st_ino)
+
+
 def _acquire_restore_claim(claim_path: Path, create: bool = True):
     """Reserve a restore destination with an exclusive ``flock`` on its claim.
 
@@ -563,6 +591,14 @@ def _acquire_restore_claim(claim_path: Path, create: bool = True):
     is the one place gallery media lands) from turning the reservation into an
     ``flock`` on somebody else's inode; the open then fails and the restore
     moves on to another candidate name.
+
+    Locking alone is not yet a reservation: the sweep can retire this inode
+    between the ``open`` and the ``flock`` (it locks first, unlinks, then
+    releases), and the caller's lock then lands on an unlinked inode that
+    excludes nobody. The descriptor is therefore checked against the path
+    after the lock is taken, and a claim that no longer refers to the file
+    in the trash directory is reported as unusable so the caller moves to
+    the next candidate name instead of restoring without mutual exclusion.
 
     The claim is opened for reading and writing when possible, and read-only
     when the file belongs to another user. ``flock`` needs no write access on
@@ -600,6 +636,15 @@ def _acquire_restore_claim(claim_path: Path, create: bool = True):
             return None, RESTORE_CLAIM_HELD, "another restore holds this destination"
         return None, RESTORE_CLAIM_UNSUPPORTED, (
             f"the file system does not support file locking ({exc.strerror})"
+        )
+    if not _fd_locks_path(claim_fd, claim_path):
+        # The sweep retired this inode while the lock was being taken: the
+        # locked descriptor no longer refers to the claim file, so holding
+        # it would exclude nobody. Give the name up and let the caller try
+        # the next candidate.
+        os.close(claim_fd)
+        return None, RESTORE_CLAIM_UNUSABLE, (
+            "the reservation was retired while it was being taken"
         )
     return claim_fd, RESTORE_CLAIM_ACQUIRED, ""
 
@@ -1415,7 +1460,13 @@ def _reclaim_restore_claims(td: Path) -> None:
     unlinked inode while the next restore creates a fresh one for the same
     destination. Two inodes for one destination means no mutual exclusion, so
     the overwrite ``_reserve_restore_dest`` exists to prevent (issue #608) would
-    be back. Claims are never rewritten, so their age is their creation time
+    be back. A restore whose lock attempt lands *after* this sweep's unlink
+    still gets the unlinked inode's flock, so it verifies that its descriptor
+    and the claim path are still the same file before it treats the lock as a
+    reservation (see ``_acquire_restore_claim``); this sweep proves the same
+    identity right before unlinking, so it never retires a claim file that has
+    been replaced by a live inode while it held the old one's lock. Claims are
+    never rewritten, so their age is their creation time
     and the grace bounds how long an abandoned one survives.
 
     ``create=False`` matters for the same reason: a claim another sweep deleted
@@ -1433,7 +1484,7 @@ def _reclaim_restore_claims(td: Path) -> None:
         if state != RESTORE_CLAIM_ACQUIRED:
             continue
         try:
-            if _exceeds_abandon_grace(entry):
+            if _exceeds_abandon_grace(entry) and _fd_locks_path(claim_fd, entry):
                 with contextlib.suppress(OSError):
                     entry.unlink(missing_ok=True)
         finally:

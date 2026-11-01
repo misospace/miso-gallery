@@ -2036,6 +2036,76 @@ class TestConcurrentRestoreDestinationAllocation:
         monkeypatch.setattr(trash.Path, "iterdir", vanished_trash_dir)
         trash._reclaim_restore_claims(td)
 
+    def test_claim_retired_between_open_and_lock_is_not_a_reservation(
+        self, monkeypatch, tmp_path
+    ):
+        """A restore must never end up holding a lock on a retired claim inode.
+
+        The sweep locks a claim before it unlinks it, so a restore whose
+        ``flock`` attempt lands before the sweep's is refused — but a restore
+        that *opened* the claim first and only attempts its ``flock`` after the
+        sweep has locked, unlinked, and released then locks an inode that is
+        no longer in the trash directory. That lock excludes nobody: the next
+        restore creates a fresh inode for the same destination and reserves
+        it too, so both restores would rename onto one destination and one
+        payload would be lost (issue #608). The lock must therefore only count
+        as a reservation while the descriptor still refers to the claim file.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        claim = trash._restore_claim_path(td, data.resolve() / "album/photo.txt")
+        claim.write_text("")
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+
+        real_flock = trash.fcntl.flock
+        swept = False
+
+        def flock_after_sweep(fd, operation):
+            nonlocal swept
+            if not swept:
+                swept = True
+                trash._reclaim_restore_claims(td)
+            return real_flock(fd, operation)
+
+        monkeypatch.setattr(trash.fcntl, "flock", flock_after_sweep)
+
+        fd, state, _reason = trash._acquire_restore_claim(claim)
+        assert state == trash.RESTORE_CLAIM_UNUSABLE, (
+            "a lock on an inode the sweep retired must not be a reservation"
+        )
+        assert fd is None
+
+        fd, state, _reason = trash._acquire_restore_claim(claim)
+        assert state == trash.RESTORE_CLAIM_ACQUIRED
+        trash._release_restore_claim(fd)
+
+    def test_claim_reclaim_never_unlinks_a_replaced_claim(self, monkeypatch, tmp_path):
+        """The sweep retires only the inode it locked, never a live replacement.
+
+        A claim file can be replaced between this sweep's reservation and its
+        unlink (another sweep retired the old inode and a restore created a
+        fresh one). Unlinking by name would then destroy a live claim's file
+        behind the lock the replacement's holder relies on, so the sweep must
+        prove the locked inode is still the one at the path before unlinking.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        claim = trash._restore_claim_path(td, data.resolve() / "album/photo.txt")
+        claim.write_text("")
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+
+        real_grace = trash._exceeds_abandon_grace
+
+        def grace_after_replacement(path, grace_seconds=None):
+            if path == claim:
+                claim.unlink(missing_ok=True)
+                claim.write_text("")
+            return real_grace(path, grace_seconds)
+
+        monkeypatch.setattr(trash, "_exceeds_abandon_grace", grace_after_replacement)
+        trash._reclaim_restore_claims(td)
+        assert claim.exists(), "the sweep must not retire a claim it did not lock"
+
 
 class TestActiveRestoreStageProtection:
     """Regression tests for issue #557: trash maintenance must never
