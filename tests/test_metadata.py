@@ -317,6 +317,51 @@ def test_image_metadata_endpoint_rejects_symlink_outside_data_folder(monkeypatch
     assert resp.get_json() == {"error": "Image not found"}
 
 
+def test_image_metadata_endpoint_rejects_symlink_into_excluded_path(monkeypatch, tmp_path):
+    """#611: a symlink resolving into an excluded path must return 404, not the
+    metadata of trashed or hidden media.
+
+    is_media_file() accepts a symlink whose target stays inside DATA_FOLDER,
+    so the old lexical-only check let <data>/link.png -> .trash/secret.png
+    return the size, mtime and embedded text chunks of a deleted file.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    trash = data_dir / ".trash"
+    trash.mkdir()
+    _write_png(trash / "secret.png", {"parameters": _PARAMETERS_BLOCK})
+    hidden = data_dir / ".hidden"
+    hidden.mkdir()
+    _write_png(hidden / "known.png", {"parameters": _PARAMETERS_BLOCK})
+    _write_png(data_dir / ".thumb_cache" / "cached.png", {"parameters": _PARAMETERS_BLOCK})
+
+    # Absolute target, relative target, the thumbnail cache, and a symlinked
+    # excluded directory: the request path is lexically ordinary in each case.
+    (data_dir / "link.png").symlink_to(trash / "secret.png")
+    (data_dir / "rel_link.png").symlink_to(Path(".trash/secret.png"))
+    (data_dir / "cache_link.png").symlink_to(data_dir / ".thumb_cache" / "cached.png")
+    (data_dir / "dir_link").symlink_to(hidden, target_is_directory=True)
+
+    for request_path in ("link.png", "rel_link.png", "cache_link.png", "dir_link/known.png"):
+        resp = client.get(f"/api/image-metadata/{request_path}")
+        assert resp.status_code == 404, f"{request_path} must return 404"
+        assert resp.get_json() == {"error": "Image not found"}
+        assert _PARAMETERS_BLOCK not in resp.get_data(as_text=True)
+
+
+def test_image_metadata_endpoint_serves_ordinary_and_linked_media(monkeypatch, tmp_path):
+    """#611: the resolved-path guard must not over-block: a plain file and a
+    symlink resolving to non-excluded media inside DATA_FOLDER still return
+    their parsed metadata with 200."""
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    _write_png(data_dir / "gen.png", {"parameters": _PARAMETERS_BLOCK})
+    (data_dir / "link.png").symlink_to(data_dir / "gen.png")
+
+    for request_path in ("gen.png", "link.png"):
+        resp = client.get(f"/api/image-metadata/{request_path}")
+        assert resp.status_code == 200, f"{request_path} must stay readable"
+        assert resp.get_json()["metadata"]["seed"] == "326515186"
+
+
 def test_image_metadata_endpoint_requires_auth(monkeypatch, tmp_path):
     client, _ = build_client(monkeypatch, tmp_path, auth_type="local", extra_env={"ADMIN_PASSWORD": "pass123"})
     resp = client.get("/api/image-metadata/sample.png", follow_redirects=False)
