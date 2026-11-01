@@ -476,6 +476,21 @@ RESTORE_CLAIM_HELD = "held"
 RESTORE_CLAIM_UNAVAILABLE = "unavailable"
 
 
+class RestoreDestinationUnavailable(ValueError):
+    """The restore destination could not be reserved, so the restore fails.
+
+    Raised when the exclusive ``flock`` on the destination's claim file cannot
+    be taken, or when the claim file cannot even be created. Without that lock
+    a restore cannot tell an owned destination from a free one, and POSIX
+    ``rename`` overwrites: renaming anyway would let one restore discard
+    another restore's payload (issue #608).
+
+    The restore fails closed instead. The trash item and its metadata stay in
+    place, so the restore can be retried once the filesystem can lock the
+    claim again.
+    """
+
+
 def _is_restore_claim_name(name: str) -> bool:
     """True for the trash-dir reservation files of ``_reserve_restore_dest``.
 
@@ -529,8 +544,8 @@ def _acquire_restore_claim(claim_path: Path, create: bool = True):
     create-if-missing-then-unlink protocol loses when a release races a reopen.
     ``O_NOFOLLOW`` keeps a claim path planted as a symlink (the trash directory
     is the one place gallery media lands) from turning the reservation into an
-    ``flock`` on somebody else's inode; the open then fails and the caller
-    degrades to the lockless probe.
+    ``flock`` on somebody else's inode; the open then fails and the restore
+    fails closed (see ``RestoreDestinationUnavailable``).
     """
     if fcntl is None:
         return None, RESTORE_CLAIM_UNAVAILABLE
@@ -592,9 +607,8 @@ def _reserve_restore_dest(
 
     Returns ``(dest, claim_fd)``: the caller owns *claim_fd* and keeps it open
     across the ``rename`` into *dest*, closing it afterwards (never unlinking
-    the claim file). *claim_fd* is ``None`` only when no lock verdict was
-    possible, in which case the returned destination was picked by the
-    historical existence probe alone.
+    the claim file). *claim_fd* is never ``None``: a destination is only
+    returned when the caller holds its claim.
 
     *canonical_parent* is the resolved destination directory: claim names are
     derived from it, so every worker contends for the same file however it
@@ -620,11 +634,13 @@ def _reserve_restore_dest(
     entries. The per-item source flock does not help here: it serializes
     restores of one trash item, not two items pointing at one destination.
 
-    When the lock verdict is unavailable (``fcntl`` is None, an unwritable
-    trash dir) the existence probe alone is kept as the historical lockless
-    fallback. Candidates advance the timestamp forever, so a destination is
-    always returned: a filesystem that then refuses the ``rename`` is the
-    caller's failure to report, not a selection failure.
+    When no lock verdict is possible (``fcntl`` is None, the trash directory
+    cannot hold the claim, or the filesystem refuses ``flock``) the restore
+    fails closed with ``RestoreDestinationUnavailable``. Renaming without the
+    claim would reintroduce the very check-then-rename race the claim closes:
+    two restores could pass the same existence probe and the later ``rename``
+    would overwrite the earlier payload. Failing keeps both payloads — in the
+    trash — instead of losing one of them.
     """
     name = dest.name
     ts = int(time.time())
@@ -639,12 +655,20 @@ def _reserve_restore_dest(
             # there (a directory payload cannot replace one). Hand the claim
             # back and try the next name.
             _release_restore_claim(claim_fd)
-        elif state == RESTORE_CLAIM_UNAVAILABLE and not _restore_dest_is_occupied(
-            candidate, payload_is_dir
-        ):
-            # Lockless fallback: the same probe, without the mutual exclusion
-            # a claim provides.
-            return candidate, None
+        elif state == RESTORE_CLAIM_UNAVAILABLE:
+            # Fail closed: without the claim's exclusive lock this restore
+            # cannot tell an owned destination from a free one, so renaming
+            # now could discard another restore's payload (issue #608). The
+            # item stays in the trash for a retry.
+            logger.warning(
+                "Cannot restore to %s: the destination reservation is unavailable",
+                candidate,
+            )
+            raise RestoreDestinationUnavailable(
+                f"Cannot restore {dest.name!r}: the destination could not be reserved. "
+                "The trash directory must be writable and support file locking. "
+                "The item stays in the trash; try again later."
+            )
         name = f"{dest.stem}_{ts}{dest.suffix}"
         ts += 1
 
@@ -663,14 +687,22 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
     ``dest.exists()`` check leaves a window in this process and across
     Gunicorn workers (issue #608).
 
+    When the destination cannot be reserved at all (no lock verdict: the
+    platform has no ``flock``, the trash directory cannot hold the claim, or
+    the filesystem refuses the lock), the restore fails closed with
+    ``RestoreDestinationUnavailable`` — a ``ValueError`` the caller reports to
+    the user. Renaming without the reservation would restore the
+    check-then-rename race the claim closes, so the item and its metadata stay
+    in the trash for a retry.
+
     For the whole duration of the restore the item's meta file is held
     under an exclusive flock (see ``_acquire_source_lock``): trash
     maintenance in any worker cannot delete the trash *source* while a
     cross-device ``copytree`` is still reading it (issue #557), and if
     maintenance holds the lock first, the restore fails fast before any
-    copy starts. A ``ValueError`` (invalid item or unsafe meta) propagates
-    to the caller; any other failure returns False with item and metadata
-    preserved so a retry stays possible.
+    copy starts. A ``ValueError`` (invalid item, unsafe meta, or an
+    unreservable destination) propagates to the caller; any other failure
+    returns False with item and metadata preserved so a retry stays possible.
     """
     # Reject path traversal in item_name (Flask's <path:> converter allows / and ..)
     # and embedded null bytes, which would make every path syscall below

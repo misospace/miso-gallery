@@ -1809,8 +1809,8 @@ class TestConcurrentRestoreDestinationAllocation:
         assert not claim.exists()
         assert list_trash(data) == []
 
-    def test_restore_without_fcntl_falls_back_to_the_existence_probe(self, monkeypatch, tmp_path):
-        """Without flock support the historical probe-only behavior is kept."""
+    def test_restore_without_fcntl_fails_closed(self, monkeypatch, tmp_path):
+        """Without flock support the restore refuses instead of racing."""
         data = tmp_path / "data"
         td = trash.trash_dir(data)
         (data / "albums").mkdir(parents=True)
@@ -1820,12 +1820,44 @@ class TestConcurrentRestoreDestinationAllocation:
 
         monkeypatch.setattr(trash, "fcntl", None)
 
-        assert restore_from_trash(item.name, data) is True
+        # Without the claim the restore cannot tell an owned destination from
+        # a free one, and POSIX rename overwrites: renaming anyway would
+        # restore the check-then-rename race the claim closes (issue #608).
+        with pytest.raises(trash.RestoreDestinationUnavailable):
+            restore_from_trash(item.name, data)
         assert dest.read_bytes() == b"occupied"
-        assert [p.read_bytes() for p in (data / "albums").glob("photo_*.txt")] == [b"payload"]
+        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
         assert [p for p in td.iterdir() if trash._is_restore_claim_name(p.name)] == []
 
-    def test_symlinked_claim_degrades_to_the_existence_probe(self, monkeypatch, tmp_path):
+    def test_unreservable_destination_never_overwrites_an_existing_file(self, monkeypatch, tmp_path):
+        """A destination that cannot be reserved is never renamed onto.
+
+        The check-then-rename order this issue removed lost a payload when two
+        restores shared one ``original`` path. The lockless fallback kept
+        that window open: a restore that cannot lock the claim probed the
+        destination and renamed onto it anyway, so a second restore could
+        overwrite the first payload. The restore must fail closed instead.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        dest = data / "albums/photo.txt"
+        dest.write_bytes(b"occupied")
+
+        def unsupported_flock(*args, **kwargs):
+            raise OSError(errno.ENOLCK, "flock unsupported")
+
+        monkeypatch.setattr(trash.fcntl, "flock", unsupported_flock)
+
+        with pytest.raises(trash.RestoreDestinationUnavailable):
+            restore_from_trash(item.name, data)
+        # The existing file keeps its bytes: nothing was renamed onto it, and
+        # the payload is still in the trash for a retry.
+        assert dest.read_bytes() == b"occupied"
+        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
+
+    def test_symlinked_claim_fails_the_restore_closed(self, monkeypatch, tmp_path):
         """A claim path planted as a symlink is never opened through."""
         import fcntl
         import os
@@ -1857,15 +1889,17 @@ class TestConcurrentRestoreDestinationAllocation:
 
         monkeypatch.setattr(trash.Path, "rename", check_victim)
 
-        # ELOOP on the claim makes the lock verdict unavailable, so the restore
-        # falls back to the historical probe instead of reserving: it still
-        # succeeds, and the reservation never becomes an flock on whatever the
-        # planted link points at.
-        assert restore_from_trash(item.name, data) is True
-        assert victim_lockable == [True]
-        assert (data / "albums/photo.txt").read_bytes() == b"payload"
+        # ELOOP on the claim makes the lock verdict unavailable, so the
+        # restore fails closed instead of renaming onto a destination it could
+        # not reserve. The planted link is never opened through, so the
+        # reservation never becomes an flock on whatever it points at.
+        with pytest.raises(trash.RestoreDestinationUnavailable):
+            restore_from_trash(item.name, data)
+        assert victim_lockable == []
+        assert not (data / "albums/photo.txt").exists()
         assert victim.read_text() == "victim"
         assert claim.is_symlink()
+        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
 
     def test_failed_restore_releases_the_reservation(self, monkeypatch, tmp_path):
         """A failed restore must not pin the destination name it wanted."""
