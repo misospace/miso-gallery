@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import hashlib
 import json
 import logging
 import os
@@ -30,6 +31,18 @@ STAGE_LOCK_SUFFIX = ".lock"
 # is the conservative fallback and must exceed any plausible restore
 # duration so a slow or lock-deprived copy is never clobbered.
 STAGE_ABANDON_GRACE_SECONDS = 24 * 3600
+
+# Restore destinations are reserved with an exclusive ``flock`` on a
+# per-destination *claim* file kept in the trash directory (see
+# ``_reserve_restore_dest``). The files are restore bookkeeping, not trash
+# items, so the trash listing and the maintenance sweeps skip them by name,
+# and ``_reclaim_restore_claims`` removes the ones nobody holds once they are
+# older than ``STAGE_ABANDON_GRACE_SECONDS``.
+RESTORE_CLAIM_PREFIX = ".restore-claim-"
+RESTORE_CLAIM_SUFFIX = ".lock"
+# ``sha256().hexdigest()`` alphabet; ``_is_restore_claim_name`` requires a full
+# digest so the sweep's name test cannot capture an ordinary file.
+_CLAIM_DIGEST_ALPHABET = "0123456789abcdef"
 
 # A trash metadata sidecar with no paired item is either a crashed claim or
 # an in-flight one whose mover has not renamed its payload onto the name
@@ -372,6 +385,9 @@ def list_trash(data_folder: Path) -> list[dict]:
     for item in td.iterdir():
         if item.name.endswith(META_SUFFIX):
             continue
+        if _is_restore_claim_name(item.name):
+            # Reservation bookkeeping written by a restore, not a trashed item.
+            continue
         meta_file = _meta_path(item)
         meta = {}
         if meta_file.exists():
@@ -534,20 +550,340 @@ def _rename_onto_dest(src: Path, dest: Path, dest_fd: int | None) -> None:
         src.rename(dest)
 
 
+RESTORE_CLAIM_ACQUIRED = "acquired"
+RESTORE_CLAIM_HELD = "held"
+# The claim file of this candidate name cannot be used. Only that name is
+# affected: the next candidate has its own claim file.
+RESTORE_CLAIM_UNUSABLE = "unusable"
+# The platform or the file system offers no usable ``flock`` at all. Every
+# claim is equally unreservable, so the restore fails at once instead of
+# walking the candidate names.
+RESTORE_CLAIM_UNSUPPORTED = "unsupported"
+
+# How many candidate names one restore tries before it gives up. A candidate
+# that cannot be reserved (another worker holds its claim, its claim file
+# cannot be used, or the claim was retired while its lock was being taken)
+# is skipped, and the next name has its own claim file, so
+# the walk ends at the first reservable name. The bound keeps a file system
+# that refuses every claim from spinning forever.
+RESTORE_CLAIM_MAX_CANDIDATES = 64
+
+
+class RestoreDestinationUnavailable(ValueError):
+    """The restore destination could not be reserved, so the restore fails.
+
+    Raised when the exclusive ``flock`` on the destination's claim file cannot
+    be taken, or when the claim file cannot even be created. Without that lock
+    a restore cannot tell an owned destination from a free one, and POSIX
+    ``rename`` overwrites: renaming anyway would let one restore discard
+    another restore's payload (issue #608).
+
+    The restore fails closed instead. The trash item and its metadata stay in
+    place, so the restore can be retried once the filesystem can lock the
+    claim again.
+    """
+
+
+def _is_restore_claim_name(name: str) -> bool:
+    """True for the trash-dir reservation files of ``_reserve_restore_dest``.
+
+    The sweep skip is a name test, so the shape is deliberately narrow: the
+    prefix, a 64-character lowercase hex digest, and the ``.lock`` suffix. A
+    trashed item can never have that name anyway (``_unique_trash_dest`` writes
+    every item as ``{timestamp}_{name}``), so no restorable payload is ever
+    mistaken for bookkeeping, and a user file that merely *starts* with the
+    prefix (``.restore-claim-notes.lock``) is still listed and deleted as the
+    item it is.
+    """
+    if not (name.startswith(RESTORE_CLAIM_PREFIX) and name.endswith(RESTORE_CLAIM_SUFFIX)):
+        return False
+    digest = name[len(RESTORE_CLAIM_PREFIX):-len(RESTORE_CLAIM_SUFFIX)]
+    return len(digest) == 64 and all(ch in _CLAIM_DIGEST_ALPHABET for ch in digest)
+
+
+def _restore_claim_path(td: Path, dest: Path) -> Path:
+    """Trash-dir claim file that guards ``dest`` as a restore destination.
+
+    The name is a digest of the destination spelled under the *resolved* data
+    folder, so workers configured with different spellings of ``DATA_FOLDER``
+    (a symlinked path, a trailing slash) still contend for one claim file, and
+    so no gallery path lands in a filename. ``sha256().hexdigest()`` is exactly
+    the shape ``_is_restore_claim_name`` matches. Two distinct destinations
+    digesting to the same claim only costs a spurious suffix on one restore; it
+    can never cause an overwrite.
+    """
+    digest = hashlib.sha256(os.fsencode(dest.as_posix())).hexdigest()
+    return td / f"{RESTORE_CLAIM_PREFIX}{digest}{RESTORE_CLAIM_SUFFIX}"
+
+
+def _fd_locks_path(fd: int, path: Path) -> bool:
+    """True while the locked descriptor still refers to the file at *path*.
+
+    A claim inode can be unlinked between a caller's ``open`` and its
+    ``flock``: the sweep takes the lock first, retires the claim, and
+    releases, and the caller then locks an inode that is no longer in the
+    trash directory. A lock on an unlinked inode excludes nobody — the next
+    restore creates a fresh inode for the same destination — so a caller
+    that cannot prove its descriptor and the path are still the same file
+    must not treat the lock as a reservation.
+
+    On a file system without a coherent attribute cache (some network mounts)
+    ``stat`` can serve stale attributes, so the check there is only as good
+    as the ``flock`` it guards — which the deployment already treats as
+    best-effort on such mounts.
+    """
+    try:
+        locked = os.fstat(fd)
+    except OSError:
+        return False
+    try:
+        current = os.stat(path)
+    except OSError:
+        return False
+    return (locked.st_dev, locked.st_ino) == (current.st_dev, current.st_ino)
+
+
+def _acquire_restore_claim(claim_path: Path, create: bool = True):
+    """Reserve a restore destination with an exclusive ``flock`` on its claim.
+
+    Returns ``(claim_fd, state, reason)`` where *state* is
+    ``RESTORE_CLAIM_ACQUIRED`` (the caller holds the reservation through that
+    raw descriptor and closes it once it is done with the destination),
+    ``RESTORE_CLAIM_HELD`` (a live restore owns this candidate name),
+    ``RESTORE_CLAIM_UNUSABLE`` (the claim file for this candidate name cannot
+    be used, so the caller can try the next name) or ``RESTORE_CLAIM_UNSUPPORTED``
+    (no usable ``flock`` on this platform or file system, so no candidate name
+    can be reserved). *reason* is a plain sentence that names the cause for the
+    operator and the user. A descriptor rather than a file object so the claim
+    is created with a fixed mode and without truncation.
+
+    *create* selects who may bring the file into existence: a restore always
+    does, while ``_reclaim_restore_claims`` passes ``False`` so a claim another
+    sweep just deleted is not resurrected as a fresh inode behind that sweep's
+    back.
+
+    The file is opened without ``O_EXCL`` and is *never unlinked by a restore*,
+    so exactly one inode ever backs a destination: a competing restore either
+    loses the lock on that inode (held) or reserves it, which is what a
+    create-if-missing-then-unlink protocol loses when a release races a reopen.
+    ``O_NOFOLLOW`` keeps a claim path planted as a symlink (the trash directory
+    is the one place gallery media lands) from turning the reservation into an
+    ``flock`` on somebody else's inode; the open then fails and the restore
+    moves on to another candidate name.
+
+    Locking alone is not yet a reservation: the sweep can retire this inode
+    between the ``open`` and the ``flock`` (it locks first, unlinks, then
+    releases), and the caller's lock then lands on an unlinked inode that
+    excludes nobody. The descriptor is therefore checked against the path
+    after the lock is taken, and a claim that no longer refers to the file
+    in the trash directory is reported as unusable so the caller moves to
+    the next candidate name instead of restoring without mutual exclusion.
+
+    The claim is opened for reading and writing when possible, and read-only
+    when the file belongs to another user. ``flock`` needs no write access on
+    a local file system, so a read-only descriptor still locks the claim; that
+    way a claim another user created cannot block a destination forever. The
+    read-only fallback is a fallback: on a file system that emulates ``flock``
+    with ``fcntl`` byte-range locks (NFS), an exclusive lock needs a writable
+    descriptor, so the writable open stays the primary one.
+    """
+    if fcntl is None:
+        return None, RESTORE_CLAIM_UNSUPPORTED, "the system has no file locking"
+    flags = os.O_RDWR | os.O_NOFOLLOW | (os.O_CREAT if create else 0)
+    try:
+        # No truncation: the claim is inert bookkeeping and rewriting it would
+        # reset the abandon age maintenance relies on.
+        claim_fd = os.open(claim_path, flags, 0o644)  # noqa: SIM115
+    except PermissionError:
+        try:
+            claim_fd = os.open(claim_path, os.O_RDONLY | os.O_NOFOLLOW, 0o644)  # noqa: SIM115
+        except OSError as exc:
+            return None, RESTORE_CLAIM_UNUSABLE, (
+                f"the trash directory could not be used for the reservation ({exc.strerror})"
+            )
+    except OSError as exc:
+        # Only this candidate name is affected: the next candidate has its own
+        # claim file, so the restore can still reserve one.
+        return None, RESTORE_CLAIM_UNUSABLE, (
+            f"the trash directory could not be used for the reservation ({exc.strerror})"
+        )
+    try:
+        fcntl.flock(claim_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(claim_fd)
+        if exc.errno in (errno.EAGAIN, errno.EACCES):
+            return None, RESTORE_CLAIM_HELD, "another restore holds this destination"
+        return None, RESTORE_CLAIM_UNSUPPORTED, (
+            f"the file system does not support file locking ({exc.strerror})"
+        )
+    if not _fd_locks_path(claim_fd, claim_path):
+        # The sweep retired this inode while the lock was being taken: the
+        # locked descriptor no longer refers to the claim file, so holding
+        # it would exclude nobody. Give the name up and let the caller try
+        # the next candidate.
+        os.close(claim_fd)
+        return None, RESTORE_CLAIM_UNUSABLE, (
+            "the reservation was retired while it was being taken"
+        )
+    return claim_fd, RESTORE_CLAIM_ACQUIRED, ""
+
+
+
+def _release_restore_claim(claim_fd) -> None:
+    """Release a reservation by closing its descriptor; the file is kept."""
+    if claim_fd is not None:
+        with contextlib.suppress(OSError):
+            os.close(claim_fd)
+
+
+def _restore_dest_is_occupied(candidate: Path, payload_is_dir: bool) -> bool:
+    """True when a restore must not rename its payload onto *candidate*.
+
+    The restore renames onto the *unresolved* destination path, and
+    ``rename(2)`` does not follow a symlink in the final component: the link
+    itself is swapped out, so the file it pointed at keeps its own bytes and
+    is never written through. A file payload may therefore take a name a
+    symlink holds. (This is about the final component only — the kernel still
+    resolves the intermediate ones, so a symlinked *parent* directory is a
+    separate concern; see the escape guard in ``restore_from_trash`` and
+    issue #615.)
+
+    A directory payload may not: ``rename(2)`` refuses a directory onto a
+    symlink (``ENOTDIR``), whatever the symlink points at. For a directory
+    payload a symlink therefore counts as occupied and the restore moves on
+    to the next candidate name, which keeps the restore working instead of
+    failing on a rename the kernel would reject.
+    """
+    if candidate.is_symlink():
+        return payload_is_dir
+    return candidate.exists()
+
+
+def _reserve_restore_dest(
+    td: Path,
+    dest: Path,
+    canonical_parent: Path,
+    *,
+    payload_is_dir: bool,
+) -> tuple[Path, int | None]:
+    """Pick a restore destination for *dest* and reserve it before it is used.
+
+    Returns ``(dest, claim_fd)``: the caller owns *claim_fd* and keeps it open
+    across the ``rename`` into *dest*, closing it afterwards (never unlinking
+    the claim file). *claim_fd* is never ``None``: a destination is only
+    returned when the caller holds its claim.
+
+    *canonical_parent* is the resolved destination directory: claim names are
+    derived from it, so every worker contends for the same file however it
+    spells ``DATA_FOLDER`` and two ``original`` paths that reach one directory
+    through a symlink share one claim. The returned path stays unresolved — the
+    caller's ``rename`` must keep replacing a symlink at the destination rather
+    writing through it to whatever it points at.
+
+    *payload_is_dir* tells the occupancy probe what the rename will carry: a
+    file payload may replace a symlink at the destination, a directory payload
+    cannot (see ``_restore_dest_is_occupied``).
+
+    Candidates are the original name first, then ``{stem}_{ts}{suffix}`` with an
+    incrementing timestamp. A candidate is only accepted while its claim is
+    held, and the occupancy probe runs *inside* that claim, so a
+    concurrent restore of a different trash item that shares the same
+    ``original`` path (the same gallery path deleted twice over time) either
+    sees the claim held and moves to the next candidate, or acquires it later,
+    sees the winner's payload already at ``candidate`` and suffixes too. The
+    old probe-then-rename order was a check-then-use race: POSIX ``rename``
+    overwrites, so both restores reported success and one payload was discarded
+    (issue #608) — the same class of race issue #606 addresses for trash
+    entries. The per-item source flock does not help here: it serializes
+    restores of one trash item, not two items pointing at one destination.
+
+    When no lock verdict is possible at all (the platform has no ``flock``, or
+    the file system refuses it) the restore fails closed with
+    ``RestoreDestinationUnavailable``. Renaming without the claim would
+    reintroduce the very check-then-rename race the claim closes: two restores
+    could pass the same existence probe and the later ``rename`` would
+    overwrite the earlier payload. Failing keeps both payloads — in the trash
+    — instead of losing one of them.
+
+    A candidate whose claim file cannot be *used* (a file planted at that
+    exact claim path) only rules out that one name: the next candidate has its
+    own claim file, so the walk continues. The walk is bounded, and a file
+    system that refuses every claim ends the restore with a failure rather
+    than an endless loop.
+    """
+    name = dest.name
+    ts = int(time.time())
+    blocked_reason = ""
+    for _ in range(RESTORE_CLAIM_MAX_CANDIDATES):
+        candidate = dest.with_name(name)
+        claim_fd, state, reason = _acquire_restore_claim(_restore_claim_path(td, canonical_parent / name))
+        if state == RESTORE_CLAIM_ACQUIRED:
+            if not _restore_dest_is_occupied(candidate, payload_is_dir):
+                return candidate, claim_fd
+            # The candidate is taken: either a finished restore released this
+            # claim and left its payload at the candidate, or a symlink sits
+            # there (a directory payload cannot replace one). Hand the claim
+            # back and try the next name.
+            _release_restore_claim(claim_fd)
+        elif state == RESTORE_CLAIM_UNSUPPORTED:
+            # No usable file locking at all, so no candidate can be reserved.
+            # Failing closed keeps a payload from overwriting another one.
+            logger.warning(
+                "Cannot reserve the restore destination %s: %s", candidate, reason
+            )
+            raise RestoreDestinationUnavailable(
+                f"Cannot restore {dest.name!r}: the destination could not be reserved "
+                f"because {reason}. The item stays in the trash. Try again later."
+            )
+        else:
+            # Another restore holds this name, or a file was planted at this
+            # candidate's claim path. Either way this name is unusable and the
+            # next one has its own claim file.
+            blocked_reason = reason
+        name = f"{dest.stem}_{ts}{dest.suffix}"
+        ts += 1
+    logger.warning(
+        "Cannot reserve the restore destination %s: no candidate name was free (%s)",
+        dest,
+        blocked_reason or "every candidate name was taken",
+    )
+    raise RestoreDestinationUnavailable(
+        f"Cannot restore {dest.name!r}: no free destination name was found"
+        f"{f' because {blocked_reason}' if blocked_reason else ''}. "
+        "The item stays in the trash. Try again later."
+    )
+
+
 def restore_from_trash(item_name: str, data_folder: Path) -> bool:
     """Restore an item from trash to its original location.
 
     Returns True if restored, False if not found or invalid.
     Raises ValueError if *item_name* contains path traversal sequences.
 
+    The destination is reserved before the item is renamed onto it (see
+    ``_reserve_restore_dest``), so two concurrent restores whose metadata
+    share one ``original`` path cannot overwrite each other's payload: the
+    loser takes a timestamped name instead. Both the reservation and the
+    collision probe are needed — POSIX ``rename`` overwrites, so a bare
+    ``dest.exists()`` check leaves a window in this process and across
+    Gunicorn workers (issue #608).
+
+    When the destination cannot be reserved at all (no lock verdict: the
+    platform has no ``flock``, the trash directory cannot hold the claim, or
+    the filesystem refuses the lock), the restore fails closed with
+    ``RestoreDestinationUnavailable`` — a ``ValueError`` the caller reports to
+    the user. Renaming without the reservation would restore the
+    check-then-rename race the claim closes, so the item and its metadata stay
+    in the trash for a retry.
+
     For the whole duration of the restore the item's meta file is held
     under an exclusive flock (see ``_acquire_source_lock``): trash
     maintenance in any worker cannot delete the trash *source* while a
     cross-device ``copytree`` is still reading it (issue #557), and if
     maintenance holds the lock first, the restore fails fast before any
-    copy starts. A ``ValueError`` (invalid item or unsafe meta) propagates
-    to the caller; any other failure returns False with item and metadata
-    preserved so a retry stays possible.
+    copy starts. A ``ValueError`` (invalid item, unsafe meta, or an
+    unreservable destination) propagates to the caller; any other failure
+    returns False with item and metadata preserved so a retry stays possible.
 
     The destination parent is verified by resolution (issue #615) and then
     opened once as a pinned directory descriptor: every destination-side
@@ -597,6 +933,9 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         raise ValueError(f"Item path escapes trash directory: {item_name!r}")
 
     meta_file = _meta_path(item)
+    # Set once the destination is reserved; released in the finally below so a
+    # ValueError (unsafe meta) cannot leak the reservation either.
+    claim_fd = None
 
     # Source-side lock: hold an exclusive flock on the meta file across BOTH
     # restore paths (fast rename and the cross-device stage/copytree
@@ -630,6 +969,13 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         except OSError:
             return False
         if not (str(resolved_dest).startswith(str(resolved_data) + "/") or resolved_dest == resolved_data):
+            # A symlink at the destination resolves to its target here, so a
+            # link whose target escapes the data folder refuses the whole
+            # restore. The rename would replace the link instead of writing
+            # through it, so this is stricter than the rename needs; it is
+            # kept deliberately. The check resolves the final component as
+            # well, so a symlinked *parent* directory can still hide an
+            # escape — tracked in #615.
             raise ValueError(f"Destination path escapes data folder: {rel!r}")
         # The final component may cancel out an escape in an intermediate
         # component (a symlinked parent pointing outside DATA_FOLDER whose
@@ -647,22 +993,28 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         # destination-side rename below resolves its final component
         # against this descriptor instead of re-resolving the parent path,
         # so a parent swapped for a symlink between the checks above and
-        # the rename cannot redirect the payload outside DATA_FOLDER.
+        # the rename cannot redirect the payload outside DATA_FOLDER. The
+        # parent is opened through its resolved path — the same canonical
+        # directory the reservation below is keyed on — so a legitimate
+        # symlinked album alias inside the data folder keeps restoring
+        # (issue #608), while a parent that resolves outside the data
+        # folder is still refused by the descriptor's post-open check.
         if _RENAME_SUPPORTS_DIRFD:
-            dest_fd = _open_verified_dest_parent(dest.parent, resolved_data)
+            dest_fd = _open_verified_dest_parent(dest.parent.resolve(), resolved_data)
             if dest_fd is None:
                 # Fail closed: the verified parent could not be opened (it
                 # was swapped mid-check, or is inaccessible). Item and
                 # metadata stay in the trash for a retry.
                 return False
-        if dest.exists():
-            ts = int(time.time())
-            if item.is_dir():
-                while dest.exists():
-                    dest = dest.with_name(f"{dest.stem}_{ts}{dest.suffix}")
-                    ts += 1
-            else:
-                dest = dest.with_name(f"{dest.stem}_{ts}{dest.suffix}")
+        # Reserve the destination before anything is renamed onto it, so a
+        # concurrent restore of another trash item with the same ``original``
+        # cannot land on the same name (see ``_reserve_restore_dest``). The
+        # claim is keyed on the resolved parent (it exists by now); *dest*
+        # stays unresolved so the rename below replaces a symlink at the
+        # destination instead of writing through it.
+        dest, claim_fd = _reserve_restore_dest(
+            td, dest, dest.parent.resolve(), payload_is_dir=item.is_dir()
+        )
         if item.is_dir():
             try:
                 # Move consumes the trash source so a successful restore
@@ -753,6 +1105,10 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
     except Exception:
         return False
     finally:
+        # Release the destination reservation first: from here another restore
+        # may claim the name, and it will see the payload this call renamed
+        # there (or nothing at all, on a failed restore).
+        _release_restore_claim(claim_fd)
         # Release the source lock by closing the descriptor only — never by
         # unlinking the meta file: the success path unlinked it explicitly
         # above, and a failed restore must keep item+meta for a retry.
@@ -792,6 +1148,11 @@ def empty_trash(data_folder: Path) -> int:
     td = trash_dir(data_folder)
     deleted = 0
     for item in td.iterdir():
+        if _is_restore_claim_name(item.name):
+            # Restore reservation bookkeeping, not a trash item: it is
+            # reclaimed by ``_reclaim_restore_claims`` below, and deleting it
+            # here would free a destination another worker is renaming into.
+            continue
         try:
             if item.name.endswith(META_SUFFIX) and len(item.name) > len(META_SUFFIX):
                 # The paired item's iteration deletes item + meta together
@@ -881,6 +1242,7 @@ def empty_trash(data_folder: Path) -> int:
                         lock_fh.close()
         except Exception:
             pass
+    _reclaim_restore_claims(td)
     _reclaim_orphan_restore_stages(data_folder)
     return deleted
 
@@ -919,6 +1281,11 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
     deleted = 0
     for item in td.iterdir():
         if item.name.endswith(META_SUFFIX):
+            continue
+        if _is_restore_claim_name(item.name):
+            # Reservation bookkeeping, not a trash item (see empty_trash). It
+            # carries no ``deleted_at`` age, so a retention sweep would happily
+            # delete a claim whose restore is holding the flock right now.
             continue
         meta_file = _meta_path(item)
         try:
@@ -996,6 +1363,7 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
                 if lock_fh is not None:
                     with contextlib.suppress(OSError):
                         lock_fh.close()
+    _reclaim_restore_claims(td)
     _reclaim_orphan_restore_stages(data_folder)
     return deleted
 
@@ -1190,3 +1558,52 @@ def _reclaim_orphan_restore_stages(data_folder: Path) -> None:
                 _reclaim_stage_dir(entry)
         except OSError:
             pass
+
+
+def _reclaim_restore_claims(td: Path) -> None:
+    """Retire restore-destination claim files that no live process holds.
+
+    A restore never unlinks its claim (see ``_acquire_restore_claim``), so the
+    sweeps that already clean orphaned stages and stale sidecars retire them.
+    A claim is retired only when this sweep can hold its ``flock`` itself
+    (nobody else reserves it) *and* it is older than
+    ``STAGE_ABANDON_GRACE_SECONDS``; anything held, or whose lock state cannot
+    be verified, is kept, so a lock-deprived or contested filesystem never
+    loses a reservation.
+
+    Retiring takes the lock *before* the ``unlink`` and drops it only
+    afterwards, which is what closes the gap a probe-then-unlink would leave:
+    a restore that opened this inode just before the unlink is refused the flock
+    by this sweep and takes the next candidate name, instead of ending up on an
+    unlinked inode while the next restore creates a fresh one for the same
+    destination. Two inodes for one destination means no mutual exclusion, so
+    the overwrite ``_reserve_restore_dest`` exists to prevent (issue #608) would
+    be back. A restore whose lock attempt lands *after* this sweep's unlink
+    still gets the unlinked inode's flock, so it verifies that its descriptor
+    and the claim path are still the same file before it treats the lock as a
+    reservation (see ``_acquire_restore_claim``); this sweep proves the same
+    identity right before unlinking, so it never retires a claim file that has
+    been replaced by a live inode while it held the old one's lock. Claims are
+    never rewritten, so their age is their creation time
+    and the grace bounds how long an abandoned one survives.
+
+    ``create=False`` matters for the same reason: a claim another sweep deleted
+    a moment ago must not be resurrected here, or both sweeps end up on
+    different inodes of a name nobody is restoring.
+    """
+    try:
+        entries = list(td.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if not _is_restore_claim_name(entry.name):
+            continue
+        claim_fd, state, _reason = _acquire_restore_claim(entry, create=False)
+        if state != RESTORE_CLAIM_ACQUIRED:
+            continue
+        try:
+            if _exceeds_abandon_grace(entry) and _fd_locks_path(claim_fd, entry):
+                with contextlib.suppress(OSError):
+                    entry.unlink(missing_ok=True)
+        finally:
+            _release_restore_claim(claim_fd)

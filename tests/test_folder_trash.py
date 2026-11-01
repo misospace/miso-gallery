@@ -1700,6 +1700,561 @@ class TestRestoreConsumesTrashedDirectory:
         stages = [p for p in data_dir.rglob(".restore-stage-*") if p.is_dir()]
         assert stages == [], f"stage directory leaked: {stages}"
 
+class TestConcurrentRestoreDestinationAllocation:
+    """Regression tests for issue #608: a restore must reserve its destination.
+
+    ``restore_from_trash`` used to probe ``dest.exists()`` and only then
+    ``rename`` onto it. POSIX ``rename`` overwrites, so two restores of
+    *different* trash items whose metadata share one ``original`` path (the
+    same gallery path deleted twice over time) could both pass the probe, and
+    the later ``rename`` silently discarded the earlier payload while both
+    calls reported success. The per-item source flock does not cover this: it
+    serializes restores of one trash item, not two items pointing at one
+    destination.
+
+    Destinations are now reserved with an exclusive ``flock`` on a per-path
+    claim file inside the trash directory (see ``_reserve_restore_dest``). The
+    race is reproduced deterministically in a single process by pausing the
+    first restore inside its ``rename`` and running the rival restore in that
+    window — the exact window the old check-then-rename order lost data in.
+    ``flock`` is taken per open file description, so a second claim conflicts
+    inside one process just as it would between Gunicorn workers.
+    """
+
+    def _meta(self, item, original):
+        item.with_name(item.name + trash.META_SUFFIX).write_text(
+            json.dumps({"original": original, "deleted_at": "2026-01-01T00:00:00+00:00"})
+        )
+        return item
+
+    def _file_item(self, td, name, original, payload):
+        item = td / name
+        item.write_bytes(payload)
+        return self._meta(item, original)
+
+    def _dir_item(self, td, name, original, filename, payload):
+        item = td / name
+        (item / "sub").mkdir(parents=True)
+        (item / filename).write_bytes(payload)
+        return self._meta(item, original)
+
+    def test_concurrent_file_restores_retain_both_payloads(self, monkeypatch, tmp_path):
+        """The payload-loss case: each restore must end up with its own file."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        first = self._file_item(td, "a.bin", "albums/photo.txt", b"first")
+        self._file_item(td, "b.bin", "albums/photo.txt", b"second")
+        base = data / "albums/photo.txt"
+
+        real_rename = trash._rename_onto_dest
+        rival_results: list[bool] = []
+
+        def interleaved_rename(src, dest, dest_fd):
+            if src == first and not rival_results:
+                # The rival restore runs after the first restore picked
+                # ``base`` and before its rename lands: with the old
+                # probe-then-rename order both saw a free destination.
+                rival_results.append(restore_from_trash("b.bin", data))
+            return real_rename(src, dest, dest_fd)
+
+        monkeypatch.setattr(trash, "_rename_onto_dest", interleaved_rename)
+
+        assert restore_from_trash("a.bin", data) is True
+        assert rival_results == [True]
+        # Both payloads survive: the winner holds the name, the rival took a
+        # timestamped one instead of overwriting through it.
+        assert base.read_bytes() == b"first"
+        rival = list((data / "albums").glob("photo_*.txt"))
+        assert [p.read_bytes() for p in rival] == [b"second"]
+        assert list_trash(data) == []
+
+    def test_concurrent_directory_restores_retain_both_trees(self, monkeypatch, tmp_path):
+        """The same race on the directory branch keeps both trees."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        first = self._dir_item(td, "dir_a", "album", "a.txt", b"A")
+        self._dir_item(td, "dir_b", "album", "b.txt", b"B")
+
+        real_rename = trash._rename_onto_dest
+        rival_results: list[bool] = []
+
+        def interleaved_rename(src, dest, dest_fd):
+            if src == first and not rival_results:
+                rival_results.append(restore_from_trash("dir_b", data))
+            return real_rename(src, dest, dest_fd)
+
+        monkeypatch.setattr(trash, "_rename_onto_dest", interleaved_rename)
+
+        assert restore_from_trash("dir_a", data) is True
+        assert rival_results == [True]
+        assert (data / "album" / "a.txt").read_bytes() == b"A"
+        renamed = [p for p in data.iterdir() if p.is_dir() and p.name.startswith("album_")]
+        assert len(renamed) == 1
+        assert (renamed[0] / "b.txt").read_bytes() == b"B"
+        assert list_trash(data) == []
+        stages = [p for p in data.rglob(f"{trash.STAGE_PREFIX}*")]
+        assert stages == [], f"stage directory leaked: {stages}"
+
+    def test_restore_replaces_a_symlink_at_the_destination(self, tmp_path):
+        """A symlink sitting at the destination is replaced, never followed."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        albums = data / "albums"
+        albums.mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        victim = albums / "victim.txt"
+        link = albums / "photo.txt"
+        link.symlink_to(victim)
+
+        assert restore_from_trash(item.name, data) is True
+        assert not link.is_symlink()
+        assert link.read_bytes() == b"payload"
+        assert not victim.exists(), "the restore must not write through the planted link"
+
+    def test_restore_replaces_a_symlink_pointing_at_an_existing_file(self, tmp_path):
+        """A symlink to a live file is replaced too, and its target survives.
+
+        ``Path.exists()`` follows a symlink, so probing the destination with
+        it made a link to an existing file look occupied: the restore took a
+        timestamped name and left the link in place. The rename targets the
+        unresolved path, so the link itself is replaced — the file it pointed
+        at keeps its own bytes and is never written through.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        albums = data / "albums"
+        albums.mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        victim = albums / "victim.txt"
+        victim.write_bytes(b"victim")
+        link = albums / "photo.txt"
+        link.symlink_to(victim)
+
+        assert restore_from_trash(item.name, data) is True
+        assert not link.is_symlink()
+        assert link.read_bytes() == b"payload"
+        assert victim.read_bytes() == b"victim", "the restore must not write through the link"
+        assert list_trash(data) == []
+
+    def test_directory_restore_does_not_replace_a_symlink_at_the_destination(self, tmp_path):
+        """A directory payload cannot take a symlink's name, so it suffixes.
+
+        ``rename(2)`` refuses a directory onto a symlink (``ENOTDIR``), so the
+        restore must not pick that name: the planted link stays and the tree
+        lands on a timestamped name instead.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        albums = data / "albums"
+        albums.mkdir(parents=True)
+        item = self._dir_item(td, "dir_a", "albums/folder", "a.txt", b"A")
+        victim = albums / "victim.txt"
+        victim.write_bytes(b"victim")
+        link = albums / "folder"
+        link.symlink_to(victim)
+
+        assert restore_from_trash(item.name, data) is True
+        assert link.is_symlink(), "a directory payload must not take a symlink's name"
+        assert victim.read_bytes() == b"victim"
+        restored = list(albums.glob("folder_*"))
+        assert len(restored) == 1
+        assert (restored[0] / "a.txt").read_bytes() == b"A"
+        assert list_trash(data) == []
+
+    def test_directory_restore_succeeds_onto_a_dangling_symlink_name(self, tmp_path):
+        """A dangling symlink at the destination must not fail the restore.
+
+        ``rename(2)`` refuses a directory onto a symlink (``ENOTDIR``) whatever
+        the symlink points at, dangling included, so the restore has to pick
+        another name: the tree lands on a timestamped one and the restore
+        reports success instead of leaving the item in the trash.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        albums = data / "albums"
+        albums.mkdir(parents=True)
+        item = self._dir_item(td, "dir_a", "albums/folder", "a.txt", b"A")
+        link = albums / "folder"
+        link.symlink_to(albums / "missing.txt")
+
+        assert restore_from_trash(item.name, data) is True
+        assert link.is_symlink(), "a directory payload must not take a symlink's name"
+        restored = list(albums.glob("folder_*"))
+        assert len(restored) == 1
+        assert (restored[0] / "a.txt").read_bytes() == b"A"
+        assert list_trash(data) == []
+
+    def test_concurrent_restores_via_a_symlinked_album_dir_retain_both_payloads(
+        self, monkeypatch, tmp_path
+    ):
+        """Two ``original`` paths reaching one directory share one reservation.
+
+        ``albums`` and its alias can name the same directory, so the claim key
+        has to be the directory itself: keyed on the path as written, the two
+        restores reserve different files and overwrite each other again.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        (data / "alias").symlink_to(data / "albums")
+        first = self._file_item(td, "a.bin", "alias/photo.png", b"A")
+        self._file_item(td, "b.bin", "albums/photo.png", b"B")
+
+        real_rename = trash._rename_onto_dest
+        rival_results: list[bool] = []
+
+        def interleaved_rename(src, dest, dest_fd):
+            if src == first and not rival_results:
+                rival_results.append(restore_from_trash("b.bin", data))
+            return real_rename(src, dest, dest_fd)
+
+        monkeypatch.setattr(trash, "_rename_onto_dest", interleaved_rename)
+
+        assert restore_from_trash("a.bin", data) is True
+        assert rival_results == [True]
+        assert sorted(p.read_bytes() for p in (data / "albums").glob("photo*")) == [b"A", b"B"]
+        assert list_trash(data) == []
+
+    def test_claim_files_are_bookkeeping_for_the_trash_sweeps(self, monkeypatch, tmp_path):
+        """Claim files are not trash items, and only free+aged ones retire."""
+        import fcntl
+        import os
+
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        dest = data / "albums/photo.txt"
+        dest.write_bytes(b"occupied")
+
+        assert restore_from_trash(item.name, data) is True
+        claims = [p for p in td.iterdir() if trash._is_restore_claim_name(p.name)]
+        assert claims, "the reservation must leave a claim file in the trash dir"
+        claim = trash._restore_claim_path(td, data.resolve() / "albums/photo.txt")
+        assert claim in claims
+
+        # Neither listed nor deleted, and not counted as deleted trash.
+        assert list_trash(data) == []
+        assert trash.empty_trash(data) == 0
+        assert purge_old_trash(data, retention_days=30) == 0
+        assert claim.exists()
+
+        # A live holder protects the claim even with the grace switched off:
+        # freeing it would let the next reservation create a second inode for
+        # the same destination, and two inodes means no mutual exclusion.
+        fh = os.open(claim, os.O_RDWR)
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+            trash.empty_trash(data)
+            assert claim.exists(), "maintenance must not free a claim a restore holds"
+        finally:
+            os.close(fh)
+
+        # Free and past the grace: retired with the rest of the debris.
+        trash.empty_trash(data)
+        assert not claim.exists()
+        assert list_trash(data) == []
+
+    def test_restore_without_fcntl_fails_closed(self, monkeypatch, tmp_path):
+        """Without flock support the restore refuses instead of racing."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        dest = data / "albums/photo.txt"
+        dest.write_bytes(b"occupied")
+
+        monkeypatch.setattr(trash, "fcntl", None)
+
+        # Without the claim the restore cannot tell an owned destination from
+        # a free one, and POSIX rename overwrites: renaming anyway would
+        # restore the check-then-rename race the claim closes (issue #608).
+        with pytest.raises(trash.RestoreDestinationUnavailable):
+            restore_from_trash(item.name, data)
+        assert dest.read_bytes() == b"occupied"
+        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
+        assert [p for p in td.iterdir() if trash._is_restore_claim_name(p.name)] == []
+
+    def test_unreservable_destination_never_overwrites_an_existing_file(self, monkeypatch, tmp_path):
+        """A destination that cannot be reserved is never renamed onto.
+
+        The check-then-rename order this issue removed lost a payload when two
+        restores shared one ``original`` path. The lockless fallback kept
+        that window open: a restore that cannot lock the claim probed the
+        destination and renamed onto it anyway, so a second restore could
+        overwrite the first payload. The restore must fail closed instead.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        dest = data / "albums/photo.txt"
+        dest.write_bytes(b"occupied")
+
+        def unsupported_flock(*args, **kwargs):
+            raise OSError(errno.ENOLCK, "flock unsupported")
+
+        monkeypatch.setattr(trash.fcntl, "flock", unsupported_flock)
+
+        with pytest.raises(trash.RestoreDestinationUnavailable):
+            restore_from_trash(item.name, data)
+        # The existing file keeps its bytes: nothing was renamed onto it, and
+        # the payload is still in the trash for a retry.
+        assert dest.read_bytes() == b"occupied"
+        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
+
+    def test_failed_restore_releases_the_source_lock(self, monkeypatch, tmp_path):
+        """A failed restore must not leave the trash item locked.
+
+        The source lock lives on the item's metadata file. If a failed restore
+        kept it, the next restore of the same item would fail with
+        ``SOURCE_LOCK_HELD`` even though nothing else holds the item, and the
+        item would sit in the trash forever.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+
+        def no_locking(*args, **kwargs):
+            return None, trash.RESTORE_CLAIM_UNSUPPORTED, "the reservation is unavailable"
+
+        monkeypatch.setattr(trash, "_acquire_restore_claim", no_locking)
+        with pytest.raises(trash.RestoreDestinationUnavailable):
+            restore_from_trash(item.name, data)
+        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
+
+        # The source lock is gone: the same item restores once the
+        # reservation works again, and it keeps its bytes.
+        monkeypatch.undo()
+        assert restore_from_trash(item.name, data) is True
+        assert (data / "albums/photo.txt").read_bytes() == b"payload"
+
+    def test_symlinked_claim_fails_the_restore_closed(self, monkeypatch, tmp_path):
+        """A claim path planted as a symlink is never opened through."""
+        import fcntl
+        import os
+
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        victim = data / "victim.txt"
+        victim.write_text("victim")
+        claim = trash._restore_claim_path(td, data.resolve() / "albums/photo.txt")
+        claim.symlink_to(victim)
+
+        victim_lockable: list[bool] = []
+        real_rename = trash._rename_onto_dest
+
+        def check_victim(src, dest, dest_fd):
+            if src == item:
+                fd = os.open(victim, os.O_RDWR)
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError:
+                    victim_lockable.append(False)
+                else:
+                    victim_lockable.append(True)
+                finally:
+                    os.close(fd)
+            return real_rename(src, dest, dest_fd)
+
+        monkeypatch.setattr(trash, "_rename_onto_dest", check_victim)
+
+        # O_NOFOLLOW refuses to open the planted link, so the reservation for
+        # this candidate name is unusable and the restore walks on to the
+        # next candidate name. The planted link is never opened through, so
+        # the reservation never becomes an flock on whatever it points at:
+        # the victim is still free to lock at rename time.
+        assert restore_from_trash(item.name, data) is True
+        assert victim_lockable == [True]
+        assert victim.read_text() == "victim"
+        assert claim.is_symlink()
+        # The payload landed on a suffixed name, not on the reserved one.
+        restored = [p for p in (data / "albums").iterdir() if p.name != "photo.txt"]
+        assert [p.read_bytes() for p in restored] == [b"payload"]
+        assert [t["name"] for t in list_trash(data)] == []
+
+    def test_failed_restore_releases_the_reservation(self, monkeypatch, tmp_path):
+        """A failed restore must not pin the destination name it wanted."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        first = self._file_item(td, "a.bin", "albums/photo.txt", b"first")
+        self._file_item(td, "b.bin", "albums/photo.txt", b"second")
+
+        real_rename = trash._rename_onto_dest
+
+        def failing_first_rename(src, dest, dest_fd):
+            if src == first:
+                raise OSError("disk full")
+            return real_rename(src, dest, dest_fd)
+
+        monkeypatch.setattr(trash, "_rename_onto_dest", failing_first_rename)
+        assert restore_from_trash("a.bin", data) is False
+        monkeypatch.undo()
+
+        # The rival gets the original name, not a timestamped fallback, and the
+        # failed item stays in trash for its own retry.
+        assert restore_from_trash("b.bin", data) is True
+        assert (data / "albums/photo.txt").read_bytes() == b"second"
+        assert [t["name"] for t in list_trash(data)] == ["a.bin"]
+
+    def test_concurrent_directory_restores_retain_both_trees_across_devices(
+        self, monkeypatch, tmp_path
+    ):
+        """The cross-device staging fallback reserves the same destination."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        first = self._dir_item(td, "dir_a", "album", "a.txt", b"A")
+        self._dir_item(td, "dir_b", "album", "b.txt", b"B")
+        trash_root = td.resolve()
+
+        real_rename = trash._rename_onto_dest
+        rival_results: list[bool] = []
+
+        def cross_device_rename(src, dest, dest_fd):
+            # Every rename out of the trash fails, so both restores must use
+            # the staged copytree fallback; the rival runs while the first one
+            # holds the reservation for ``album``.
+            resolved = src.resolve()
+            if trash_root in resolved.parents or resolved == trash_root:
+                if src == first and not rival_results:
+                    rival_results.append(restore_from_trash("dir_b", data))
+                raise OSError("cross-device")
+            return real_rename(src, dest, dest_fd)
+
+        monkeypatch.setattr(trash, "_rename_onto_dest", cross_device_rename)
+
+        assert restore_from_trash("dir_a", data) is True
+        assert rival_results == [True]
+        # The staged restore that reserved ``album`` first keeps the name; the
+        # rival staged its way to a timestamped one instead.
+        assert (data / "album" / "a.txt").read_bytes() == b"A"
+        renamed = [p for p in data.iterdir() if p.is_dir() and p.name.startswith("album_")]
+        assert len(renamed) == 1
+        assert (renamed[0] / "b.txt").read_bytes() == b"B"
+        stages = [p for p in data.rglob(f"{trash.STAGE_PREFIX}*")]
+        assert stages == [], f"stage directory leaked: {stages}"
+        assert list_trash(data) == []
+
+    def test_claim_reclaim_keeps_claims_it_cannot_verify(self, monkeypatch, tmp_path):
+        """No lock verdict means no delete, however old the claim looks."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        claim = trash._restore_claim_path(td, data.resolve() / "album/photo.txt")
+        claim.write_text("")
+
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+        monkeypatch.setattr(trash, "fcntl", None)
+        trash._reclaim_restore_claims(td)
+        assert claim.exists(), "an unverifiable claim must survive upkeep"
+
+    def test_claim_reclaim_never_resurrects_a_vanished_claim(self, monkeypatch, tmp_path):
+        """Upkeep tolerates bookkeeping another sweep retired first.
+
+        Two workers can run the same sweep, so a claim can be gone between this
+        sweep's listing and its reservation. The sweep must neither raise (a
+        sweep runs inside request handlers) nor recreate the file: a fresh
+        inode for a name somebody else still holds breaks the one-inode rule
+        the reservation depends on.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        claim = trash._restore_claim_path(td, data.resolve() / "album/photo.txt")
+        claim.write_text("")
+
+        real_acquire = trash._acquire_restore_claim
+
+        def rival_retired(claim_path, create=True):
+            claim_path.unlink(missing_ok=True)
+            return real_acquire(claim_path, create=create)
+
+        monkeypatch.setattr(trash, "_acquire_restore_claim", rival_retired)
+        trash._reclaim_restore_claims(td)
+        assert not claim.exists(), "upkeep must not recreate a claim it did not reserve"
+
+        monkeypatch.setattr(trash, "_acquire_restore_claim", real_acquire)
+
+        def vanished_trash_dir(self):
+            raise OSError("trash directory vanished")
+
+        monkeypatch.setattr(trash.Path, "iterdir", vanished_trash_dir)
+        trash._reclaim_restore_claims(td)
+
+    def test_claim_retired_between_open_and_lock_is_not_a_reservation(
+        self, monkeypatch, tmp_path
+    ):
+        """A restore must never end up holding a lock on a retired claim inode.
+
+        The sweep locks a claim before it unlinks it, so a restore whose
+        ``flock`` attempt lands before the sweep's is refused — but a restore
+        that *opened* the claim first and only attempts its ``flock`` after the
+        sweep has locked, unlinked, and released then locks an inode that is
+        no longer in the trash directory. That lock excludes nobody: the next
+        restore creates a fresh inode for the same destination and reserves
+        it too, so both restores would rename onto one destination and one
+        payload would be lost (issue #608). The lock must therefore only count
+        as a reservation while the descriptor still refers to the claim file.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        claim = trash._restore_claim_path(td, data.resolve() / "album/photo.txt")
+        claim.write_text("")
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+
+        real_flock = trash.fcntl.flock
+        swept = False
+
+        def flock_after_sweep(fd, operation):
+            nonlocal swept
+            if not swept:
+                swept = True
+                trash._reclaim_restore_claims(td)
+            return real_flock(fd, operation)
+
+        monkeypatch.setattr(trash.fcntl, "flock", flock_after_sweep)
+
+        fd, state, _reason = trash._acquire_restore_claim(claim)
+        assert state == trash.RESTORE_CLAIM_UNUSABLE, (
+            "a lock on an inode the sweep retired must not be a reservation"
+        )
+        assert fd is None
+
+        fd, state, _reason = trash._acquire_restore_claim(claim)
+        assert state == trash.RESTORE_CLAIM_ACQUIRED
+        trash._release_restore_claim(fd)
+
+    def test_claim_reclaim_never_unlinks_a_replaced_claim(self, monkeypatch, tmp_path):
+        """The sweep retires only the inode it locked, never a live replacement.
+
+        A claim file can be replaced between this sweep's reservation and its
+        unlink (another sweep retired the old inode and a restore created a
+        fresh one). Unlinking by name would then destroy a live claim's file
+        behind the lock the replacement's holder relies on, so the sweep must
+        prove the locked inode is still the one at the path before unlinking.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        claim = trash._restore_claim_path(td, data.resolve() / "album/photo.txt")
+        claim.write_text("")
+        monkeypatch.setattr(trash, "STAGE_ABANDON_GRACE_SECONDS", -1)
+
+        real_grace = trash._exceeds_abandon_grace
+
+        def grace_after_replacement(path, grace_seconds=None):
+            if path == claim:
+                claim.unlink(missing_ok=True)
+                claim.write_text("")
+            return real_grace(path, grace_seconds)
+
+        monkeypatch.setattr(trash, "_exceeds_abandon_grace", grace_after_replacement)
+        trash._reclaim_restore_claims(td)
+        assert claim.exists(), "the sweep must not retire a claim it did not lock"
+
+
 class TestActiveRestoreStageProtection:
     """Regression tests for issue #557: trash maintenance must never
     reclaim a ``.restore-stage-*`` directory that an in-flight cross-device
@@ -2438,6 +2993,34 @@ class TestRestorePathTraversal:
         # Nothing was read, created, or deleted in the trash directory.
         assert list(td.iterdir()) == []
 
+    def test_restore_rejects_null_byte_in_meta_original(self, monkeypatch, tmp_path):
+        """A null byte in the stored original path is refused, not crashed on.
+
+        The stored path never reaches the filesystem: resolving it raises the
+        ``ValueError`` the restore route turns into a flash message, and the
+        trash entry stays intact for a retry.
+        """
+        from trash import restore_from_trash, trash_dir
+
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        td = trash_dir(data_dir)
+        td.mkdir(parents=True, exist_ok=True)
+
+        fake_item = td / "fake_item.txt"
+        fake_item.write_text("harmless")
+        meta_file = td / "fake_item.txt.meta.json"
+        meta_file.write_text(
+            json.dumps({"original": "albums/bad\x00name.txt", "deleted_at": 0})
+        )
+
+        with pytest.raises(ValueError):
+            restore_from_trash("fake_item.txt", data_dir)
+
+        # The entry stays in the trash: nothing was consumed.
+        assert fake_item.exists()
+        assert meta_file.exists()
+
     def test_restore_rejects_malicious_meta_original(self, monkeypatch, tmp_path):
         """Even if item_name is valid, a crafted .meta.json 'original' must not escape."""
         from trash import restore_from_trash, trash_dir
@@ -2837,3 +3420,50 @@ class TestTrashPurgeValidation:
         assert not expired.exists(), "the sweep must continue past the failed entry"
         assert victim.exists()
         assert victim.with_name(victim.name + trash.META_SUFFIX).exists()
+
+    def test_trash_restore_route_reports_an_unreservable_destination(self, monkeypatch, tmp_path):
+        """A restore that cannot reserve its destination reports the reason.
+
+        The route must not report the failure as a rejected request: the
+        destination could not be reserved because the file system refused the
+        lock, so the item stays in the trash and the user is told why.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+        td = trash.trash_dir(data_dir)
+        item = td / "a.bin"
+        item.write_bytes(b"payload")
+        item.with_name(item.name + trash.META_SUFFIX).write_text(
+            json.dumps({"original": "photo.txt", "deleted_at": "2026-01-01T00:00:00+00:00"})
+        )
+
+        def no_locking(*args, **kwargs):
+            return None, trash.RESTORE_CLAIM_UNSUPPORTED, "the reservation is unavailable"
+
+        monkeypatch.setattr(trash, "_acquire_restore_claim", no_locking)
+
+        login_resp = client.get("/login")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', login_resp.data.decode())
+        assert csrf_match, "CSRF token not found in login form"
+        login_csrf = csrf_match.group(1)
+        auth_resp = client.post(
+            "/auth",
+            data={"password": "pass123", "next": "/", "csrf_token": login_csrf},
+            follow_redirects=False,
+        )
+        assert auth_resp.status_code == 302
+
+        trash_resp = client.get("/trash")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', trash_resp.data.decode())
+        assert csrf_match, "CSRF token not found on trash page"
+        csrf_token = csrf_match.group(1)
+
+        response = client.post(
+            "/trash/restore/a.bin",
+            data={"csrf_token": csrf_token},
+            follow_redirects=True,
+        )
+
+        assert response.status_code == 200
+        assert b"the destination could not be reserved" in response.data
+        # The item is still in the trash and its payload is untouched.
+        assert [t["name"] for t in list_trash(data_dir)] == ["a.bin"]
