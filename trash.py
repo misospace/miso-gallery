@@ -348,11 +348,14 @@ def _release_restore_claim(claim_fd) -> None:
 def _restore_dest_is_occupied(candidate: Path, payload_is_dir: bool) -> bool:
     """True when a restore must not rename its payload onto *candidate*.
 
-    The rename targets the *unresolved* destination path, so a symlink
-    sitting there is swapped out by the rename itself and never written
-    through to its target: the link's own target is left untouched, and the
-    payload takes the link's place. A file payload may therefore take a name
-    a symlink holds.
+    The restore renames onto the *unresolved* destination path, and
+    ``rename(2)`` does not follow a symlink in the final component: the link
+    itself is swapped out, so the file it pointed at keeps its own bytes and
+    is never written through. A file payload may therefore take a name a
+    symlink holds. (This is about the final component only — the kernel still
+    resolves the intermediate ones, so a symlinked *parent* directory is a
+    separate concern; see the escape guard in ``restore_from_trash`` and
+    issue #615.)
 
     A directory payload may not: ``rename(2)`` refuses a directory onto a
     symlink (``ENOTDIR``), whatever the symlink points at. For a directory
@@ -418,13 +421,16 @@ def _reserve_restore_dest(
         if state == RESTORE_CLAIM_ACQUIRED:
             if not _restore_dest_is_occupied(candidate, payload_is_dir):
                 return candidate, claim_fd
-            # A finished restore released this claim and left its payload at
-            # the candidate; hand the claim back and try the next name.
+            # The candidate is taken: either a finished restore released this
+            # claim and left its payload at the candidate, or a symlink sits
+            # there (a directory payload cannot replace one). Hand the claim
+            # back and try the next name.
             _release_restore_claim(claim_fd)
         elif state == RESTORE_CLAIM_UNAVAILABLE and not _restore_dest_is_occupied(
             candidate, payload_is_dir
         ):
-            # Lockless fallback: the historical probe-only choice.
+            # Lockless fallback: the same probe, without the mutual exclusion
+            # a claim provides.
             return candidate, None
         name = f"{dest.stem}_{ts}{dest.suffix}"
         ts += 1
@@ -526,19 +532,20 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
             return False
         if not (str(resolved_dest).startswith(str(resolved_data) + "/") or resolved_dest == resolved_data):
             # A symlink at the destination resolves to its target here, so a
-            # link pointing out of the data folder refuses the whole restore.
-            # The rename itself would replace the link instead of writing
+            # link whose target escapes the data folder refuses the whole
+            # restore. The rename would replace the link instead of writing
             # through it, so this is stricter than the rename needs; it is
-            # kept deliberately: the destination path must stay inside the
-            # data folder either way.
+            # kept deliberately. The check resolves the final component as
+            # well, so a symlinked *parent* directory can still hide an
+            # escape — tracked in #615.
             raise ValueError(f"Destination path escapes data folder: {rel!r}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Reserve the destination before anything is renamed onto it, so a
         # concurrent restore of another trash item with the same ``original``
         # cannot land on the same name (see ``_reserve_restore_dest``). The
         # claim is keyed on the resolved parent (it exists by now); *dest*
-        # stays unresolved so the rename below replaces a planted symlink at
-        # the destination instead of writing through it.
+        # stays unresolved so the rename below replaces a symlink at the
+        # destination instead of writing through it.
         dest, claim_fd = _reserve_restore_dest(
             td, dest, dest.parent.resolve(), payload_is_dir=item.is_dir()
         )

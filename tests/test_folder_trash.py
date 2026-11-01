@@ -1237,6 +1237,29 @@ class TestConcurrentRestoreDestinationAllocation:
         assert (restored[0] / "a.txt").read_bytes() == b"A"
         assert list_trash(data) == []
 
+    def test_directory_restore_succeeds_onto_a_dangling_symlink_name(self, tmp_path):
+        """A dangling symlink at the destination must not fail the restore.
+
+        ``rename(2)`` refuses a directory onto a symlink (``ENOTDIR``) whatever
+        the symlink points at, dangling included, so the restore has to pick
+        another name: the tree lands on a timestamped one and the restore
+        reports success instead of leaving the item in the trash.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        albums = data / "albums"
+        albums.mkdir(parents=True)
+        item = self._dir_item(td, "dir_a", "albums/folder", "a.txt", b"A")
+        link = albums / "folder"
+        link.symlink_to(albums / "missing.txt")
+
+        assert restore_from_trash(item.name, data) is True
+        assert link.is_symlink(), "a directory payload must not take a symlink's name"
+        restored = list(albums.glob("folder_*"))
+        assert len(restored) == 1
+        assert (restored[0] / "a.txt").read_bytes() == b"A"
+        assert list_trash(data) == []
+
     def test_concurrent_restores_via_a_symlinked_album_dir_retain_both_payloads(
         self, monkeypatch, tmp_path
     ):
@@ -2210,9 +2233,9 @@ class TestRestorePathTraversal:
     def test_restore_rejects_null_byte_in_meta_original(self, monkeypatch, tmp_path):
         """A null byte in the stored original path is refused, not crashed on.
 
-        The stored path never reaches the filesystem: the guard raises the
-        canonical ``ValueError`` the restore route turns into a flash
-        message, and the trash entry stays intact for a retry.
+        The stored path never reaches the filesystem: resolving it raises the
+        ``ValueError`` the restore route turns into a flash message, and the
+        trash entry stays intact for a retry.
         """
         from trash import restore_from_trash, trash_dir
 
