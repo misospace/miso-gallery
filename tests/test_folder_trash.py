@@ -191,6 +191,25 @@ def test_trash_claim_skips_inflight_claim_and_metaless_item(tmp_path, monkeypatc
     assert not (td / "1234_photo.png").exists()
 
 
+def test_empty_trash_keeps_live_claim_sidecar(tmp_path):
+    """A claimed sidecar whose mover has not renamed its payload onto the
+    name yet must survive an ``empty_trash`` sweep: reclaiming it would
+    re-open the name to a second claimer and let the two renames clobber a
+    payload (#606). The stale-meta reclaim only collects lone sidecars once
+    they exceed the claim grace."""
+    data = tmp_path / "data"
+    data.mkdir()
+    td = trash.trash_dir(data)
+    dest = trash._claim_trash_dest(td, "photo.png", 1234)
+    assert dest == td / "1234_photo.png"
+
+    assert trash.empty_trash(data) == 0
+    assert trash._meta_path(dest).exists()
+    # The name stays pinned while the claim is fresh, so the next claimant
+    # is forced to a different destination.
+    assert trash._claim_trash_dest(td, "photo.png", 1234) == td / "1234_1_photo.png"
+
+
 def test_list_trash_ignores_corrupt_metadata_and_unreadable_entries(tmp_path, monkeypatch):
     data = tmp_path / "data"
     td = trash.trash_dir(data)
@@ -1801,16 +1820,21 @@ class TestSourceLockProtectsTrashSource:
         assert not meta_file.exists()
 
     def test_stale_meta_without_item_is_reclaimed_by_empty(self, monkeypatch, tmp_path):
-        """A meta file with no paired item is stale: unlink it, count 1.
+        """A meta file with no paired item past the claim grace is stale:
+        unlink it, count 1.
 
         Deleting the meta before the item would strip the item of its lock
         file, so a meta whose item still exists is left for the item's own
-        iteration; a lone meta needs no lock check.
+        iteration. A lone meta inside the claim grace may belong to an
+        in-flight delete (#606, see test_empty_trash_keeps_live_claim_sidecar);
+        aging the clock here models the crashed owner whose grace elapsed.
         """
         client, data_dir = build_client(monkeypatch, tmp_path)
         td = trash.trash_dir(data_dir)
         stale = td / "ghost.txt.meta.json"
         stale.write_text(json.dumps({"original": "ghost.txt"}))
+        now = time.time()
+        monkeypatch.setattr(trash.time, "time", lambda: now + 25 * 86400)
 
         assert trash.empty_trash(data_dir) == 1
         assert not stale.exists()

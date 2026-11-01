@@ -31,6 +31,15 @@ STAGE_LOCK_SUFFIX = ".lock"
 # duration so a slow or lock-deprived copy is never clobbered.
 STAGE_ABANDON_GRACE_SECONDS = 24 * 3600
 
+# A trash metadata sidecar with no paired item is either a crashed claim or
+# an in-flight one whose mover has not renamed its payload onto the name
+# yet (``_claim_trash_dest`` creates the sidecar *before* the move). Deleting
+# a live claim's sidecar re-opens the name to a second claimer and the two
+# renames then clobber a payload (#606), so lone sidecars are only reclaimed
+# past this grace, which must exceed any plausible move duration
+# (cross-device copytree included) — mirroring the stage-abandon policy.
+CLAIM_ABANDON_GRACE_SECONDS = 24 * 3600
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -68,8 +77,9 @@ def _claim_trash_dest(td: Path, name: str, ts: int) -> Path | None:
     existence loop cannot do that, because POSIX ``rename`` overwrites and
     two deletes that both pass the loop would clobber each other (issue
     #606). A failed move must release the claim by unlinking the sidecar;
-    a crash between claim and move leaves only a stale meta, which
-    ``empty_trash`` already reclaims.
+    a crash between claim and move leaves only a lone sidecar, which
+    ``empty_trash`` reclaims once it exceeds ``CLAIM_ABANDON_GRACE_SECONDS``
+    (never while it may still belong to an in-flight mover).
     """
     i = 0
     while True:
@@ -478,7 +488,11 @@ def empty_trash(data_folder: Path) -> int:
     Each deleted directory entry (an item or a meta file) counts 1. A meta
     file whose paired item still exists is left for the item's own
     iteration (deleting the meta first would strip the item of its lock
-    file); a meta file with no item is stale and is unlinked directly.
+    file); a meta file with no item is stale *and older than
+    ``CLAIM_ABANDON_GRACE_SECONDS``* and is unlinked directly. A lone meta
+    newer than that grace may belong to an in-flight delete (the sidecar is
+    created before the payload is renamed), so it is skipped, not counted
+    (#606).
 
     For a real item, maintenance ACQUIRES (not merely probes) the source
     lock on the meta file and holds it across the delete of both the item
@@ -507,6 +521,14 @@ def empty_trash(data_folder: Path) -> int:
                 if item.with_name(item.name[:-len(META_SUFFIX)]).exists():
                     continue
                 if item.exists():
+                    if not _exceeds_abandon_grace(item, CLAIM_ABANDON_GRACE_SECONDS):
+                        # A lone sidecar fresher than the claim grace is
+                        # indistinguishable from an in-flight delete whose
+                        # mover created the sidecar moments ago but has not
+                        # renamed its payload yet; unlinking it would re-open
+                        # the name to a second claimer and let the two
+                        # renames clobber (#606). Leave it for a later sweep.
+                        continue
                     try:
                         item.unlink(missing_ok=True)
                     except OSError as exc:
@@ -756,18 +778,22 @@ def _stage_lock_state(lock_path: Path):
     return False
 
 
-def _exceeds_abandon_grace(path: Path) -> bool:
-    """True if *path*'s inode is older than the explicit abandon grace.
+def _exceeds_abandon_grace(path: Path, grace_seconds: float | None = None) -> bool:
+    """True if *path*'s inode is older than the given abandon grace.
 
-    Uses ``st_ctime`` rather than ``st_mtime`` because ``copytree`` applies
-    the *source's* mtimes to the copy, which would make a freshly copied
-    stage of old media look old.
+    *grace_seconds* defaults to ``STAGE_ABANDON_GRACE_SECONDS``, read at
+    call time so tests (and future policy changes) can retune the module
+    constant. Uses ``st_ctime`` rather than ``st_mtime`` because
+    ``copytree`` applies the *source's* mtimes to the copy, which would
+    make a freshly copied stage of old media look old.
     """
+    if grace_seconds is None:
+        grace_seconds = STAGE_ABANDON_GRACE_SECONDS
     try:
         st = path.stat()
     except OSError:
         return False
-    return (time.time() - st.st_ctime) > STAGE_ABANDON_GRACE_SECONDS
+    return (time.time() - st.st_ctime) > grace_seconds
 
 
 def _remove_stage(stage: Path) -> None:
