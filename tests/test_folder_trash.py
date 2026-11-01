@@ -17,6 +17,7 @@ import contextlib
 import errno
 import json
 import re
+import threading
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -81,6 +82,113 @@ def test_move_to_trash_falls_back_to_copy_and_cleans_partial_copy(tmp_path, monk
     assert source.exists()
     assert not any(path.name.startswith("broken") for path in trash.trash_dir(data).iterdir())
     monkeypatch.setattr(trash.shutil, "copytree", original_copytree)
+
+
+def _concurrent_delete_with_claim_barrier(monkeypatch, paths, data):
+    """Run ``move_to_trash`` for each path in its own thread, synchronizing
+    every thread right after its destination claim returns and pinning the
+    clock so all deletes target the same candidate names.
+
+    This pins the issue #606 interleaving: under the old check-then-rename
+    scheme every thread would pass the existence loop before any rename,
+    so all of them picked the same destination and the later ``rename``
+    clobbered the earlier payload.
+    """
+    real_claim = trash._claim_trash_dest
+    barrier = threading.Barrier(len(paths), timeout=10)
+
+    def claim_then_sync(td, name, ts):
+        dest = real_claim(td, name, ts)
+        barrier.wait()
+        return dest
+
+    monkeypatch.setattr(trash, "_claim_trash_dest", claim_then_sync)
+    monkeypatch.setattr(trash.time, "time", lambda: 1234)
+    results = {}
+
+    def run(path):
+        results[str(path)] = move_to_trash(path, data)
+
+    threads = [threading.Thread(target=run, args=(path,)) for path in paths]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    return results
+
+
+def test_concurrent_file_deletes_keep_both_payloads(tmp_path, monkeypatch):
+    """Two same-second deletes of same-basename files must both succeed with
+    their payload and original-path metadata intact (issue #606)."""
+    data = tmp_path / "data"
+    (data / "a").mkdir(parents=True)
+    (data / "b").mkdir()
+    (data / "a/photo.png").write_text("first")
+    (data / "b/photo.png").write_text("second")
+
+    results = _concurrent_delete_with_claim_barrier(
+        monkeypatch, [data / "a/photo.png", data / "b/photo.png"], data
+    )
+
+    assert results == {str(data / "a/photo.png"): True, str(data / "b/photo.png"): True}
+    assert not (data / "a/photo.png").exists()
+    assert not (data / "b/photo.png").exists()
+    td = trash.trash_dir(data)
+    items = [p for p in td.iterdir() if not p.name.endswith(trash.META_SUFFIX)]
+    assert len(items) == 2
+    payload_original_pairs = set()
+    for item in items:
+        meta = json.loads(trash._meta_path(item).read_text())
+        payload_original_pairs.add((item.read_text(), meta["original"]))
+    assert payload_original_pairs == {("first", "a/photo.png"), ("second", "b/photo.png")}
+
+
+def test_concurrent_folder_deletes_keep_both_trees(tmp_path, monkeypatch):
+    """The claim also guards same-second deletes of same-name folders."""
+    data = tmp_path / "data"
+    (data / "a/album").mkdir(parents=True)
+    (data / "b/album").mkdir(parents=True)
+    (data / "a/album/marker.txt").write_text("first")
+    (data / "b/album/marker.txt").write_text("second")
+
+    results = _concurrent_delete_with_claim_barrier(
+        monkeypatch, [data / "a/album", data / "b/album"], data
+    )
+
+    assert results == {str(data / "a/album"): True, str(data / "b/album"): True}
+    assert not (data / "a/album").exists()
+    assert not (data / "b/album").exists()
+    td = trash.trash_dir(data)
+    items = [p for p in td.iterdir() if not p.name.endswith(trash.META_SUFFIX)]
+    assert len(items) == 2
+    payload_original_pairs = set()
+    for item in items:
+        meta = json.loads(trash._meta_path(item).read_text())
+        payload_original_pairs.add(((item / "marker.txt").read_text(), meta["original"]))
+    assert payload_original_pairs == {("first", "a/album"), ("second", "b/album")}
+
+
+def test_trash_claim_skips_inflight_claim_and_metaless_item(tmp_path, monkeypatch):
+    """A sidecar with no item (an in-flight or crashed concurrent delete) and
+    a legacy item with no sidecar both force the next candidate name, so the
+    delete never renames onto an occupied destination."""
+    data = tmp_path / "data"
+    data.mkdir()
+    td = trash.trash_dir(data)
+    (td / "1234_photo.png.meta.json").write_text("")
+    legacy = td / "1234_1_photo.png"
+    legacy.write_text("legacy")
+    src = data / "photo.png"
+    src.write_text("new")
+
+    monkeypatch.setattr(trash.time, "time", lambda: 1234)
+    assert move_to_trash(src, data) is True
+
+    assert (td / "1234_2_photo.png").read_text() == "new"
+    meta = json.loads((td / "1234_2_photo.png.meta.json").read_text())
+    assert meta["original"] == "photo.png"
+    assert legacy.read_text() == "legacy"
+    assert not (td / "1234_photo.png").exists()
 
 
 def test_list_trash_ignores_corrupt_metadata_and_unreadable_entries(tmp_path, monkeypatch):

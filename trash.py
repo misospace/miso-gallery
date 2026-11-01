@@ -4,6 +4,7 @@ import contextlib
 import errno
 import json
 import logging
+import os
 import shutil
 import time
 import uuid
@@ -49,14 +50,43 @@ def _parse_deleted_at(raw: str) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
-def _unique_trash_dest(td: Path, name: str, ts: int) -> Path:
-    """Pick a non-clashing destination path under the trash dir."""
-    dest = td / f"{ts}_{name}"
-    i = 1
-    while dest.exists():
-        dest = td / f"{ts}_{i}_{name}"
-        i += 1
-    return dest
+def _claim_trash_dest(td: Path, name: str, ts: int) -> Path | None:
+    """Atomically claim a non-clashing destination path under the trash dir.
+
+    Returns the destination whose metadata sidecar this call has just
+    created, or ``None`` if no sidecar could be created (e.g. the trash
+    directory became unwritable).
+
+    The sidecar ``<dest>.meta.json`` is created with ``O_CREAT | O_EXCL``,
+    which is atomic across threads *and* processes, and it doubles as the
+    reservation token: every completed move writes exactly that sidecar for
+    its item, so a candidate whose sidecar exists is already owned by
+    another delete (or by a crashed one, until maintenance reclaims the
+    stale meta). The ``dest.exists()`` probe additionally covers legacy
+    items whose sidecar write failed. The exclusive create then closes the
+    window between those probes and the caller's ``rename`` — a bare
+    existence loop cannot do that, because POSIX ``rename`` overwrites and
+    two deletes that both pass the loop would clobber each other (issue
+    #606). A failed move must release the claim by unlinking the sidecar;
+    a crash between claim and move leaves only a stale meta, which
+    ``empty_trash`` already reclaims.
+    """
+    i = 0
+    while True:
+        dest = td / f"{ts}_{name}" if i == 0 else td / f"{ts}_{i}_{name}"
+        try:
+            if dest.exists():
+                i += 1
+                continue
+            fd = os.open(_meta_path(dest), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            i += 1
+            continue
+        except OSError:
+            return None
+        with contextlib.suppress(OSError):
+            os.close(fd)
+        return dest
 
 
 def dir_size(path: Path) -> int:
@@ -95,6 +125,13 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
 
     Returns True on success, False if the path does not exist or is inaccessible.
     For directories, the entire tree is moved atomically via rename.
+
+    The destination is claimed atomically before the move (see
+    ``_claim_trash_dest``), so a concurrent delete in this process or any
+    other worker can never select the same path and have its payload
+    silently overwritten by the loser's ``rename`` (issue #606). A failed
+    move releases the claim so the trash dir keeps no residue for the
+    retry beyond what maintenance already reclaims.
     """
     if not file_path.exists():
         return False
@@ -104,13 +141,19 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
     ts = int(time.time())
 
     if file_path.is_file():
-        dest = _unique_trash_dest(td, file_path.name, ts)
+        dest = _claim_trash_dest(td, file_path.name, ts)
+        if dest is None:
+            return False
         try:
             file_path.rename(dest)
         except OSError:
+            with contextlib.suppress(OSError):
+                _meta_path(dest).unlink(missing_ok=True)
             return False
     elif file_path.is_dir():
-        dest = _unique_trash_dest(td, file_path.name, ts)
+        dest = _claim_trash_dest(td, file_path.name, ts)
+        if dest is None:
+            return False
         try:
             # Prefer atomic rename (same filesystem) for immediate move.
             # Fall back to copytree+rmtree only when cross-device rename fails.
@@ -122,9 +165,13 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
                 shutil.copytree(file_path, dest, symlinks=True)
                 shutil.rmtree(file_path)
         except OSError:
-            # Clean up partial copy on failure
+            # Clean up partial copy on failure and release the claim. The
+            # destination can only hold our own (partial) copy: no other
+            # delete can rename onto a name whose sidecar we created.
             if dest.exists():
                 shutil.rmtree(dest, ignore_errors=True)
+            with contextlib.suppress(OSError):
+                _meta_path(dest).unlink(missing_ok=True)
             return False
     else:
         return False
