@@ -535,11 +535,23 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         dest = data_folder / rel
         try:
             resolved_dest = dest.resolve()
+            resolved_dest_parent = dest.parent.resolve()
             resolved_data = data_folder.resolve()
         except OSError:
             return False
         if not (str(resolved_dest).startswith(str(resolved_data) + "/") or resolved_dest == resolved_data):
             raise ValueError(f"Destination path escapes data folder: {rel!r}")
+        # The final component may cancel out an escape in an intermediate
+        # component (a symlinked parent pointing outside DATA_FOLDER whose
+        # target points back inside), so the resolved destination alone can
+        # look safe while rename(2) still follows the parent symlink and
+        # writes outside DATA_FOLDER. The parent is checked separately, and
+        # before any mkdir, so no directory can be created through it either
+        # (issue #615).
+        if not (
+            str(resolved_dest_parent).startswith(str(resolved_data) + "/") or resolved_dest_parent == resolved_data
+        ):
+            raise ValueError(f"Destination parent path escapes data folder: {rel!r}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         if dest.exists():
             ts = int(time.time())

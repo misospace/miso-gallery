@@ -512,6 +512,115 @@ def test_restore_rejects_escaping_original_and_purge_falls_back_to_mtime(tmp_pat
     assert not old.exists()
 
 
+def test_restore_refuses_destination_whose_parent_escapes_data_folder(tmp_path):
+    """A symlinked parent directory must not redirect a restore outside DATA_FOLDER (#615).
+
+    ``data/albums`` is a symlink to a directory outside the data folder and
+    ``outside/photo.txt`` points back inside, so the fully resolved
+    destination lands inside DATA_FOLDER and the final-component guard
+    passes. The kernel still resolves the intermediate symlink on rename(2),
+    so the payload would be written outside DATA_FOLDER. The resolved
+    *parent* is therefore checked separately, before any mkdir.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (data / "inside.txt").write_bytes(b"INSIDE")
+
+    td = trash.trash_dir(data)
+    item = td / "deleted.txt"
+    item.write_bytes(b"SECRET-PAYLOAD")
+    meta = item.with_name(item.name + trash.META_SUFFIX)
+    meta.write_text(json.dumps({"original": "albums/photo.txt"}))
+
+    # The attack: an intermediate symlink leaving DATA_FOLDER whose target
+    # points back inside, so the final component cancels the escape.
+    (data / "albums").symlink_to(outside)
+    (outside / "photo.txt").symlink_to(data / "inside.txt")
+
+    # Precondition: the fully resolved destination is inside DATA_FOLDER,
+    # i.e. the old final-component guard would have let this restore through.
+    resolved_dest = (data / "albums" / "photo.txt").resolve()
+    assert resolved_dest == (data / "inside.txt").resolve()
+    assert str(resolved_dest).startswith(str(data.resolve()) + "/")
+
+    with pytest.raises(ValueError, match="Destination parent path escapes data folder"):
+        restore_from_trash(item.name, data)
+
+    # Nothing landed outside DATA_FOLDER: the planted symlink is untouched
+    # and the payload exists only as the still-trashed item.
+    assert (outside / "photo.txt").is_symlink()
+    assert sorted(p.name for p in outside.iterdir()) == ["photo.txt"]
+    payload_hits = [
+        p
+        for p in tmp_path.rglob("*")
+        if not p.is_symlink() and p.is_file() and p.read_bytes() == b"SECRET-PAYLOAD"
+    ]
+    assert payload_hits == [item]
+
+    # The refused restore did not consume the trash item.
+    assert item.exists()
+    assert meta.exists()
+
+
+def test_restore_refuses_directory_destination_whose_parent_escapes_data_folder(tmp_path):
+    """A directory payload must not escape DATA_FOLDER through a symlinked parent (#615).
+
+    Same attack shape as the file case, but the trashed payload is a
+    directory, so the restore takes the directory branch (the fast rename,
+    or the cross-device copytree/stage fallback). The resolved *parent* check
+    must refuse the restore before any payload is moved out of the data
+    folder, whatever the final component is.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (data / "inside.txt").write_bytes(b"INSIDE")
+
+    td = trash.trash_dir(data)
+    item = td / "deleted_dir"
+    item.mkdir()
+    payload = item / "payload.txt"
+    payload.write_bytes(b"SECRET-DIR-PAYLOAD")
+    meta = item.with_name(item.name + trash.META_SUFFIX)
+    meta.write_text(json.dumps({"original": "albums/photo.txt"}))
+
+    # The attack: an intermediate symlink leaving DATA_FOLDER whose target
+    # points back inside, so the final component cancels the escape.
+    (data / "albums").symlink_to(outside)
+    (outside / "photo.txt").symlink_to(data / "inside.txt")
+
+    # Precondition: the fully resolved destination is inside DATA_FOLDER,
+    # i.e. the old final-component guard would have let this restore through.
+    resolved_dest = (data / "albums" / "photo.txt").resolve()
+    assert resolved_dest == (data / "inside.txt").resolve()
+    assert str(resolved_dest).startswith(str(data.resolve()) + "/")
+
+    with pytest.raises(ValueError, match="Destination parent path escapes data folder"):
+        restore_from_trash(item.name, data)
+
+    # Nothing landed outside DATA_FOLDER: the planted symlink is untouched
+    # and the payload still only exists inside the trash payload directory.
+    assert (outside / "photo.txt").is_symlink()
+    assert sorted(p.name for p in outside.iterdir()) == ["photo.txt"]
+    payload_hits = [
+        p
+        for p in tmp_path.rglob("*")
+        if not p.is_symlink() and p.is_file() and p.read_bytes() == b"SECRET-DIR-PAYLOAD"
+    ]
+    assert payload_hits == [payload]
+    assert all(hit.parent == item for hit in payload_hits)
+
+    # No cross-device stage was created for the refused restore.
+    assert list(data.rglob(trash.STAGE_PREFIX + "*")) == []
+
+    # The refused restore did not consume the trash item.
+    assert item.is_dir()
+    assert meta.exists()
+
+
 def test_purge_old_trash_survives_item_vanishing_mid_sweep(tmp_path, monkeypatch):
     """A restore renaming an expired entry away mid-sweep skips it (#565).
 
