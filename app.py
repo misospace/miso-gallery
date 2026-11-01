@@ -445,10 +445,34 @@ def service_worker():
 
 
 
+def _is_excluded_media_path(path: Path) -> bool:
+    """Return True when a media path must not be served publicly.
+
+    The public media routes (/images/, /view/, /thumb/) must never expose the
+    media the gallery deliberately hides: the trash directory (.trash/), the
+    thumbnail cache (.thumb_cache/) and any dot-prefixed directory or file.
+    The lexical check (is_excluded_gallery_path) covers those, but it does not
+    follow symlinks -- is_media_file() accepts a symlink whose target stays
+    inside DATA_FOLDER, so <data>/link.png -> <data>/.trash/secret.png would
+    still be served. Resolving the path closes that bypass; a path that cannot
+    be resolved inside DATA_FOLDER is excluded as well (fail closed).
+    """
+    if is_excluded_gallery_path(path):
+        return True
+    try:
+        resolved_parts = path.resolve().relative_to(DATA_FOLDER.resolve()).parts
+    except (ValueError, OSError, RuntimeError):
+        # RuntimeError: a symlink loop raises it on the declared Python floor
+        # (< 3.13); unresolvable paths must not be served.
+        return True
+    return any(part.startswith(".") for part in resolved_parts)
+
+
 @app.route("/images/<path:filename>")
 def images(filename: str):
     rel_path = sanitize_rel_path(filename)
-    if not is_media_file(DATA_FOLDER / rel_path):
+    media_path = DATA_FOLDER / rel_path
+    if not is_media_file(media_path) or _is_excluded_media_path(media_path):
         abort(404)
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
@@ -660,7 +684,7 @@ def _serve_video_with_range(source_path: Path):
 def thumb(filename: str):
     rel_path = sanitize_rel_path(filename)
     source_path = source_file_path(rel_path)
-    if not source_path.exists() or not is_media_file(source_path):
+    if not source_path.exists() or not is_media_file(source_path) or _is_excluded_media_path(source_path):
         return "Not found", 404
 
     ensure_thumbnail_cache_dir()
@@ -683,7 +707,8 @@ def thumb(filename: str):
 @app.route("/view/<path:filename>")
 def view(filename: str):
     rel_path = sanitize_rel_path(filename)
-    if not is_media_file(DATA_FOLDER / rel_path):
+    media_path = DATA_FOLDER / rel_path
+    if not is_media_file(media_path) or _is_excluded_media_path(media_path):
         abort(404)
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
