@@ -3,6 +3,7 @@ import sys
 from pathlib import Path
 
 from conftest import build_client
+from thumbnails import _thumbnail_path_identity
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -11,6 +12,14 @@ if str(ROOT) not in sys.path:
 _MINIMAL_PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
     "0000000d49444154789c626001000000ffff03000006000557bfabd40000000049454e44ae426082"
+)
+
+# A second, distinct valid PNG (2x2). The fixture media (sample.png / copy.png)
+# carries _MINIMAL_PNG, so a leak assertion built on _DISTINCT_PNG cannot be
+# satisfied by bytes that legitimately live in the data folder.
+_DISTINCT_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000002000000020802000000fdd49a730000001649444154789c"
+    "6314543266606060626060606060000004d0006a6951e5700000000049454e44ae426082"
 )
 
 
@@ -971,3 +980,121 @@ def test_auth_type_oidc_without_env_local_password_login_works(monkeypatch, tmp_
     with client.session_transaction() as sess:
         # The session records the auth method it actually used.
         assert sess["auth_method"] == "local"
+
+
+# ---------------------------------------------------------------------------
+# Public media routes must not serve excluded paths (issue #607)
+# ---------------------------------------------------------------------------
+
+_EXCLUDED_MEDIA_PATHS = (
+    ".trash/known.png",
+    ".thumb_cache/cached.jpg",
+    ".hidden/known.png",
+    "album/.trash/known.png",
+    "album/.hidden/known.png",
+    "album/.hidden.png",
+    ".hidden.png",
+)
+
+
+def test_public_media_routes_404_on_excluded_paths(monkeypatch, tmp_path):
+    """#607: /images/, /view/ and /thumb/ must 404 for the media the gallery
+    hides from enumeration and from the LLM image API: the trash directory,
+    the thumbnail cache and any dot-prefixed directory or file.
+
+    The requests are unauthenticated -- the three routes are auth-exempt --
+    so a deleted image must not stay retrievable once its trash name is
+    guessed.
+    """
+    client, data_dir = build_client(
+        monkeypatch, tmp_path, auth_type="local", extra_env={"ADMIN_PASSWORD": "pass123"}
+    )
+
+    for rel_path in _EXCLUDED_MEDIA_PATHS:
+        target = data_dir / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(_DISTINCT_PNG)
+
+        for route in ("/images/", "/view/", "/thumb/"):
+            resp = client.get(f"{route}{rel_path}")
+            assert resp.status_code == 404, f"{route}{rel_path} must return 404"
+            assert _DISTINCT_PNG not in resp.data, f"{route}{rel_path} leaked the file bytes"
+
+    # The guard must run before generate_thumbnail(): no cache entry may be
+    # created for an excluded source.
+    cache = data_dir / ".thumb_cache"
+    for rel_path in _EXCLUDED_MEDIA_PATHS:
+        prefix = f"{_thumbnail_path_identity(rel_path)}."
+        assert not any(entry.name.startswith(prefix) for entry in cache.iterdir()), (
+            f"thumb() cached a thumbnail for the excluded source {rel_path!r}"
+        )
+
+
+def test_public_media_routes_still_serve_ordinary_media(monkeypatch, tmp_path):
+    """#607: the exclusion must not change the sharing contract for ordinary
+    gallery media -- public images stay public on all three routes."""
+    client, data_dir = build_client(
+        monkeypatch, tmp_path, auth_type="local", extra_env={"ADMIN_PASSWORD": "pass123"}
+    )
+    sample = (data_dir / "sample.png").read_bytes()
+
+    images_resp = client.get("/images/sample.png")
+    assert images_resp.status_code == 200
+    assert images_resp.data == sample
+
+    view_resp = client.get("/view/sample.png")
+    assert view_resp.status_code == 200
+    assert view_resp.data == sample
+
+    thumb_resp = client.get("/thumb/sample.png")
+    assert thumb_resp.status_code == 200
+    assert thumb_resp.content_type.startswith("image/")
+
+
+def test_public_media_routes_404_on_symlink_into_excluded_path(monkeypatch, tmp_path):
+    """#607: a symlink inside DATA_FOLDER that points into an excluded path must
+    not turn deleted or hidden media into a public download (is_media_file
+    accepts symlinks that stay inside DATA_FOLDER, so the lexical check alone
+    is not enough)."""
+    client, data_dir = build_client(
+        monkeypatch, tmp_path, auth_type="local", extra_env={"ADMIN_PASSWORD": "pass123"}
+    )
+    trash = data_dir / ".trash"
+    trash.mkdir(parents=True, exist_ok=True)
+    (trash / "secret.png").write_bytes(_DISTINCT_PNG)
+    hidden = data_dir / ".hidden"
+    hidden.mkdir(parents=True, exist_ok=True)
+    (hidden / "known.png").write_bytes(_DISTINCT_PNG)
+
+    # An absolute target, a relative target and a symlinked *directory* into an
+    # excluded path: the request path is lexically ordinary in every case.
+    (data_dir / "link.png").symlink_to(trash / "secret.png")
+    (data_dir / "rel_link.png").symlink_to(Path(".trash/secret.png"))
+    (data_dir / "link_dir").symlink_to(hidden, target_is_directory=True)
+
+    for request_path in ("link.png", "rel_link.png", "link_dir/known.png"):
+        for route in ("/images/", "/view/", "/thumb/"):
+            resp = client.get(f"{route}{request_path}")
+            assert resp.status_code == 404, f"{route}{request_path} must return 404"
+            assert _DISTINCT_PNG not in resp.data, f"{route}{request_path} leaked the excluded bytes"
+
+
+def test_public_media_routes_still_serve_media_through_symlinked_folder(monkeypatch, tmp_path):
+    """#607: the exclusion must not over-block -- a symlinked folder pointing at
+    another folder inside DATA_FOLDER holds ordinary media and stays public."""
+    client, data_dir = build_client(
+        monkeypatch, tmp_path, auth_type="local", extra_env={"ADMIN_PASSWORD": "pass123"}
+    )
+    real = data_dir / "real"
+    real.mkdir()
+    (real / "photo.png").write_bytes(_DISTINCT_PNG)
+    (data_dir / "link_dir").symlink_to(real, target_is_directory=True)
+
+    for route in ("/images/", "/view/"):
+        resp = client.get(f"{route}link_dir/photo.png")
+        assert resp.status_code == 200, f"{route}link_dir/photo.png must stay public"
+        assert resp.data == _DISTINCT_PNG
+
+    thumb_resp = client.get("/thumb/link_dir/photo.png")
+    assert thumb_resp.status_code == 200, "/thumb/link_dir/photo.png must stay public"
+    assert thumb_resp.content_type.startswith("image/")
