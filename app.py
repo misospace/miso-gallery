@@ -93,6 +93,7 @@ from thumbnails import (
     thumbnail_filename,
 )
 from trash import (
+    RestoreDestinationUnavailable,
     dir_size,
     empty_trash,
     list_trash,
@@ -1088,6 +1089,13 @@ def trash_restore(item_name: str):
 
     try:
         restored = restore_from_trash(item_name, DATA_FOLDER)
+    except RestoreDestinationUnavailable as exc:
+        # The destination could not be reserved, so the restore stopped before
+        # it could overwrite another restore's payload (issue #608). This is an
+        # operational failure, not a rejected request.
+        log_security_event("trash_restore", "unavailable", item=item_name)
+        flash(str(exc), "error")
+        return redirect(url_for("trash_view"))
     except ValueError as exc:
         log_security_event("trash_restore", "denied", reason=str(exc), item=item_name)
         flash(str(exc), "error")
