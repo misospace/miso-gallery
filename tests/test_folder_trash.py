@@ -1171,6 +1171,53 @@ class TestConcurrentRestoreDestinationAllocation:
         stages = [p for p in data.rglob(f"{trash.STAGE_PREFIX}*")]
         assert stages == [], f"stage directory leaked: {stages}"
 
+    def test_restore_replaces_a_symlink_at_the_destination(self, tmp_path):
+        """A symlink sitting at the destination is replaced, never followed."""
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        albums = data / "albums"
+        albums.mkdir(parents=True)
+        item = self._file_item(td, "a.bin", "albums/photo.txt", b"payload")
+        victim = albums / "victim.txt"
+        link = albums / "photo.txt"
+        link.symlink_to(victim)
+
+        assert restore_from_trash(item.name, data) is True
+        assert not link.is_symlink()
+        assert link.read_bytes() == b"payload"
+        assert not victim.exists(), "the restore must not write through the planted link"
+
+    def test_concurrent_restores_via_a_symlinked_album_dir_retain_both_payloads(
+        self, monkeypatch, tmp_path
+    ):
+        """Two ``original`` paths reaching one directory share one reservation.
+
+        ``albums`` and its alias can name the same directory, so the claim key
+        has to be the directory itself: keyed on the path as written, the two
+        restores reserve different files and overwrite each other again.
+        """
+        data = tmp_path / "data"
+        td = trash.trash_dir(data)
+        (data / "albums").mkdir(parents=True)
+        (data / "alias").symlink_to(data / "albums")
+        first = self._file_item(td, "a.bin", "alias/photo.png", b"A")
+        self._file_item(td, "b.bin", "albums/photo.png", b"B")
+
+        real_rename = trash.Path.rename
+        rival_results: list[bool] = []
+
+        def interleaved_rename(path, destination):
+            if path == first and not rival_results:
+                rival_results.append(restore_from_trash("b.bin", data))
+            return real_rename(path, destination)
+
+        monkeypatch.setattr(trash.Path, "rename", interleaved_rename)
+
+        assert restore_from_trash("a.bin", data) is True
+        assert rival_results == [True]
+        assert sorted(p.read_bytes() for p in (data / "albums").glob("photo*")) == [b"A", b"B"]
+        assert list_trash(data) == []
+
     def test_claim_files_are_bookkeeping_for_the_trash_sweeps(self, monkeypatch, tmp_path):
         """Claim files are not trash items, and only free+aged ones retire."""
         import fcntl

@@ -358,11 +358,12 @@ def _reserve_restore_dest(
     possible, in which case the returned destination was picked by the
     historical existence probe alone.
 
-    *canonical_parent* is the validated destination directory spelled under the
-    resolved data folder: claim names are derived from it so every worker
-    contends for the same file, while the returned path stays unresolved — the
+    *canonical_parent* is the resolved destination directory: claim names are
+    derived from it, so every worker contends for the same file however it
+    spells ``DATA_FOLDER`` and two ``original`` paths that reach one directory
+    through a symlink share one claim. The returned path stays unresolved — the
     caller's ``rename`` must keep replacing a symlink at the destination rather
-    than writing through it to whatever it points at.
+    writing through it to whatever it points at.
 
     Candidates are the original name first, then ``{stem}_{ts}{suffix}`` with an
     incrementing timestamp. A candidate is only accepted while its claim is
@@ -501,10 +502,10 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         # Reserve the destination before anything is renamed onto it, so a
         # concurrent restore of another trash item with the same ``original``
         # cannot land on the same name (see ``_reserve_restore_dest``). The
-        # claim is keyed on the validated path under the resolved data folder;
-        # *dest* stays unresolved so the rename below replaces a planted
-        # symlink instead of writing through it.
-        dest, claim_fd = _reserve_restore_dest(td, dest, resolved_data / Path(rel).parent)
+        # claim is keyed on the resolved parent (it exists by now); *dest*
+        # stays unresolved so the rename below replaces a planted symlink at
+        # the destination instead of writing through it.
+        dest, claim_fd = _reserve_restore_dest(td, dest, dest.parent.resolve())
         if item.is_dir():
             try:
                 # Move consumes the trash source so a successful restore
