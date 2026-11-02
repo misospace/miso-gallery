@@ -1,4 +1,41 @@
 {
   $schema: "https://docs.renovatebot.com/renovate-schema.json",
   extends: ["github>misospace/renovate-config"],
+
+  // The org preset only matches pip_requirements, so Renovate bumps the `==` pins in
+  // requirements.txt and leaves pyproject.toml alone: a range such as `Authlib>=1.9.1,<2`
+  // already satisfies 1.9.2, so Renovate reports no update for it. scripts/
+  // check_dependency_consistency.py requires the pyproject floor to *equal* the pin, so
+  // every bump failed the Tests and Lint jobs until someone hand-edited pyproject.toml
+  // (see b5e677b, #550/#551, #620). `bump` raises the lower bound instead, and matching
+  // every Python manager keeps the two manifests in one PR so they cannot desync.
+  //
+  // Two notes on the manager list:
+  //   - pyproject.toml is claimed by the poetry extractor, not pep621, despite having no
+  //     [tool.poetry] section; a pep621-only rule never fires. Both are listed so the
+  //     behaviour survives a Renovate change that hands the file back to pep621.
+  //   - pip_requirements must be included too. cryptography is a range (>=41.0.0) in
+  //     *both* manifests; bumping only pyproject would strand requirements.txt at the old
+  //     floor and reproduce the same mismatch in a new place.
+  packageRules: [
+    {
+      description: "Bump ranges in place across every Python manifest",
+      matchManagers: ["poetry", "pep621", "pip_requirements"],
+      rangeStrategy: "bump",
+    },
+    {
+      description: "Group non-major Python updates across all manifests into one PR",
+      matchManagers: ["poetry", "pep621", "pip_requirements"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "Python dependencies",
+    },
+    {
+      // Overrides the preset's per-package majors (groupName: null). Kept together on
+      // purpose: split majors would land one manifest per PR and break the same guard.
+      description: "Group major Python updates across all manifests into one PR",
+      matchManagers: ["poetry", "pep621", "pip_requirements"],
+      matchUpdateTypes: ["major"],
+      groupName: "Python majors",
+    },
+  ],
 }
