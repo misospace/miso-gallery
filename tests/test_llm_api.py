@@ -115,6 +115,67 @@ def test_llm_image_serves_symlink_inside_data_folder(monkeypatch, tmp_path):
     assert resp.get_json()["name"] == "foo.png"
 
 
+def test_llm_image_rejects_symlink_into_excluded_path(monkeypatch, tmp_path):
+    """#611: a symlink resolving into .trash/, .thumb_cache/ or another
+    dot-prefixed path must return 404, not the metadata of hidden media.
+
+    is_media_file() accepts a symlink whose target stays inside DATA_FOLDER,
+    so the old lexical-only check let <data>/link.png -> .trash/secret.png
+    return the size and mtime of a deleted file to a read-scoped key.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    trash = data_dir / ".trash"
+    trash.mkdir()
+    (trash / "secret.png").write_bytes(b"trashed media bytes")
+    hidden = data_dir / ".hidden"
+    hidden.mkdir()
+    (hidden / "known.png").write_bytes(b"hidden media bytes")
+    cache = data_dir / ".thumb_cache"
+    (cache / "cached.png").write_bytes(b"cached media bytes")
+
+    # Absolute target, relative target, thumbnail cache, and a symlinked
+    # excluded directory: the request path is lexically ordinary in each case.
+    (data_dir / "link.png").symlink_to(trash / "secret.png")
+    (data_dir / "rel_link.png").symlink_to(Path(".trash/secret.png"))
+    (data_dir / "cache_link.png").symlink_to(cache / "cached.png")
+    (data_dir / "dir_link").symlink_to(hidden, target_is_directory=True)
+
+    for request_path in ("link.png", "rel_link.png", "cache_link.png", "dir_link/known.png"):
+        resp = client.get(f"/api/llm/image/{request_path}", headers=auth_header())
+        assert resp.status_code == 404, f"{request_path} must return 404"
+        assert resp.get_json() == {"error": "Image not found"}
+
+
+def test_llm_write_endpoints_reject_symlink_into_excluded_path(monkeypatch, tmp_path):
+    """#611 review: the tags/delete/bulk-delete guards apply the same
+    resolved-path rule. A symlink into an excluded path is neither taggable
+    nor movable media, so a write-scoped key cannot act on it or its target."""
+    client, data_dir = build_client(monkeypatch, tmp_path)
+
+    trash = data_dir / ".trash"
+    trash.mkdir()
+    (trash / "secret.png").write_bytes(b"trashed media bytes")
+    (data_dir / "link.png").symlink_to(trash / "secret.png")
+
+    delete = client.post("/api/llm/delete", json={"rel_path": "link.png"}, headers=auth_header())
+    assert delete.status_code == 404
+    assert (data_dir / "link.png").is_symlink()
+    assert (trash / "secret.png").exists()
+
+    bulk = client.post(
+        "/api/llm/bulk-delete", json={"rel_paths": ["link.png", "sample.png"]}, headers=auth_header()
+    )
+    assert bulk.status_code == 200
+    body = bulk.get_json()
+    assert body["deleted"] == ["sample.png"]
+    assert body["skipped"] == ["link.png"]
+
+    tags = client.post("/api/llm/tags", json={"rel_path": "link.png", "tags": ["doomed"]}, headers=auth_header())
+    assert tags.status_code == 200
+    assert tags.get_json()["updated"] == []
+
+
 def test_llm_delete_and_bulk_delete_do_not_require_csrf(monkeypatch, tmp_path):
     client, data_dir = build_client(monkeypatch, tmp_path)
 

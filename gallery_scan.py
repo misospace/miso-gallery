@@ -130,6 +130,32 @@ def is_excluded_gallery_path(path: Path) -> bool:
     return any(part in {app.THUMBNAIL_CACHE_DIR.name, ".trash"} or part.startswith(".") for part in rel_parts)
 
 
+def is_excluded_media_path(path: Path) -> bool:
+    """Return True when a media path must not be served.
+
+    Shared guard for the public media routes (/images/, /view/, /thumb/) and
+    the metadata routes (/api/llm/image/, /api/image-metadata/), so all of
+    them apply one rule (issue #611). The gallery deliberately hides the
+    trash directory (.trash/), the thumbnail cache (.thumb_cache/) and any
+    dot-prefixed directory or file. The lexical check
+    (is_excluded_gallery_path) covers those, but it does not follow symlinks:
+    is_media_file() accepts a symlink whose target stays inside DATA_FOLDER,
+    so <data>/link.png -> <data>/.trash/secret.png would bypass it. Resolving
+    the path closes that bypass; a path that cannot be resolved inside
+    DATA_FOLDER is excluded as well (fail closed).
+    """
+    app = _app()
+    if is_excluded_gallery_path(path):
+        return True
+    try:
+        resolved_parts = path.resolve().relative_to(app.DATA_FOLDER.resolve()).parts
+    except (ValueError, OSError, RuntimeError):
+        # RuntimeError: a symlink loop raises it on the declared Python floor
+        # (< 3.13); unresolvable paths must not be served.
+        return True
+    return any(part.startswith(".") for part in resolved_parts)
+
+
 def _gallery_item_rel_path(item: Path) -> str | None:
     """Gallery-relative POSIX path for a walked item, or ``None`` if it is
     no longer usable.
