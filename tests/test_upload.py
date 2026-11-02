@@ -5,13 +5,16 @@ images can be shared without write access to the image share.
 """
 
 import io
+import json
 import sys
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+import trash
 from conftest import _MINIMAL_PNG, build_client
+from trash import restore_from_trash
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -545,3 +548,183 @@ def test_upload_batch_valid_first_then_warning_image(monkeypatch, tmp_path):
     assert small.exists()
     assert small.read_bytes() == _PNG
     assert not (data_dir / "input" / "bomb.png").exists()
+
+
+def _trash_item_for(td, name, original, payload):
+    """Seed one trash item (payload + meta) whose ``original`` is *original*."""
+    item = td / name
+    item.write_bytes(payload)
+    item.with_name(item.name + trash.META_SUFFIX).write_text(
+        json.dumps({"original": original, "deleted_at": "2026-01-01T00:00:00+00:00"})
+    )
+    return item
+
+
+def test_upload_inside_restore_window_takes_token_name(monkeypatch, tmp_path):
+    """Regression for issue #613: an upload that creates the restore's
+    destination inside the restore's reserve-then-rename window must not
+    have its bytes overwritten by the landing rename.
+
+    The restore holds the per-destination claim from its reservation through
+    its ``rename``; the upload takes the same claim before its ``O_EXCL``
+    create, so run inside that window it sees the claim held and rotates to
+    a token name. The rename then lands on the still-absent requested name
+    and both payloads survive.
+    """
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+    td = trash.trash_dir(data_dir)
+    item = _trash_item_for(td, "a.bin", "input/photo.jpg", b"restored-payload")
+    (data_dir / "input").mkdir(parents=True, exist_ok=True)
+
+    uploads: list[Path] = []
+    real_rename = trash.Path.rename
+
+    def interleaved_rename(path, destination):
+        if path == item and not uploads:
+            # The upload runs exactly inside the claim-held,
+            # destination-still-absent window of the restore.
+            resp = client.post(
+                "/upload",
+                data={"csrf_token": csrf, "files": (io.BytesIO(_PNG), "photo.jpg")},
+                content_type="multipart/form-data",
+            )
+            assert resp.status_code == 302
+            uploads.extend((data_dir / "input").iterdir())
+        return real_rename(path, destination)
+
+    monkeypatch.setattr(trash.Path, "rename", interleaved_rename)
+    assert restore_from_trash("a.bin", data_dir) is True
+
+    # The restore kept the requested name with its own payload...
+    assert (data_dir / "input" / "photo.jpg").read_bytes() == b"restored-payload"
+    # ...and the upload survived under its rotated name.
+    assert len(uploads) == 1
+    assert uploads[0].name.startswith("photo-")
+    assert uploads[0].read_bytes() == _PNG
+
+
+def test_restore_inside_upload_window_takes_timestamped_name(monkeypatch, tmp_path):
+    """Regression for issue #613, the other interleaving: while the upload
+    holds the destination claim but has not created the file yet, a restore
+    of the same gallery path must not rename onto that name.
+
+    Without the shared claim the restore's occupancy probe saw the absent
+    file and its ``rename`` landed first; the upload then had to rotate away
+    from its own requested name. With the claim shared, the restore sees it
+    held and takes a timestamped name, and the upload keeps the name.
+    """
+    import app as app_module
+
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+    td = trash.trash_dir(data_dir)
+    _trash_item_for(td, "a.bin", "input/photo.jpg", b"restored-payload")
+
+    restored: list[bool] = []
+    destination = data_dir / "input" / "photo.jpg"
+    real_open = app_module.os.open
+
+    def rival_open(path, flags, *args, **kwargs):
+        matched = False
+        try:
+            matched = (
+                flags & app_module.os.O_EXCL
+                and Path(path).resolve() == destination.resolve()
+            )
+        except OSError:
+            matched = False
+        if matched and not restored:
+            restored.append(restore_from_trash("a.bin", data_dir))
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(app_module.os, "open", rival_open)
+
+    resp = client.post(
+        "/upload",
+        data={"csrf_token": csrf, "files": (io.BytesIO(_PNG), "photo.jpg")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    assert restored == [True]
+
+    # The upload kept the requested name with its bytes...
+    assert (data_dir / "input" / "photo.jpg").read_bytes() == _PNG
+    # ...and the restore took a timestamped name instead of overwriting it.
+    restored_files = sorted((data_dir / "input").glob("photo_*.jpg"))
+    assert [p.read_bytes() for p in restored_files] == [b"restored-payload"]
+
+
+def test_upload_rotates_when_its_claim_file_is_unusable(monkeypatch, tmp_path):
+    """A claim file that cannot be used rules out only that candidate name.
+
+    A directory planted at the claim path cannot be opened as a claim file,
+    so the upload moves to its next candidate name exactly as a restore
+    would, instead of creating the destination without a reservation.
+    """
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    td = trash.trash_dir(data_dir)
+    td.mkdir(parents=True, exist_ok=True)
+    claim = trash._restore_claim_path(td, (data_dir / "input").resolve() / "photo.jpg")
+    claim.mkdir()
+    csrf = _login(client)
+
+    resp = client.post(
+        "/upload",
+        data={"csrf_token": csrf, "files": (io.BytesIO(_PNG), "photo.jpg")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+
+    # The reserved-for-restore name was not taken without its claim...
+    assert not (data_dir / "input" / "photo.jpg").exists()
+    # ...and the upload landed under a rotated name.
+    uploaded = list((data_dir / "input").iterdir())
+    assert len(uploaded) == 1
+    assert uploaded[0].name.startswith("photo-")
+    assert uploaded[0].read_bytes() == _PNG
+
+
+def test_upload_still_succeeds_without_file_locking(monkeypatch, tmp_path):
+    """On a platform without usable ``flock`` the upload keeps working.
+
+    A restore on such a platform refuses to rename at all (it fails closed
+    with ``RestoreDestinationUnavailable``), so there is no rival writer to
+    lose against and the plain exclusive create is as safe as before.
+    """
+
+    def no_locking(*args, **kwargs):
+        return None, trash.RESTORE_CLAIM_UNSUPPORTED, "the system has no file locking"
+
+    monkeypatch.setattr(trash, "_acquire_restore_claim", no_locking)
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    csrf = _login(client)
+
+    resp = client.post(
+        "/upload",
+        data={"csrf_token": csrf, "files": (io.BytesIO(_PNG), "photo.png")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 302
+    assert (data_dir / "input" / "photo.png").read_bytes() == _PNG
+
+
+def test_upload_skips_gracefully_when_trash_dir_is_unusable(monkeypatch, tmp_path):
+    """A trash directory that cannot hold claim files must not 500 the upload.
+
+    ``reserve_upload_destination`` reports the candidate as unusable instead
+    of raising, so every candidate name is skipped and the request fails
+    with the ordinary no-files-stored response, matching how a restore fails
+    closed when it cannot reserve a destination.
+    """
+    client, data_dir = _local_client(monkeypatch, tmp_path)
+    (data_dir / ".trash").write_text("not a directory")
+    csrf = _login(client)
+
+    resp = client.post(
+        "/upload",
+        data={"csrf_token": csrf, "files": (io.BytesIO(_PNG), "photo.jpg")},
+        content_type="multipart/form-data",
+    )
+    assert resp.status_code == 422
+    assert list((data_dir / "input").iterdir()) == []
