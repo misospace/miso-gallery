@@ -223,28 +223,6 @@ def _meta_path(item_path: Path) -> Path:
     return item_path.with_name(item_path.name + META_SUFFIX)
 
 
-def _claim_owns_name(claim_fd: int, dest: Path) -> bool:
-    """True while this call still owns the destination name.
-
-    The sidecar is the reservation token for a trash name: a second delete
-    can only claim a name by creating a sidecar of its own, so the
-    sidecar's identity proves ownership. While this call owns the name the
-    destination can only hold this call's own (possibly partial) payload
-    and may be cleaned up on failure. Once the sidecar has been replaced
-    the name belongs to another delete, and that delete's payload must not
-    be touched.
-    """
-    try:
-        claimed = os.fstat(claim_fd)
-    except OSError:
-        return False
-    try:
-        current = os.stat(_meta_path(dest))
-    except OSError:
-        return False
-    return (claimed.st_dev, claimed.st_ino) == (current.st_dev, current.st_ino)
-
-
 def _close_claim(claim_fd: int) -> None:
     """Close the claim descriptor, releasing the lock it holds."""
     with contextlib.suppress(OSError):
@@ -259,7 +237,11 @@ def _release_claim(dest: Path, claim_fd: int) -> None:
     in the meantime. The claim descriptor is closed by the caller's
     ``finally`` block.
     """
-    if _claim_owns_name(claim_fd, dest):
+    # The sidecar is the reservation token for a trash name, so a live
+    # descriptor that still refers to it proves this call still owns the
+    # destination name; once the sidecar has been replaced the name belongs
+    # to another delete and that delete's payload must not be touched.
+    if _fd_locks_path(claim_fd, _meta_path(dest)):
         with contextlib.suppress(OSError):
             _meta_path(dest).unlink(missing_ok=True)
 
@@ -343,7 +325,7 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
                 # this call still owns the name: the sidecar reserves it, and
                 # the claim's lock keeps every other delete and every sweep
                 # away from it for the whole move.
-                if _claim_owns_name(claim_fd, dest) and dest.exists():
+                if _fd_locks_path(claim_fd, _meta_path(dest)) and dest.exists():
                     shutil.rmtree(dest, ignore_errors=True)
                 _release_claim(dest, claim_fd)
                 return False
@@ -400,6 +382,15 @@ def list_trash(data_folder: Path) -> list[dict]:
 def _is_safe_relative_path(path_str: str) -> bool:
     """Return True if *path_str* contains no path-traversal segments."""
     return all(part != ".." for part in path_str.replace("\\", "/").split("/"))
+
+
+def _path_within(path: Path, root: Path) -> bool:
+    """True when resolved *path* is *root* itself or lies beneath it.
+
+    Shared escape-guard predicate for ``restore_from_trash``: callers resolve
+    both sides first, so the comparison is lexical on absolute paths.
+    """
+    return str(path).startswith(str(root) + "/") or path == root
 
 
 def _find_symlinks(root: Path) -> list[Path]:
@@ -909,7 +900,7 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         resolved_td = td.resolve()
     except OSError:
         return False
-    if not (str(resolved_item).startswith(str(resolved_td) + "/") or resolved_item == resolved_td):
+    if not _path_within(resolved_item, resolved_td):
         raise ValueError(f"Item path escapes trash directory: {item_name!r}")
 
     meta_file = _meta_path(item)
@@ -947,7 +938,7 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
             resolved_data = data_folder.resolve()
         except OSError:
             return False
-        if not (str(resolved_dest).startswith(str(resolved_data) + "/") or resolved_dest == resolved_data):
+        if not _path_within(resolved_dest, resolved_data):
             # A symlink at the destination resolves to its target here, so a
             # link whose target escapes the data folder refuses the whole
             # restore. The rename would replace the link instead of writing
@@ -963,9 +954,7 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         # writes outside DATA_FOLDER. The parent is checked separately, and
         # before any mkdir, so no directory can be created through it either
         # (issue #615).
-        if not (
-            str(resolved_dest_parent).startswith(str(resolved_data) + "/") or resolved_dest_parent == resolved_data
-        ):
+        if not _path_within(resolved_dest_parent, resolved_data):
             raise ValueError(f"Destination parent path escapes data folder: {rel!r}")
         dest.parent.mkdir(parents=True, exist_ok=True)
         # Reserve the destination before anything is renamed onto it, so a
