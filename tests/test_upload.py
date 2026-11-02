@@ -583,7 +583,7 @@ def test_upload_inside_restore_window_takes_token_name(monkeypatch, tmp_path):
     # the re-seamed concurrent-restore tests in test_folder_trash.py.
     real_rename = trash._rename_onto_dest
 
-    def interleaved_rename(src, dest, dest_fd):
+    def interleaved_rename(src, dest, dest_fd, **kwargs):
         if src == item and not uploads:
             # The upload runs exactly inside the claim-held,
             # destination-still-absent window of the restore.
@@ -594,7 +594,7 @@ def test_upload_inside_restore_window_takes_token_name(monkeypatch, tmp_path):
             )
             assert resp.status_code == 302
             uploads.extend((data_dir / "input").iterdir())
-        return real_rename(src, dest, dest_fd)
+        return real_rename(src, dest, dest_fd, **kwargs)
 
     monkeypatch.setattr(trash, "_rename_onto_dest", interleaved_rename)
     assert restore_from_trash("a.bin", data_dir) is True

@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -480,65 +481,219 @@ def _open_verified_dest_parent(parent: Path, resolved_data: Path) -> int | None:
     *resolved_data*. Opening the descriptor pins that directory, so the
     final rename can no longer re-resolve the destination path — the
     check-to-rename window a planted symlink exploits (issue #617). The
-    open itself can still be raced, so it is verified after the fact:
-    ``O_NOFOLLOW`` refuses a subdirectory parent whose final component
-    was swapped for a symlink (skipped for the data folder root itself,
-    which a symlinked configured DATA_FOLDER path legitimately reaches),
-    and on Linux the descriptor's true path
-    (``/proc/self/fd/<fd>``) is re-checked against the data folder,
-    catching an intermediate component swapped between the resolve check
-    and the open. Where neither probe is available the descriptor is
-    trusted as opened — ``rename(2)`` still pins whichever directory was
-    opened instead of re-resolving the path.
+    open itself can still be raced, so it does not trust path resolution
+    for any component: the descriptor is reached by walking from the
+    *resolved data folder* through each parent component with an
+    ``openat`` that carries ``O_NOFOLLOW``, so a component swapped for a
+    symlink between the resolve checks and the open — at any depth — fails
+    the walk instead of pinning an outside directory. This holds on every
+    platform with ``dir_fd`` support; the descriptor's location is not
+    probed through ``/proc``, which exists on Linux only.
+
+    The data folder root itself is opened without ``O_NOFOLLOW`` so a
+    symlinked configured DATA_FOLDER path keeps working (a common
+    container/volume setup): the root is the deployment's own path, above
+    the attacker-reachable tree.
 
     Returns the open descriptor, or ``None`` when the parent cannot be
     opened as a directory inside the data folder; the caller fails the
     restore closed, leaving item and metadata in place for a retry.
     """
-    # ``O_NOFOLLOW`` refuses a symlinked final component, but it would
-    # also false-reject the data folder root itself when the configured
-    # DATA_FOLDER path traverses a symlink (a common container/volume
-    # setup). That root is already covered by the post-open re-check
-    # (``opened == resolved_data``), so the flag is only applied to
-    # subdirectories, whose symlinked final component is refused —
-    # matching the restore's symlink-hostile stance for trash items.
-    try:
-        follow_root = os.path.realpath(parent) == str(resolved_data)
-    except OSError:
-        follow_root = False
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    if not follow_root:
-        flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(parent, flags)
+        fd = os.open(resolved_data, flags)
     except OSError:
         return None
     try:
-        opened = os.readlink(f"/proc/self/fd/{fd}")
-    except OSError:
-        # No /proc (non-Linux): rely on O_NOFOLLOW and the pinned descriptor.
-        return fd
-    if not (opened == str(resolved_data) or opened.startswith(str(resolved_data) + "/")):
-        # The raced open followed a swapped path component to a directory
-        # outside the data folder; the pinned rename would land there.
+        relative = parent.relative_to(resolved_data)
+    except ValueError:
+        # Not a subpath of the resolved data folder: refuse without pinning.
         os.close(fd)
         return None
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    for part in relative.parts:
+        try:
+            component_fd = os.open(part, flags | nofollow, dir_fd=fd)
+        except OSError:
+            # A component is missing or was swapped for a symlink (ELOOP):
+            # whatever is at the verified path now, it is not the verified
+            # directory, so nothing gets pinned.
+            os.close(fd)
+            return None
+        os.close(fd)
+        fd = component_fd
     return fd
 
 
-def _rename_onto_dest(src: Path, dest: Path, dest_fd: int | None) -> None:
+class _DestParentMoved(RuntimeError):
+    """The pinned destination parent no longer matches the verified directory.
+
+    A directory descriptor pins the *inode*, not the location: a concurrent
+    ``rename`` of the verified parent relocates the very directory the
+    descriptor is open on (optionally planting a symlink on its old path),
+    and a rename through the descriptor then follows the relocated inode
+    outside DATA_FOLDER. Raised when the descriptor's rename-time
+    re-verification (``_require_verified_dest_fd``) cannot establish that
+    the descriptor still pins the verified directory. Deliberately not an
+    ``OSError``: the cross-device fallback must not be entered for a refused
+    destination, because that fallback copies payload bytes to the
+    destination filesystem. The restore fails closed with the item and its
+    metadata left in the trash for a retry.
+    """
+
+
+def _require_verified_dest_fd(dest_fd: int, verified_parent: Path, resolved_data: Path) -> None:
+    """Re-verify the pinned destination descriptor immediately before use.
+
+    The verification in ``_open_verified_dest_parent`` ran when the
+    descriptor was opened; a relocating attacker acts *after* that. The
+    verified parent is therefore walked again from the resolved data folder
+    right before a rename goes through the descriptor: a parent swapped for
+    a symlink fails the walk (``O_NOFOLLOW``, at any component depth), a
+    parent moved away leaves it short (ENOENT), and a parent replaced by a
+    fresh real directory yields a different inode than the pinned
+    descriptor. Only when the fresh walk lands on the very directory the
+    descriptor pins — same device and inode — may the rename proceed
+    through it.
+
+    Raises ``_DestParentMoved`` when the descriptor cannot be re-verified;
+    the caller fails the restore closed. The residual window between this
+    check and the ``rename`` itself is a few syscalls wide and irreducible
+    without kernel-enforced confinement; the threat it leaves open requires
+    an attacker able to ``rename`` directories inside DATA_FOLDER in that
+    instant, who could equally move the payload after a successful restore.
+    """
+    fresh = _open_verified_dest_parent(verified_parent, resolved_data)
+    if fresh is None:
+        raise _DestParentMoved(
+            "the verified destination parent is no longer reachable inside the data folder"
+        )
+    try:
+        pinned = os.fstat(dest_fd)
+        walked = os.fstat(fresh)
+    finally:
+        os.close(fresh)
+    if (pinned.st_dev, pinned.st_ino) != (walked.st_dev, walked.st_ino):
+        raise _DestParentMoved(
+            "the pinned destination descriptor no longer refers to the verified directory"
+        )
+
+
+def _rename_onto_dest(
+    src: Path | str,
+    dest: Path,
+    dest_fd: int | None,
+    *,
+    verified_parent: Path | None = None,
+    resolved_data: Path | None = None,
+    src_dir_fd: int | None = None,
+) -> None:
     """Rename *src* onto *dest* via the pinned destination-parent descriptor.
 
     With *dest_fd* open, the destination's final component is resolved
     against the already-verified directory the descriptor pins, so a
     destination parent swapped for a symlink after the check cannot
-    redirect the payload outside DATA_FOLDER (issue #617). Without
-    descriptor support the historical path-based rename is kept.
+    redirect the payload outside DATA_FOLDER (issue #617). Immediately
+    before the rename the descriptor is re-verified against the verified
+    parent (``_require_verified_dest_fd``): the descriptor follows its
+    inode, so a parent *relocated* after it was pinned would otherwise
+    carry the rename outside the data folder. Where the verification cannot
+    run, the rename is refused and the restore fails closed.
+
+    *src_dir_fd* resolves *src* against a directory descriptor too — the
+    staged cross-device rename passes the destination descriptor so the
+    stage is picked up from the pinned directory itself instead of through
+    the (swapable) parent path. Without descriptor support the historical
+    path-based rename is kept.
     """
     if dest_fd is not None:
-        os.rename(src, dest.name, dst_dir_fd=dest_fd)
+        if verified_parent is None or resolved_data is None:
+            raise _DestParentMoved(
+                "a descriptor rename requires the verified parent to re-verify against"
+            )
+        _require_verified_dest_fd(dest_fd, verified_parent, resolved_data)
+        os.rename(src, dest.name, src_dir_fd=src_dir_fd, dst_dir_fd=dest_fd)
     else:
-        src.rename(dest)
+        Path(src).rename(dest)
+
+
+def _copy_tree_into_dirfd(src: Path, dest_dir_fd: int) -> None:
+    """Copy the regular-file/directory tree at *src* into the open directory.
+
+    This is the cross-device fallback's stage population, replacement for
+    ``shutil.copytree(item, stage)``: copytree only takes the stage as a
+    *path*, so every entry it created re-resolved the destination parent —
+    a parent swapped for a symlink after the descriptor was pinned made the
+    copy write the payload outside DATA_FOLDER (issue #617 review). Here
+    every entry is created relative to the open *dest_dir_fd* instead
+    (``os.mkdir``/``os.open``/``os.symlink`` with ``dir_fd``), so the bytes
+    land in the directory the descriptor pins regardless of what the parent
+    path resolves to by the time the copy runs.
+
+    ``restore_from_trash`` refuses trash items that contain symlinks, so a
+    compliant tree holds only directories and regular files. For defense in
+    depth a symlink planted mid-copy is still copied as a link (matching
+    ``copytree(symlinks=True)`` and the rename semantics of the fast path),
+    and any other special file fails the copy, which the caller treats as a
+    failed restore.
+
+    Metadata parity with ``shutil.copytree``: mode bits and access/modified
+    times are preserved per entry (directories after their children, so
+    child writes cannot bump them). Extended attributes are not copied.
+    """
+    with os.scandir(src) as entries:
+        for entry in entries:
+            entry_stat = entry.stat(follow_symlinks=False)
+            if entry.is_dir(follow_symlinks=False):
+                # Restrictive mode while it is being filled; the source's
+                # mode is applied once the children are in place.
+                os.mkdir(entry.name, 0o700, dir_fd=dest_dir_fd)
+                child_fd = os.open(
+                    entry.name,
+                    os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                    dir_fd=dest_dir_fd,
+                )
+                try:
+                    _copy_tree_into_dirfd(Path(entry.path), child_fd)
+                finally:
+                    os.close(child_fd)
+                os.chmod(entry.name, stat.S_IMODE(entry_stat.st_mode), dir_fd=dest_dir_fd)
+                os.utime(
+                    entry.name,
+                    ns=(entry_stat.st_atime_ns, entry_stat.st_mtime_ns),
+                    dir_fd=dest_dir_fd,
+                )
+            elif entry.is_file(follow_symlinks=False):
+                fd = os.open(
+                    entry.name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                    0o600,
+                    dir_fd=dest_dir_fd,
+                )
+                # ``os.fdopen`` takes ownership of *fd* only once it succeeds;
+                # the sentinel closes the raw descriptor when it does not.
+                dst_fh = None
+                try:
+                    os.fchmod(fd, stat.S_IMODE(entry_stat.st_mode))
+                    dst_fh = os.fdopen(fd, "wb")
+                    with open(entry.path, "rb") as src_fh:
+                        shutil.copyfileobj(src_fh, dst_fh)
+                finally:
+                    if dst_fh is not None:
+                        dst_fh.close()
+                    else:
+                        os.close(fd)
+                os.utime(
+                    entry.name,
+                    ns=(entry_stat.st_atime_ns, entry_stat.st_mtime_ns),
+                    dir_fd=dest_dir_fd,
+                )
+            elif entry.is_symlink():
+                os.symlink(os.readlink(entry.path), entry.name, dir_fd=dest_dir_fd)
+            else:
+                # FIFO, socket, device — copytree fails on these too
+                # (shutil.SpecialFileError), failing the restore closed.
+                raise OSError(f"cannot copy special file into restore stage: {entry.path}")
 
 
 RESTORE_CLAIM_ACQUIRED = "acquired"
@@ -950,10 +1105,17 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
     rename goes through that descriptor, so the kernel never re-resolves
     the destination path at rename time and a destination parent swapped
     for a symlink in the check-to-rename window cannot carry the payload
-    outside DATA_FOLDER (issue #617). Where descriptor renames are
-    unsupported the historical path-based rename is kept; if the verified
-    parent cannot be opened (swapped mid-check, or inaccessible) the
-    restore fails closed with item and metadata preserved.
+    outside DATA_FOLDER (issue #617). Because a descriptor pins the inode
+    rather than the location, the descriptor is re-verified against the
+    verified parent immediately before every rename through it — a parent
+    *relocated* after it was pinned would otherwise carry the rename to the
+    moved directory — and the cross-device fallback creates and populates
+    its stage through the descriptor as well, so no payload byte is ever
+    written through the (swapable) parent path. Where descriptor renames
+    are unsupported the historical path-based rename is kept; if the
+    verified parent cannot be opened, or the descriptor no longer matches
+    it at rename time, the restore fails closed with item and metadata
+    preserved.
     """
     # Reject path traversal in item_name (Flask's <path:> converter allows / and ..)
     # and embedded null bytes, which would make every path syscall below
@@ -1013,6 +1175,7 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         # untouched for the holder to finish with.
         return False
     dest_fd: int | None = None
+    verified_parent: Path | None = None
     try:
         meta = json.loads(meta_file.read_text()) if meta_file.exists() else {}
         rel = meta.get("original")
@@ -1056,9 +1219,14 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
         # directory the reservation below is keyed on — so a legitimate
         # symlinked album alias inside the data folder keeps restoring
         # (issue #608), while a parent that resolves outside the data
-        # folder is still refused by the descriptor's post-open check.
+        # folder, or a component swapped mid-check, is refused by the
+        # descriptor's no-symlink walk. The resolved parent is kept for the
+        # rename-time re-verification: the descriptor pins the inode, not
+        # the location, so a parent relocated after this point is caught
+        # right before the rename instead.
         if _RENAME_SUPPORTS_DIRFD:
-            dest_fd = _open_verified_dest_parent(dest.parent.resolve(), resolved_data)
+            verified_parent = dest.parent.resolve()
+            dest_fd = _open_verified_dest_parent(verified_parent, resolved_data)
             if dest_fd is None:
                 # Fail closed: the verified parent could not be opened (it
                 # was swapped mid-check, or is inaccessible). Item and
@@ -1077,7 +1245,10 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
             try:
                 # Move consumes the trash source so a successful restore
                 # leaves no orphaned copy behind (matches file semantics).
-                _rename_onto_dest(item, dest, dest_fd)
+                _rename_onto_dest(
+                    item, dest, dest_fd,
+                    verified_parent=verified_parent, resolved_data=resolved_data,
+                )
             except OSError:
                 # Cross-device fallback: stage the copy on the *destination*
                 # filesystem (under dest.parent), then atomically rename it
@@ -1087,43 +1258,93 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                 # failed the original rename (typically EXDEV), and the
                 # fallback could never complete. Putting it under
                 # dest.parent keeps the final rename on a single filesystem.
-                # The staged rename itself goes through the pinned
-                # destination descriptor (issue #617), so a parent swapped
-                # after the check cannot redirect the payload at the final
-                # rename. The stage *directory* is still created by path
-                # (copytree cannot target a descriptor), so a swap in that
-                # narrower window can only misplace the throwaway stage,
-                # which the failure cleanup then removes; the trash payload
-                # itself never leaves the trash directory.
                 #
                 # The stage is exclusively owned by this call (UUID-named),
                 # so failure cleanup only ever rmtree's our own stage —
                 # never dest. Without staging, a concurrent duplicate
-                # restore whose copytree fails because the winner already
+                # restore whose copy fails because the winner already
                 # populated dest would rmtree the winner's restored media.
-                stage = dest.parent / f"{STAGE_PREFIX}{uuid.uuid4().hex}"
-                # Mark the stage as actively owned *before* copying into it.
-                # Trash maintenance (empty/purge in any worker) consults this
-                # lock and must skip the stage while a live process holds it;
-                # see _reclaim_orphan_restore_stages.
-                stage_lock = _acquire_stage_lock(stage)
-                stage_failed = True
-                try:
-                    shutil.copytree(item, stage, symlinks=True)
+                if dest_fd is not None:
+                    # Contained staging (issue #617): re-verify the pinned
+                    # descriptor, then create AND populate the stage through
+                    # it. Creating or copying through the parent *path*
+                    # would re-resolve it — a parent swapped for a symlink
+                    # after the descriptor was pinned made the copy write
+                    # payload bytes outside DATA_FOLDER. Every stage-side
+                    # operation below is therefore relative to the pinned
+                    # descriptor (mkdir/openat with dir_fd), and the staged
+                    # rename picks the stage up from the pinned directory
+                    # via src_dir_fd instead of through the path.
+                    _require_verified_dest_fd(dest_fd, verified_parent, resolved_data)
+                    stage_name = f"{STAGE_PREFIX}{uuid.uuid4().hex}"
+                    # Path form of the stage, for the bookkeeping that has
+                    # no descriptor variant: the maintenance lock file and
+                    # the best-effort failure cleanup. Under normal
+                    # conditions this is exactly the stage's own path; if
+                    # the parent is swapped mid-restore it lands elsewhere
+                    # and the (empty or attacker-relocated) stage is left
+                    # for the orphan-stage upkeep instead.
+                    stage = dest.parent / stage_name
+                    # Mark the stage as actively owned *before* copying into
+                    # it. Trash maintenance (empty/purge in any worker)
+                    # consults this lock and must skip the stage while a
+                    # live process holds it; see
+                    # _reclaim_orphan_restore_stages.
+                    stage_lock = _acquire_stage_lock(stage)
+                    stage_failed = True
+                    stage_fd: int | None = None
                     try:
-                        _rename_onto_dest(stage, dest, dest_fd)
-                    except OSError:
-                        # Another restore populated dest concurrently, or
-                        # rename crossed devices again. Clean up only our
-                        # stage; leave dest alone (it may belong to the
-                        # winner or to a later retry).
-                        shutil.rmtree(stage, ignore_errors=True)
-                        raise
-                    stage_failed = False
-                finally:
-                    if stage_failed and stage.exists():
-                        shutil.rmtree(stage, ignore_errors=True)
-                    _release_stage_lock(stage, stage_lock)
+                        os.mkdir(stage_name, 0o700, dir_fd=dest_fd)
+                        stage_fd = os.open(
+                            stage_name,
+                            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
+                            dir_fd=dest_fd,
+                        )
+                        _copy_tree_into_dirfd(item, stage_fd)
+                        try:
+                            _rename_onto_dest(
+                                stage_name, dest, dest_fd,
+                                verified_parent=verified_parent,
+                                resolved_data=resolved_data,
+                                src_dir_fd=dest_fd,
+                            )
+                        except OSError:
+                            # Another restore populated dest concurrently, or
+                            # rename crossed devices again. Clean up only our
+                            # stage; leave dest alone (it may belong to the
+                            # winner or to a later retry).
+                            shutil.rmtree(stage, ignore_errors=True)
+                            raise
+                        stage_failed = False
+                    finally:
+                        if stage_fd is not None:
+                            os.close(stage_fd)
+                        if stage_failed:
+                            shutil.rmtree(stage, ignore_errors=True)
+                        _release_stage_lock(stage, stage_lock)
+                else:
+                    # No descriptor support on this platform: the historical
+                    # path-based staging, with the check-then-copy window the
+                    # descriptor paths above close.
+                    stage = dest.parent / f"{STAGE_PREFIX}{uuid.uuid4().hex}"
+                    stage_lock = _acquire_stage_lock(stage)
+                    stage_failed = True
+                    try:
+                        shutil.copytree(item, stage, symlinks=True)
+                        try:
+                            _rename_onto_dest(stage, dest, None)
+                        except OSError:
+                            # Another restore populated dest concurrently, or
+                            # rename crossed devices again. Clean up only our
+                            # stage; leave dest alone (it may belong to the
+                            # winner or to a later retry).
+                            shutil.rmtree(stage, ignore_errors=True)
+                            raise
+                        stage_failed = False
+                    finally:
+                        if stage_failed and stage.exists():
+                            shutil.rmtree(stage, ignore_errors=True)
+                        _release_stage_lock(stage, stage_lock)
                 try:
                     shutil.rmtree(item)
                 except OSError:
@@ -1154,7 +1375,10 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                         item,
                     )
         else:
-            _rename_onto_dest(item, dest, dest_fd)
+            _rename_onto_dest(
+                item, dest, dest_fd,
+                verified_parent=verified_parent, resolved_data=resolved_data,
+            )
         if meta_file.exists():
             meta_file.unlink(missing_ok=True)
         return True
