@@ -382,7 +382,7 @@ Releases are cut by the standing release-please PR. Do not bump versions by hand
 Tests workflow additionally fails any PR where `pyproject.toml` and `APP_VERSION`
 drift apart.
 
-**Dependency invariant:** `requirements.txt` is the install manifest consumed by the Dockerfile and CI; it pins (or floors) runtime versions. `pyproject.toml` `[project.dependencies]` mirrors those pins as ranges whose lower bound equals the pinned version. The Tests workflow fails any PR where the two disagree (a package present in only one, or a floor that no longer matches the pin). Renovate bumps `requirements.txt`; update `pyproject.toml` in the same PR. `pip` is exempt — it is pinned only so `pip-audit` does not flag pip itself.
+**Dependency invariant:** `requirements.txt` is the install manifest consumed by the Dockerfile and CI; it pins (or floors) runtime versions. `pyproject.toml` `[project.dependencies]` mirrors those pins as ranges whose lower bound equals the pinned version. The Tests workflow fails any PR where the two disagree (a package present in only one, or a floor that no longer matches the pin). Renovate runs with `rangeStrategy: "bump"` across every Python manager (`.renovaterc.json5`), so a bump raises the `requirements.txt` pin *and* the matching `pyproject.toml` floor in the same PR instead of leaving the floor behind. If a Renovate PR edits only one of the two manifests, that automation has regressed: raise the other floor by hand. `pip` is exempt — it is pinned only so `pip-audit` does not flag pip itself.
 
 **Packaging invariant:** the project installs with `pip install .`, so `pyproject.toml`
 declares an explicit `[build-system]` and a `[tool.setuptools]` `py-modules` list. That list
