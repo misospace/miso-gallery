@@ -657,6 +657,71 @@ def _release_restore_claim(claim_fd) -> None:
             os.close(claim_fd)
 
 
+def reserve_upload_destination(data_folder: Path, dest: Path) -> tuple[int | None, str]:
+    """Reserve the gallery path *dest* for an upload with the restore claim.
+
+    An upload and a restore are two writers of one gallery path: a trashed
+    file's ``original`` commonly lives under ``UPLOAD_DIR``, and the upload's
+    exclusive ``O_EXCL`` create does not consult a restore's reservation any
+    more than the restore's ``rename`` consults the create. A restore that
+    has probed the destination free can have its ``rename`` land on a file an
+    upload created in between, overwriting the uploaded bytes while both
+    requests report success (issue #613). Both writers therefore take the
+    same per-destination claim: the claim file for *dest* is derived exactly
+    as ``_reserve_restore_dest`` derives it for a restore — keyed on the
+    resolved parent directory, so every worker contends for one file however
+    it spells ``DATA_FOLDER`` — and the upload takes it before its
+    ``O_EXCL`` create.
+
+    Returns ``(claim_fd, state)``. ``RESTORE_CLAIM_ACQUIRED``: the caller
+    holds the reservation in *claim_fd* and keeps it until it is done with
+    the destination, then releases it via ``release_upload_destination``
+    (the claim file is never unlinked, so one inode ever backs a
+    destination). ``RESTORE_CLAIM_HELD`` or ``RESTORE_CLAIM_UNUSABLE``: this
+    name cannot be taken now (a restore owns it, or its claim file cannot be
+    used), so the caller moves to its next candidate name, which has its own
+    claim file. ``RESTORE_CLAIM_UNSUPPORTED``: the platform has no usable
+    ``flock``, so no candidate can be reserved and *claim_fd* is ``None``;
+    a restore on such a platform refuses to rename at all (it fails closed
+    with ``RestoreDestinationUnavailable``), so there is no rival writer to
+    lose against and the upload proceeds exactly as it did before the claim
+    existed.
+
+    The trash directory is created if missing so the claim can come into
+    existence: an upload to a gallery that never trashed anything must still
+    be able to reserve its destination. A trash directory that cannot be
+    created or used only rules out this candidate name: the caller rotates
+    to its next one, whose claim has its own file.
+
+    On a file system where the lock verdict fails only for one attempt (a
+    transient error rather than a platform without locking), the upload's
+    attempt proceeds without a reservation while a rival restore may still
+    hold the claim — the same best-effort caveat the restore accepts on
+    network mounts (see ``_fd_locks_path``).
+    """
+    try:
+        # trash_dir creates the directory (parents included), so the claim
+        # file below can come into existence even on a gallery that never
+        # trashed anything; a directory that cannot be created or used is
+        # handled with the unusable verdict, not an exception.
+        td = trash_dir(data_folder)
+        # Keyed on the resolved parent (it exists — UPLOAD_DIR is mkdir'd
+        # before the destination is picked), matching the digest a restore
+        # computes for the same gallery path.
+        canonical_parent = dest.parent.resolve()
+    except OSError:
+        return None, RESTORE_CLAIM_UNUSABLE
+    claim_fd, state, _reason = _acquire_restore_claim(
+        _restore_claim_path(td, canonical_parent / dest.name)
+    )
+    return claim_fd, state
+
+
+def release_upload_destination(claim_fd) -> None:
+    """Release an upload's destination reservation (see ``_release_restore_claim``)."""
+    _release_restore_claim(claim_fd)
+
+
 def _restore_dest_is_occupied(candidate: Path, payload_is_dir: bool) -> bool:
     """True when a restore must not rename its payload onto *candidate*.
 
@@ -712,6 +777,10 @@ def _reserve_restore_dest(
     ``original`` path (the same gallery path deleted twice over time) either
     sees the claim held and moves to the next candidate, or acquires it later,
     sees the winner's payload already at ``candidate`` and suffixes too. The
+    upload route takes the same claim for its candidate before its
+    ``O_EXCL`` create (see ``reserve_upload_destination``), so an upload that
+    starts inside this reserve-then-rename window also suffixes instead of
+    being overwritten by the landing rename (issue #613). The
     old probe-then-rename order was a check-then-use race: POSIX ``rename``
     overwrites, so both restores reported success and one payload was discarded
     (issue #608) — the same class of race issue #606 addresses for trash
