@@ -578,10 +578,13 @@ def test_upload_inside_restore_window_takes_token_name(monkeypatch, tmp_path):
     (data_dir / "input").mkdir(parents=True, exist_ok=True)
 
     uploads: list[Path] = []
-    real_rename = trash.Path.rename
+    # Seam on the composed rename primitive (issue #617 routes every
+    # destination-side rename through _rename_onto_dest), same pattern as
+    # the re-seamed concurrent-restore tests in test_folder_trash.py.
+    real_rename = trash._rename_onto_dest
 
-    def interleaved_rename(path, destination):
-        if path == item and not uploads:
+    def interleaved_rename(src, dest, dest_fd, **kwargs):
+        if src == item and not uploads:
             # The upload runs exactly inside the claim-held,
             # destination-still-absent window of the restore.
             resp = client.post(
@@ -591,9 +594,9 @@ def test_upload_inside_restore_window_takes_token_name(monkeypatch, tmp_path):
             )
             assert resp.status_code == 302
             uploads.extend((data_dir / "input").iterdir())
-        return real_rename(path, destination)
+        return real_rename(src, dest, dest_fd, **kwargs)
 
-    monkeypatch.setattr(trash.Path, "rename", interleaved_rename)
+    monkeypatch.setattr(trash, "_rename_onto_dest", interleaved_rename)
     assert restore_from_trash("a.bin", data_dir) is True
 
     # The restore kept the requested name with its own payload...

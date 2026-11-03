@@ -621,6 +621,223 @@ def test_restore_refuses_directory_destination_whose_parent_escapes_data_folder(
     assert meta.exists()
 
 
+def test_restore_survives_parent_swapped_to_symlink_after_check(tmp_path, monkeypatch):
+    """The restore rename must use the already-verified destination directory (#617).
+
+    The parent check resolves ``dest.parent`` and compares it with the
+    resolved data folder, but the rename resolves the path again: a
+    directory inside DATA_FOLDER replaced by a symlink in the
+    check-to-rename window used to carry the payload outside DATA_FOLDER —
+    a swap the resolved-path checks cannot see because they ran before it.
+    The restore pins the verified parent in an open descriptor and renames
+    through it, so a *symlink swap* cannot redirect the payload. A
+    descriptor pins the inode, not the location, so this test relocates
+    the verified directory instead of unlinking it: the descriptor stays
+    perfectly valid while pointing outside the data folder, and only the
+    rename-time re-verification of the descriptor against the verified
+    parent refuses the rename and fails the restore closed.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    albums = data / "albums"
+    albums.mkdir()
+
+    td = trash.trash_dir(data)
+    item = td / "deleted.txt"
+    item.write_bytes(b"SECRET-PAYLOAD")
+    meta = item.with_name(item.name + trash.META_SUFFIX)
+    meta.write_text(json.dumps({"original": "albums/photo.txt"}))
+
+    real_rename = trash._rename_onto_dest
+
+    def swap_then_rename(src, dest, dest_fd, **kwargs):
+        # The swap lands between the parent check and the rename: the
+        # verified directory is moved out of the data folder and its old
+        # path is replaced by a symlink to the moved directory. The pinned
+        # descriptor still refers to the live (relocated) directory, so
+        # only the re-verification — which walks the verified parent again
+        # and refuses through the planted symlink — can reject the rename.
+        albums.rename(outside / "moved_albums")
+        albums.symlink_to(outside / "moved_albums")
+        return real_rename(src, dest, dest_fd, **kwargs)
+
+    monkeypatch.setattr(trash, "_rename_onto_dest", swap_then_rename)
+
+    assert restore_from_trash(item.name, data) is False
+
+    # The payload never left DATA_FOLDER: the relocated directory is empty
+    # (nothing landed behind the planted symlink), and the trashed item and
+    # its metadata are intact for a retry.
+    assert sorted(p.name for p in outside.iterdir()) == ["moved_albums"]
+    assert not any((outside / "moved_albums").iterdir())
+    payload_hits = [
+        p
+        for p in tmp_path.rglob("*")
+        if not p.is_symlink() and p.is_file() and p.read_bytes() == b"SECRET-PAYLOAD"
+    ]
+    assert payload_hits == [item]
+    assert item.exists()
+    assert meta.exists()
+
+
+def test_staged_restore_survives_parent_moved_to_symlink_after_check(tmp_path, monkeypatch):
+    """The cross-device stage must be created and populated through the pinned
+    destination directory (#617).
+
+    The fallback used to build the stage as a path under ``dest.parent`` and
+    hand it to ``shutil.copytree``: a parent swapped for a symlink after the
+    descriptor was pinned made the copy write the payload outside
+    DATA_FOLDER — the descriptor-pinned final rename came too late, after
+    the bytes had already been exposed. The stage is now created and
+    populated through the pinned descriptor, and the descriptor is
+    re-verified before staging begins, so the swap fails the restore closed
+    with the payload still in the trash and no stage ever created.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    albums = data / "albums"
+    albums.mkdir()
+
+    td = trash.trash_dir(data)
+    item = td / "deleted_dir"
+    item.mkdir()
+    (item / "photo.txt").write_bytes(b"SECRET-PAYLOAD")
+    meta = item.with_name(item.name + trash.META_SUFFIX)
+    meta.write_text(json.dumps({"original": "albums/photo.txt"}))
+
+    real_rename = trash._rename_onto_dest
+    first_direct_rename = True
+
+    def exdev_then_swap(src, dest, dest_fd, **kwargs):
+        nonlocal first_direct_rename
+        if kwargs.get("src_dir_fd") is None and first_direct_rename:
+            first_direct_rename = False
+            # The swap lands after the parent check and before the staging:
+            # the verified directory is moved out of the data folder and its
+            # old path replaced by a symlink, then the direct rename fails
+            # as cross-device so the restore takes the staging fallback.
+            albums.rename(outside / "moved_albums")
+            albums.symlink_to(outside / "moved_albums")
+            raise OSError(errno.EXDEV, "cross-device link")
+        return real_rename(src, dest, dest_fd, **kwargs)
+
+    monkeypatch.setattr(trash, "_rename_onto_dest", exdev_then_swap)
+
+    assert restore_from_trash(item.name, data) is False
+
+    # The payload never left DATA_FOLDER: the pre-staging re-verification
+    # refused the relocated descriptor before any stage-side byte was
+    # written, the relocated (attacker-chosen) directory is empty, no stage
+    # was created anywhere, and the trash item and metadata are intact for
+    # a retry.
+    assert not any((outside / "moved_albums").iterdir())
+    assert [p for p in data.rglob(f"{trash.STAGE_PREFIX}*")] == []
+    payload_hits = [
+        p
+        for p in tmp_path.rglob("*")
+        if not p.is_symlink() and p.is_file() and p.read_bytes() == b"SECRET-PAYLOAD"
+    ]
+    assert payload_hits == [item / "photo.txt"]
+    assert item.exists()
+    assert meta.exists()
+
+
+def test_restore_refuses_parent_swapped_to_symlink_before_open(tmp_path, monkeypatch):
+    """A parent swapped between the check and the open must not be pinned (#617).
+
+    The open of the verified destination parent can itself be raced: the
+    swap lands after the resolved-path checks but before the open. The
+    opened descriptor is therefore verified after the fact: the swap here
+    replaces an *intermediate* component, so the raced open succeeds
+    (the final component the attacker planted is a real directory that
+    slips past ``O_NOFOLLOW``) and it is the descriptor's true path
+    re-check against the data folder (``/proc/self/fd/<fd>`` on Linux)
+    that rejects it. The restore fails closed either way.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "a" / "b").mkdir(parents=True)
+    swapped = data / "a"
+    swapped.mkdir()
+    (swapped / "b").mkdir()
+
+    td = trash.trash_dir(data)
+    item = td / "deleted.txt"
+    item.write_bytes(b"SECRET-PAYLOAD")
+    meta = item.with_name(item.name + trash.META_SUFFIX)
+    meta.write_text(json.dumps({"original": "a/b/photo.txt"}))
+
+    real_mkdir = trash.Path.mkdir
+
+    def swap_then_mkdir(path, *args, **kwargs):
+        result = real_mkdir(path, *args, **kwargs)
+        if path == data / "a" / "b":
+            # The swap lands after the resolved-path checks but before the
+            # destination parent is opened: an intermediate directory is
+            # replaced by a symlink out of the data folder, redirecting
+            # the raced open to the attacker's directory.
+            (swapped / "b").rmdir()
+            swapped.rmdir()
+            swapped.symlink_to(outside / "a")
+        return result
+
+    monkeypatch.setattr(trash.Path, "mkdir", swap_then_mkdir)
+
+    assert restore_from_trash(item.name, data) is False
+
+    # The payload never left DATA_FOLDER: the attacker's directory stays
+    # empty, and the trashed item and its metadata are intact for a retry.
+    assert sorted(p.name for p in (outside / "a" / "b").iterdir()) == []
+    payload_hits = [
+        p
+        for p in tmp_path.rglob("*")
+        if not p.is_symlink() and p.is_file() and p.read_bytes() == b"SECRET-PAYLOAD"
+    ]
+    assert payload_hits == [item]
+    assert item.exists()
+    assert meta.exists()
+
+
+def test_restore_allows_data_folder_reached_through_symlinked_config_path(tmp_path):
+    """A symlinked configured DATA_FOLDER path must not fail every restore (#617).
+
+    Deployments commonly reach DATA_FOLDER through a symlinked configured
+    path. ``O_NOFOLLOW`` would refuse that root at open time and fail
+    every root-level restore closed, so the flag is skipped when the
+    parent *is* the (resolved) data folder — the post-open re-check still
+    pins the opened directory to the resolved data folder. The restore
+    must succeed and the payload must land inside the real data folder.
+    """
+    real_data = tmp_path / "real_data"
+    real_data.mkdir()
+    data = tmp_path / "data"
+    data.symlink_to(real_data)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+
+    td = trash.trash_dir(data)
+    item = td / "deleted.txt"
+    item.write_bytes(b"SECRET-PAYLOAD")
+    meta = item.with_name(item.name + trash.META_SUFFIX)
+    meta.write_text(json.dumps({"original": "photo.txt"}))
+
+    # No O_NOFOLLOW at open for the data folder root itself: the raced-open
+    # re-check (``/proc/self/fd`` resolving to the resolved data folder)
+    # pins the opened directory instead, so a symlinked configured
+    # DATA_FOLDER path restores normally.
+    assert restore_from_trash(item.name, data) is True
+    assert (real_data / "photo.txt").read_bytes() == b"SECRET-PAYLOAD"
+    assert sorted(p.name for p in outside.iterdir()) == []
+    assert not item.exists()
+    assert not meta.exists()
+
+
 def test_purge_old_trash_survives_item_vanishing_mid_sweep(tmp_path, monkeypatch):
     """A restore renaming an expired entry away mid-sweep skips it (#565).
 
@@ -1323,25 +1540,27 @@ class TestRestoreConsumesTrashedDirectory:
         trash_item = trash.trash_dir(data_dir) / entry
         meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
 
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
         trash_root_resolved = trash.trash_dir(data_dir).resolve()
 
-        def cross_device_rename(path, destination):
+        def cross_device_rename(src, dest, dest_fd, **kwargs):
             # Simulate a true cross-filesystem restore: any rename whose
             # source lives under the trash filesystem fails with EXDEV,
             # including the staged rename if the stage is (incorrectly)
             # placed back under td. Renames whose source is under the
-            # destination filesystem — which is what the new staging
-            # produces — succeed.
-            try:
-                resolved = path.resolve()
-            except OSError:
-                return real_rename(path, destination)
-            if trash_root_resolved in resolved.parents or resolved == trash_root_resolved:
-                raise OSError("cross-device")
-            return real_rename(path, destination)
+            # destination filesystem — which is what the descriptor-staged
+            # fallback produces (src_dir_fd set, bare stage name) — are
+            # delegated to the real descriptor rename and succeed.
+            if kwargs.get("src_dir_fd") is None:
+                try:
+                    resolved = Path(src).resolve()
+                except OSError:
+                    return real_rename(src, dest, dest_fd, **kwargs)
+                if trash_root_resolved in resolved.parents or resolved == trash_root_resolved:
+                    raise OSError("cross-device")
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+        monkeypatch.setattr(trash, "_rename_onto_dest", cross_device_rename)
 
         assert restore_from_trash(entry, data_dir) is True
         assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
@@ -1359,21 +1578,27 @@ class TestRestoreConsumesTrashedDirectory:
         trash_item = trash.trash_dir(data_dir) / entry
         meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
 
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
 
-        def cross_device_rename(path, destination):
-            if path == trash_item:
+        def cross_device_rename(src, dest, dest_fd, **kwargs):
+            if src == trash_item and kwargs.get("src_dir_fd") is None:
                 raise OSError("cross-device")
-            return real_rename(path, destination)
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        def failing_copytree(src, dest, *args, **kwargs):
-            # Leave a partial copy behind, like a real interrupted copytree.
-            dest.mkdir(parents=True, exist_ok=True)
-            (dest / "partial.jpg").write_bytes(b"partial")
+        monkeypatch.setattr(trash, "_rename_onto_dest", cross_device_rename)
+
+        def failing_population(src, dest_dir_fd):
+            # Leave a partial copy behind, like a real interrupted copy.
+            fd = os.open(
+                "partial.jpg", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=dest_dir_fd
+            )
+            try:
+                os.write(fd, b"partial")
+            finally:
+                os.close(fd)
             raise OSError("disk full")
 
-        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
-        monkeypatch.setattr(trash.shutil, "copytree", failing_copytree)
+        monkeypatch.setattr(trash, "_copy_tree_into_dirfd", failing_population)
 
         assert restore_from_trash(entry, data_dir) is False
         assert trash_item.is_dir()
@@ -1424,22 +1649,22 @@ class TestRestoreConsumesTrashedDirectory:
 
         # Force the rename branch to fail (cross-device or already-moved
         # source) so the fallback runs.
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
 
-        def failing_rename(path, destination):
-            if path == trash_item:
+        def failing_rename(src, dest, dest_fd, **kwargs):
+            if src == trash_item and kwargs.get("src_dir_fd") is None:
                 raise OSError("source no longer present")
-            return real_rename(path, destination)
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        # Force copytree to fail with FileExistsError, simulating the
-        # race where another restore has already populated the computed
+        # Force the stage population to fail with FileExistsError, simulating
+        # the race where another restore has already populated the computed
         # destination path.
-        def racing_copytree(src, dest, *args, **kwargs):
-            raise FileExistsError(f"dest {dest} already exists")
+        def racing_population(src, dest_dir_fd):
+            raise FileExistsError("dest album already exists")
 
         monkeypatch.setattr(trash.shutil, "rmtree", tracking_rmtree)
-        monkeypatch.setattr(trash.Path, "rename", failing_rename)
-        monkeypatch.setattr(trash.shutil, "copytree", racing_copytree)
+        monkeypatch.setattr(trash, "_rename_onto_dest", failing_rename)
+        monkeypatch.setattr(trash, "_copy_tree_into_dirfd", racing_population)
 
         assert restore_from_trash(entry, data_dir) is False
 
@@ -1516,20 +1741,20 @@ class TestRestoreConsumesTrashedDirectory:
 
         # Force rename to fail for the trash source (B observes
         # "source gone" because A moved it).
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
 
-        def failing_rename(path, destination):
-            if path == trash_item:
+        def failing_rename(src, dest, dest_fd, **kwargs):
+            if src == trash_item and kwargs.get("src_dir_fd") is None:
                 raise OSError("source no longer present")
-            return real_rename(path, destination)
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        # Force copytree to fail because dest is occupied by A.
-        def racing_copytree(src, dest, *args, **kwargs):
-            raise FileExistsError(f"dest {dest} already exists")
+        # Force the stage population to fail because dest is occupied by A.
+        def racing_population(src, dest_dir_fd):
+            raise FileExistsError("dest album already exists")
 
         monkeypatch.setattr(trash.Path, "exists", exists_ignores_rival)
-        monkeypatch.setattr(trash.Path, "rename", failing_rename)
-        monkeypatch.setattr(trash.shutil, "copytree", racing_copytree)
+        monkeypatch.setattr(trash, "_rename_onto_dest", failing_rename)
+        monkeypatch.setattr(trash, "_copy_tree_into_dirfd", racing_population)
 
         # Request B runs: rename fails, fallback copytree fails,
         # cleanup runs. B must return False without clobbering the
@@ -1599,18 +1824,18 @@ class TestConcurrentRestoreDestinationAllocation:
         self._file_item(td, "b.bin", "albums/photo.txt", b"second")
         base = data / "albums/photo.txt"
 
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
         rival_results: list[bool] = []
 
-        def interleaved_rename(path, destination):
-            if path == first and not rival_results:
+        def interleaved_rename(src, dest, dest_fd, **kwargs):
+            if src == first and not rival_results:
                 # The rival restore runs after the first restore picked
                 # ``base`` and before its rename lands: with the old
                 # probe-then-rename order both saw a free destination.
                 rival_results.append(restore_from_trash("b.bin", data))
-            return real_rename(path, destination)
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        monkeypatch.setattr(trash.Path, "rename", interleaved_rename)
+        monkeypatch.setattr(trash, "_rename_onto_dest", interleaved_rename)
 
         assert restore_from_trash("a.bin", data) is True
         assert rival_results == [True]
@@ -1628,15 +1853,15 @@ class TestConcurrentRestoreDestinationAllocation:
         first = self._dir_item(td, "dir_a", "album", "a.txt", b"A")
         self._dir_item(td, "dir_b", "album", "b.txt", b"B")
 
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
         rival_results: list[bool] = []
 
-        def interleaved_rename(path, destination):
-            if path == first and not rival_results:
+        def interleaved_rename(src, dest, dest_fd, **kwargs):
+            if src == first and not rival_results:
                 rival_results.append(restore_from_trash("dir_b", data))
-            return real_rename(path, destination)
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        monkeypatch.setattr(trash.Path, "rename", interleaved_rename)
+        monkeypatch.setattr(trash, "_rename_onto_dest", interleaved_rename)
 
         assert restore_from_trash("dir_a", data) is True
         assert rival_results == [True]
@@ -1753,15 +1978,15 @@ class TestConcurrentRestoreDestinationAllocation:
         first = self._file_item(td, "a.bin", "alias/photo.png", b"A")
         self._file_item(td, "b.bin", "albums/photo.png", b"B")
 
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
         rival_results: list[bool] = []
 
-        def interleaved_rename(path, destination):
-            if path == first and not rival_results:
+        def interleaved_rename(src, dest, dest_fd, **kwargs):
+            if src == first and not rival_results:
                 rival_results.append(restore_from_trash("b.bin", data))
-            return real_rename(path, destination)
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        monkeypatch.setattr(trash.Path, "rename", interleaved_rename)
+        monkeypatch.setattr(trash, "_rename_onto_dest", interleaved_rename)
 
         assert restore_from_trash("a.bin", data) is True
         assert rival_results == [True]
@@ -1899,10 +2124,10 @@ class TestConcurrentRestoreDestinationAllocation:
         claim.symlink_to(victim)
 
         victim_lockable: list[bool] = []
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
 
-        def check_victim(path, destination):
-            if path == item:
+        def check_victim(src, dest, dest_fd, **kwargs):
+            if src == item:
                 fd = os.open(victim, os.O_RDWR)
                 try:
                     fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1912,9 +2137,9 @@ class TestConcurrentRestoreDestinationAllocation:
                     victim_lockable.append(True)
                 finally:
                     os.close(fd)
-            return real_rename(path, destination)
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        monkeypatch.setattr(trash.Path, "rename", check_victim)
+        monkeypatch.setattr(trash, "_rename_onto_dest", check_victim)
 
         # O_NOFOLLOW refuses to open the planted link, so the reservation for
         # this candidate name is unusable and the restore walks on to the
@@ -1937,16 +2162,16 @@ class TestConcurrentRestoreDestinationAllocation:
         first = self._file_item(td, "a.bin", "albums/photo.txt", b"first")
         self._file_item(td, "b.bin", "albums/photo.txt", b"second")
 
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
 
-        def failing_first_rename(path, destination):
-            if path == first:
+        def failing_first_rename(src, dest, dest_fd, **kwargs):
+            if src == first:
                 raise OSError("disk full")
-            return real_rename(path, destination)
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        monkeypatch.setattr(trash.Path, "rename", failing_first_rename)
+        monkeypatch.setattr(trash, "_rename_onto_dest", failing_first_rename)
         assert restore_from_trash("a.bin", data) is False
-        monkeypatch.setattr(trash.Path, "rename", real_rename)
+        monkeypatch.undo()
 
         # The rival gets the original name, not a timestamped fallback, and the
         # failed item stays in trash for its own retry.
@@ -1964,21 +2189,23 @@ class TestConcurrentRestoreDestinationAllocation:
         self._dir_item(td, "dir_b", "album", "b.txt", b"B")
         trash_root = td.resolve()
 
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
         rival_results: list[bool] = []
 
-        def cross_device_rename(path, destination):
+        def cross_device_rename(src, dest, dest_fd, **kwargs):
             # Every rename out of the trash fails, so both restores must use
-            # the staged copytree fallback; the rival runs while the first one
-            # holds the reservation for ``album``.
-            resolved = path.resolve()
-            if trash_root in resolved.parents or resolved == trash_root:
-                if path == first and not rival_results:
-                    rival_results.append(restore_from_trash("dir_b", data))
-                raise OSError("cross-device")
-            return real_rename(path, destination)
+            # the staged descriptor fallback; the rival runs while the first
+            # one holds the reservation for ``album``. Staged renames
+            # (src_dir_fd set) are delegated — they carry no trash source.
+            if kwargs.get("src_dir_fd") is None:
+                resolved = Path(src).resolve()
+                if trash_root in resolved.parents or resolved == trash_root:
+                    if src == first and not rival_results:
+                        rival_results.append(restore_from_trash("dir_b", data))
+                    raise OSError("cross-device")
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+        monkeypatch.setattr(trash, "_rename_onto_dest", cross_device_rename)
 
         assert restore_from_trash("dir_a", data) is True
         assert rival_results == [True]
@@ -2135,39 +2362,34 @@ class TestActiveRestoreStageProtection:
 
         Renames whose source lives under the trash fail with EXDEV (a true
         cross-filesystem restore), and *maintenance* is invoked between the
-        real ``copytree`` and the staged ``rename`` — the window in which a
+        stage population and the staged rename — the window in which a
         second worker's ordinary maintenance used to delete the live stage.
-        The assertion inside the copytree wrapper fails loudly if the sweep
-        removes the stage the restore still owns.
+        The assertion inside the population wrapper fails loudly if the
+        sweep removes the stage the restore still owns.
         """
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
+        real_population = trash._copy_tree_into_dirfd
         trash_root = trash.trash_dir(data_dir).resolve()
 
-        def cross_device_rename(path, destination):
-            try:
-                resolved = path.resolve()
-            except OSError:
-                return real_rename(path, destination)
-            if trash_root in resolved.parents or resolved == trash_root:
-                raise OSError(errno.EXDEV, "cross-device link")
-            return real_rename(path, destination)
+        def cross_device_rename(src, dest, dest_fd, **kwargs):
+            if kwargs.get("src_dir_fd") is None:
+                try:
+                    resolved = Path(src).resolve()
+                except OSError:
+                    return real_rename(src, dest, dest_fd, **kwargs)
+                if trash_root in resolved.parents or resolved == trash_root:
+                    raise OSError(errno.EXDEV, "cross-device link")
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        real_copytree = trash.shutil.copytree
-
-        def copytree_with_maintenance(src, dest, *args, **kwargs):
-            result = real_copytree(src, dest, *args, **kwargs)
-            # shutil.copytree converts to str and recurses through this same
-            # attribute; only the top-level call from restore_from_trash
-            # passes Path objects, so inject maintenance exactly once.
-            if isinstance(dest, Path):
-                maintenance()
-                assert dest.is_dir(), (
-                    "concurrent trash maintenance deleted an active restore stage"
-                )
+        def population_with_maintenance(src, dest_dir_fd):
+            result = real_population(src, dest_dir_fd)
+            maintenance()
+            stages = [p for p in data_dir.rglob(f"{trash.STAGE_PREFIX}*") if p.is_dir()]
+            assert stages, "concurrent trash maintenance deleted an active restore stage"
             return result
 
-        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
-        monkeypatch.setattr(trash.shutil, "copytree", copytree_with_maintenance)
+        monkeypatch.setattr(trash, "_rename_onto_dest", cross_device_rename)
+        monkeypatch.setattr(trash, "_copy_tree_into_dirfd", population_with_maintenance)
 
     def test_purge_during_active_cross_device_restore_preserves_stage(
         self, monkeypatch, tmp_path
@@ -2449,17 +2671,18 @@ class TestActiveRestoreStageProtection:
         trash_item = trash.trash_dir(data_dir) / entry
         meta_file = trash.trash_dir(data_dir) / (entry + trash.META_SUFFIX)
 
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
         trash_root = trash.trash_dir(data_dir).resolve()
 
-        def cross_device_rename(path, destination):
-            try:
-                resolved = path.resolve()
-            except OSError:
-                return real_rename(path, destination)
-            if trash_root in resolved.parents or resolved == trash_root:
-                raise OSError(errno.EXDEV, "cross-device link")
-            return real_rename(path, destination)
+        def cross_device_rename(src, dest, dest_fd, **kwargs):
+            if kwargs.get("src_dir_fd") is None:
+                try:
+                    resolved = Path(src).resolve()
+                except OSError:
+                    return real_rename(src, dest, dest_fd, **kwargs)
+                if trash_root in resolved.parents or resolved == trash_root:
+                    raise OSError(errno.EXDEV, "cross-device link")
+            return real_rename(src, dest, dest_fd, **kwargs)
 
         real_rmtree = trash.shutil.rmtree
 
@@ -2468,7 +2691,7 @@ class TestActiveRestoreStageProtection:
                 raise OSError("directory busy")
             return real_rmtree(path, *args, **kwargs)
 
-        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+        monkeypatch.setattr(trash, "_rename_onto_dest", cross_device_rename)
         monkeypatch.setattr(trash.shutil, "rmtree", stuck_rmtree)
 
         assert restore_from_trash(entry, data_dir) is False
@@ -2524,19 +2747,20 @@ class TestSourceLockProtectsTrashSource:
 
     def _force_cross_device_restore(self, monkeypatch, data_dir):
         """Make every rename whose source lives under the trash fail EXDEV."""
-        real_rename = trash.Path.rename
+        real_rename = trash._rename_onto_dest
         trash_root = trash.trash_dir(data_dir).resolve()
 
-        def cross_device_rename(path, destination):
-            try:
-                resolved = path.resolve()
-            except OSError:
-                return real_rename(path, destination)
-            if trash_root in resolved.parents or resolved == trash_root:
-                raise OSError(errno.EXDEV, "cross-device link")
-            return real_rename(path, destination)
+        def cross_device_rename(src, dest, dest_fd, **kwargs):
+            if kwargs.get("src_dir_fd") is None:
+                try:
+                    resolved = Path(src).resolve()
+                except OSError:
+                    return real_rename(src, dest, dest_fd, **kwargs)
+                if trash_root in resolved.parents or resolved == trash_root:
+                    raise OSError(errno.EXDEV, "cross-device link")
+            return real_rename(src, dest, dest_fd, **kwargs)
 
-        monkeypatch.setattr(trash.Path, "rename", cross_device_rename)
+        monkeypatch.setattr(trash, "_rename_onto_dest", cross_device_rename)
 
     def test_empty_mid_copytree_preserves_trash_source(self, monkeypatch, tmp_path):
         """The #557 data-loss repro: ``empty_trash`` running mid-``copytree``.
@@ -2556,22 +2780,20 @@ class TestSourceLockProtectsTrashSource:
         trash_item, meta_file = self._trash_paths(data_dir, entry)
 
         self._force_cross_device_restore(monkeypatch, data_dir)
-        real_copytree = trash.shutil.copytree
+        real_population = trash._copy_tree_into_dirfd
 
-        def copytree_with_maintenance(src, dest, *args, **kwargs):
-            result = real_copytree(src, dest, *args, **kwargs)
-            # shutil.copytree recurses through this same attribute; only the
-            # top-level call from restore_from_trash passes Path objects.
-            if isinstance(dest, Path):
-                deleted = trash.empty_trash(data_dir)
-                assert deleted == 0, (
-                    "empty_trash deleted entries while a restore was copying"
-                )
-                assert trash_item.is_dir(), "the trash source was deleted mid-copytree"
-                assert meta_file.exists(), "the trash metadata was deleted mid-copytree"
+        def population_with_maintenance(src, dest_dir_fd):
+            result = real_population(src, dest_dir_fd)
+            # Runs between the stage population and the staged rename.
+            deleted = trash.empty_trash(data_dir)
+            assert deleted == 0, (
+                "empty_trash deleted entries while a restore was copying"
+            )
+            assert trash_item.is_dir(), "the trash source was deleted mid-copy"
+            assert meta_file.exists(), "the trash metadata was deleted mid-copy"
             return result
 
-        monkeypatch.setattr(trash.shutil, "copytree", copytree_with_maintenance)
+        monkeypatch.setattr(trash, "_copy_tree_into_dirfd", population_with_maintenance)
 
         assert restore_from_trash(entry, data_dir) is True
         assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
@@ -2660,14 +2882,14 @@ class TestSourceLockProtectsTrashSource:
         trash_item, meta_file = self._trash_paths(data_dir, entry)
 
         self._force_cross_device_restore(monkeypatch, data_dir)
-        real_copytree = trash.shutil.copytree
+        real_population = trash._copy_tree_into_dirfd
         copy_calls = []
 
         def must_not_copy(*args, **kwargs):
             copy_calls.append(True)
             raise AssertionError("restore must fail fast on a held source lock")
 
-        monkeypatch.setattr(trash.shutil, "copytree", must_not_copy)
+        monkeypatch.setattr(trash, "_copy_tree_into_dirfd", must_not_copy)
 
         fh = self._hold_meta_lock(meta_file)
         try:
@@ -2682,8 +2904,8 @@ class TestSourceLockProtectsTrashSource:
 
         # Once the lock is free the very same item restores normally — the
         # EXDEV forcing stays active, so this exercises the real cross-device
-        # staging path with the genuine copytree restored.
-        monkeypatch.setattr(trash.shutil, "copytree", real_copytree)
+        # staging path with the genuine stage population restored.
+        monkeypatch.setattr(trash, "_copy_tree_into_dirfd", real_population)
         assert restore_from_trash(entry, data_dir) is True
         assert (folder / "a.jpg").read_bytes() == b"\xff\xd8\xff\xe0a"
         assert list_trash(data_dir) == []
