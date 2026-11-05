@@ -178,9 +178,13 @@ def _gallery_item_rel_path(item: Path) -> str | None:
 def _tag_store() -> TagStore:
     """Get or create the singleton TagStore instance.
 
-    Caches the TagStore at module scope so only one SQLite connection is opened
-    per process, avoiding WAL contention and file-descriptor churn under
-    Gunicorn multi-worker deployments.
+    Caches the TagStore at module scope so each Gunicorn worker process builds
+    exactly one store (issue #633). The singleton caches the store, not a
+    connection: the store itself keeps one SQLite connection per thread and
+    reuses it across operations, so the WAL PRAGMAs and schema DDL run only
+    when a connection is first opened and steady-state tag reads and writes no
+    longer pay a connect per operation (the previous per-call churn was
+    costly on NFS-backed data folders).
     """
     if not hasattr(_tag_store, "_instance"):
         _tag_store._instance = TagStore(_app().TAG_DATABASE)
