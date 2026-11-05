@@ -634,8 +634,20 @@ def _serve_video_with_range(source_path: Path):
     end_str = match.group(2)
     end = int(end_str) if end_str else file_size - 1
 
-    # Clamp to valid range
-    start = max(0, min(start, file_size - 1))
+    # A first-byte-pos at or beyond the representation size — which includes
+    # every range on an empty file — is unsatisfiable (RFC 9110 §14.2): respond
+    # 416 with an unsatisfied-range Content-Range instead of clamping into a
+    # phantom byte, which for empty files advertised Content-Length 1 while
+    # sending no body bytes.
+    if start >= file_size:
+        response = make_response("")
+        response.status_code = 416
+        response.headers["Content-Range"] = f"bytes */{file_size}"
+        response.headers["Accept-Ranges"] = "bytes"
+        return response
+
+    # Clamp the last-byte-pos to the end of the representation (a last-byte-pos
+    # past the end means "to EOF"), never below the first-byte-pos.
     end = max(start, min(end, file_size - 1))
 
     length = end - start + 1
