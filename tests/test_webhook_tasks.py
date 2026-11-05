@@ -1,3 +1,5 @@
+import json
+import shlex
 import threading
 import time
 
@@ -561,3 +563,87 @@ def test_webhook_run_rejects_non_object_json_bodies(monkeypatch, tmp_path):
     )
     assert resp_unauth.status_code == 401
     assert "secret" in resp_unauth.get_json()["error"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #630: _render_task_command substituted params by
+# repeatedly calling str.replace over the whole rendered string, so a param
+# value containing the literal text "{params.<other-key>}" was substituted a
+# second time inside its own shlex.quote region. The colliding quote
+# characters let shlex.split split that value into extra argv entries,
+# injecting arguments into the operator-configured command.
+# ---------------------------------------------------------------------------
+
+
+def test_render_task_command_nested_placeholder_stays_single_argv_entry():
+    """A value that is another key's placeholder must not re-expand."""
+    from webhook_tasks import _render_task_command
+
+    template = "process.sh --src {params.name} --mode {params.mode}"
+
+    rendered = _render_task_command(template, {"name": "{params.mode}", "mode": "a b"})
+    assert shlex.split(rendered) == [
+        "process.sh",
+        "--src",
+        "{params.mode}",
+        "--mode",
+        "a b",
+    ]
+
+    # The exploit shape from the issue: the attacker-supplied value must not
+    # become extra argv entries ("--evil-flag" parsed as its own argument).
+    rendered = _render_task_command(
+        template, {"name": "{params.mode}", "mode": "--evil-flag payload"}
+    )
+    assert shlex.split(rendered) == [
+        "process.sh",
+        "--src",
+        "{params.mode}",
+        "--mode",
+        "--evil-flag payload",
+    ]
+
+
+def test_render_task_command_value_with_sentinel_text_stays_single_argv_entry():
+    """A value containing the renderer's sentinel token text stays opaque."""
+    from webhook_tasks import _render_task_command
+
+    template = "process.sh --a {params.a} --b {params.b}"
+    rendered = _render_task_command(template, {"a": "\x00params1\x00", "b": "evil arg"})
+    assert shlex.split(rendered) == [
+        "process.sh",
+        "--a",
+        "\x00params1\x00",
+        "--b",
+        "evil arg",
+    ]
+
+
+def test_webhook_run_nested_placeholder_value_is_single_argv_entry(monkeypatch, tmp_path):
+    """End-to-end: through /api/webhook/run a nested {params.*} value must
+    reach the task process as one opaque argv element."""
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd=(
+            'python3 -c "import sys, json; print(json.dumps(sys.argv[1:]))" '
+            "--src {params.name} --mode {params.mode}"
+        ),
+    )
+    resp = client.post(
+        "/api/webhook/run",
+        json={
+            "task": "generate",
+            "params": {"name": "{params.mode}", "mode": "--evil-flag payload"},
+        },
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    payload = resp.get_json()
+    assert payload["success"] is True
+    assert json.loads(payload["stdout"]) == [
+        "--src",
+        "{params.mode}",
+        "--mode",
+        "--evil-flag payload",
+    ]
