@@ -457,7 +457,11 @@ def test_root_health_endpoint_defaults_version_when_env_unset(monkeypatch, tmp_p
     payload, status = health.health()
     body = payload.get_json()
     assert status == 200
-    assert body["version"] == "v0.1.x"
+    # Issue #631: the no-env fallback must track the app's bundled version
+    # (release-please-managed in app.py), never a hard-coded literal that
+    # drifts from the shipped release.
+    assert body["version"] == app_module.DEFAULT_APP_VERSION
+    assert body["version"] == app_module.APP_VERSION
 
 
 def test_root_health_endpoint_uses_only_read_probe(monkeypatch, tmp_path, flask_ctx):

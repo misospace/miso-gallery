@@ -10,6 +10,13 @@ COPY templates/ templates/
 COPY assets/ assets/
 COPY entrypoint.sh .
 
+# APP_VERSION is deliberately NOT set in the image: app.py's
+# DEFAULT_APP_VERSION is the single release-managed version source
+# (release-please keeps it in sync with pyproject.toml and
+# .release-please-manifest.json), and health.py's /health endpoint falls back
+# to it when the env is unset (issue #631). Pinning a version literal here
+# would drift from the release on the next version bump.
+
 # Create unprivileged user and ensure /data is writable.
 # If the container needs to bind to a privileged port (<1024), a root-init
 # wrapper is needed; the default PORT=5000 does not require this.
