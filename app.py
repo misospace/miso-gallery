@@ -63,6 +63,7 @@ from gallery_scan import (
     is_excluded_gallery_path,
     is_excluded_media_path,
     is_media_file,
+    is_servable_media,
     iter_gallery_items,
     media_metadata,
     recent_gallery_entries,
@@ -138,6 +139,7 @@ __all__ = [
     "is_excluded_gallery_path",
     "is_excluded_media_path",
     "is_media_file",
+    "is_servable_media",
     "iter_gallery_items",
     "media_metadata",
     "recent_gallery_entries",
@@ -456,7 +458,7 @@ def service_worker():
 def images(filename: str):
     rel_path = sanitize_rel_path(filename)
     media_path = DATA_FOLDER / rel_path
-    if not is_media_file(media_path) or is_excluded_media_path(media_path):
+    if not is_servable_media(media_path):
         abort(404)
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
@@ -668,7 +670,7 @@ def _serve_video_with_range(source_path: Path):
 def thumb(filename: str):
     rel_path = sanitize_rel_path(filename)
     source_path = source_file_path(rel_path)
-    if not source_path.exists() or not is_media_file(source_path) or is_excluded_media_path(source_path):
+    if not is_servable_media(source_path):
         return "Not found", 404
 
     ensure_thumbnail_cache_dir()
@@ -692,7 +694,7 @@ def thumb(filename: str):
 def view(filename: str):
     rel_path = sanitize_rel_path(filename)
     media_path = DATA_FOLDER / rel_path
-    if not is_media_file(media_path) or is_excluded_media_path(media_path):
+    if not is_servable_media(media_path):
         abort(404)
     return send_from_directory(str(DATA_FOLDER), rel_path)
 
@@ -1307,7 +1309,7 @@ def image_metadata(relpath: str):
     # that resolves outside DATA_FOLDER (a caller must not read the text
     # chunks of an arbitrary filesystem target) or into a hidden path such as
     # .trash/ (issue #611).
-    if not media_path.exists() or not is_media_file(media_path) or is_excluded_media_path(media_path):
+    if not is_servable_media(media_path):
         return {"error": "Image not found"}, 404
     return {"metadata": read_image_metadata(media_path)}
 
