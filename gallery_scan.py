@@ -156,6 +156,19 @@ def is_excluded_media_path(path: Path) -> bool:
     return any(part.startswith(".") for part in resolved_parts)
 
 
+def is_servable_media(path: Path) -> bool:
+    """True when *path* is existing media the gallery may serve or mutate.
+
+    The shared guard composed by every media-serving and media-mutating
+    route (issue #611): the path exists, ``is_media_file()`` accepts it, and
+    ``is_excluded_media_path()`` does not reject it. Resolved through the
+    live ``app`` module so monkeypatching of either predicate stays
+    effective, like the helpers it composes.
+    """
+    app = _app()
+    return path.exists() and app.is_media_file(path) and not app.is_excluded_media_path(path)
+
+
 def _gallery_item_rel_path(item: Path) -> str | None:
     """Gallery-relative POSIX path for a walked item, or ``None`` if it is
     no longer usable.

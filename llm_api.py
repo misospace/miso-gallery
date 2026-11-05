@@ -196,7 +196,7 @@ def register_llm_routes(app, log_security_event) -> None:
         # /etc/passwd, #447) or into a hidden path such as .trash/, so a
         # read-scoped LLM API key holder cannot obtain media_metadata() for
         # trashed media or an arbitrary filesystem target.
-        if not media_path.exists() or not app_module.is_media_file(media_path) or app_module.is_excluded_media_path(media_path):
+        if not app_module.is_servable_media(media_path):
             return {"error": "Image not found"}, 404
         return app_module.media_metadata(media_path)
 
@@ -303,7 +303,7 @@ def register_llm_routes(app, log_security_event) -> None:
                 continue
             safe_rel_path = app_module.sanitize_rel_path(rel_path)
             media_path = app_module.source_file_path(safe_rel_path)
-            if media_path.exists() and app_module.is_media_file(media_path) and not app_module.is_excluded_media_path(media_path):
+            if app_module.is_servable_media(media_path):
                 if action == "remove":
                     store.remove_tags(safe_rel_path, normalized_tags)
                 else:
@@ -329,7 +329,7 @@ def register_llm_routes(app, log_security_event) -> None:
         # The resolved-path guard (issue #611): a symlink into .trash/ or
         # another hidden path is not movable media, so a write-scoped key
         # cannot move it or its trash entry.
-        if not media_path.exists() or not app_module.is_media_file(media_path) or app_module.is_excluded_media_path(media_path):
+        if not app_module.is_servable_media(media_path):
             return {"error": "Image not found"}, 404
         invalid = _invalid_bool_flag(payload, "dry_run")
         if invalid is not None:
@@ -376,7 +376,7 @@ def register_llm_routes(app, log_security_event) -> None:
                 continue
             safe_rel_path = app_module.sanitize_rel_path(rel_path)
             media_path = app_module.source_file_path(safe_rel_path)
-            if not media_path.exists() or not app_module.is_media_file(media_path) or app_module.is_excluded_media_path(media_path):
+            if not app_module.is_servable_media(media_path):
                 skipped.append(safe_rel_path)
                 continue
             if dry_run:
