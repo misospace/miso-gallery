@@ -23,6 +23,12 @@ import threading
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
 _VALID_TASK_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
+# Command-template placeholders are matched template-side with a restricted
+# key pattern (issue #634). Per-key literal replacement let a caller-supplied
+# key containing `} ... {params.` match a span across two adjacent operator
+# placeholders and delete operator template text.
+_PARAM_PLACEHOLDER_RE = re.compile(r"\{params\.([A-Za-z0-9_-]+)\}")
+
 # Per-process concurrency cap for webhook task subprocesses (issue #448).
 #
 # `run_configured_task()` invokes a configured command via `subprocess.run(...)`
@@ -73,11 +79,25 @@ def _validate_task_name(task_name: str) -> str | None:
 
 
 def _render_task_command(template: str, params: dict[str, object]) -> str:
-    rendered = template
+    """Substitute ``{params.<key>}`` placeholders in a task command template.
+
+    Placeholders are matched template-side with a restricted key pattern
+    (``[A-Za-z0-9_-]+``, issue #634), never by literal string replacement of
+    caller-supplied keys: a key containing ``} ... {params.`` could otherwise
+    span two adjacent operator placeholders and swallow template text.
+
+    Behavior change for exotic param keys: keys outside ``[A-Za-z0-9_-]`` no
+    longer match a placeholder, so a template placeholder written with such a
+    key now fails the missing-params check instead of rendering.
+    """
     for key, value in params.items():
         if isinstance(value, (dict, list)):
             raise ValueError(f"params.{key} must be a scalar value")
-        rendered = rendered.replace(f"{{params.{key}}}", shlex.quote(str(value)))
+
+    rendered = _PARAM_PLACEHOLDER_RE.sub(
+        lambda m: shlex.quote(str(params[m.group(1)])) if m.group(1) in params else m.group(0),
+        template,
+    )
 
     if "{params." in rendered:
         raise ValueError("missing required params for command template")
