@@ -73,16 +73,36 @@ def _validate_task_name(task_name: str) -> str | None:
 
 
 def _render_task_command(template: str, params: dict[str, object]) -> str:
+    """Substitute ``{params.<key>}`` placeholders with shell-quoted values.
+
+    Rendering runs in two passes so a param value can never be re-substituted
+    (issue #630). Pass 1 replaces each known placeholder with a NUL-delimited
+    sentinel token; NUL cannot appear in a template read from the environment
+    (env values are NUL-terminated C strings), so placeholders left in the
+    template afterwards are genuinely missing params. Pass 2 splices the
+    ``shlex.quote``d values in with a single ``re.sub`` pass: substituted text
+    is never rescanned, so a value containing the literal text
+    ``{params.<other-key>}`` (or sentinel text) stays one opaque argv element
+    instead of being expanded inside its own quotes and split by
+    ``shlex.split`` into extra arguments.
+    """
+    quoted_by_sentinel: dict[str, str] = {}
     rendered = template
-    for key, value in params.items():
+    for index, (key, value) in enumerate(params.items()):
         if isinstance(value, (dict, list)):
             raise ValueError(f"params.{key} must be a scalar value")
-        rendered = rendered.replace(f"{{params.{key}}}", shlex.quote(str(value)))
+        sentinel = f"\x00params{index}\x00"
+        rendered = rendered.replace(f"{{params.{key}}}", sentinel)
+        quoted_by_sentinel[sentinel] = shlex.quote(str(value))
 
     if "{params." in rendered:
         raise ValueError("missing required params for command template")
 
-    return rendered
+    if not quoted_by_sentinel:
+        return rendered
+
+    sentinel_re = re.compile("|".join(map(re.escape, quoted_by_sentinel)))
+    return sentinel_re.sub(lambda match: quoted_by_sentinel[match.group(0)], rendered)
 
 
 def _app():
