@@ -86,7 +86,7 @@ def test_video_range_invalid_returns_200(monkeypatch, tmp_path):
 
 
 def test_video_range_clamped_to_file_size(monkeypatch, tmp_path):
-    """Range exceeding file size should be clamped."""
+    """Range extending past file size should be clamped at the last byte."""
     client, _ = _build_client_with_video(monkeypatch, tmp_path)
 
     resp = client.get("/thumb/videos/test.mp4", headers={"Range": "bytes=10200-20000"})
@@ -94,3 +94,41 @@ def test_video_range_clamped_to_file_size(monkeypatch, tmp_path):
     # Should be clamped to bytes 10200-10239 (40 bytes)
     assert len(resp.data) == 40
     assert "bytes 10200-10239/10240" in resp.headers["Content-Range"]
+
+
+def test_video_range_start_at_file_size_returns_416(monkeypatch, tmp_path):
+    """bytes=N- with N == file size is unsatisfiable: 416 with bytes */<size> (RFC 9110 §14.2)."""
+    client, _ = _build_client_with_video(monkeypatch, tmp_path)
+
+    resp = client.get("/thumb/videos/test.mp4", headers={"Range": "bytes=10240-"})
+    assert resp.status_code == 416
+    assert resp.headers["Content-Range"] == "bytes */10240"
+    # The 416 must not promise bytes it does not send
+    assert len(resp.data) == int(resp.headers["Content-Length"])
+
+
+def test_video_range_start_beyond_file_size_returns_416(monkeypatch, tmp_path):
+    """bytes=N- with N > file size is unsatisfiable: 416 with bytes */<size> (RFC 9110 §14.2)."""
+    client, _ = _build_client_with_video(monkeypatch, tmp_path)
+
+    resp = client.get("/thumb/videos/test.mp4", headers={"Range": "bytes=20000-"})
+    assert resp.status_code == 416
+    assert resp.headers["Content-Range"] == "bytes */10240"
+    assert len(resp.data) == int(resp.headers["Content-Length"])
+
+
+def test_video_range_zero_byte_file_with_range_is_consistent(monkeypatch, tmp_path):
+    """Zero-byte video with a Range header must be a consistent response, never
+    a Content-Length exceeding the body bytes (RFC 9110 §14.2: every byte range
+    on an empty representation is unsatisfiable).
+
+    Previously this returned 206 with "Content-Range: bytes 0-0/0",
+    Content-Length 1, and an empty body.
+    """
+    client, data_dir = build_client(monkeypatch, tmp_path, auth_type="none")
+    (data_dir / "empty.mp4").write_bytes(b"")
+
+    resp = client.get("/thumb/empty.mp4", headers={"Range": "bytes=0-"})
+    assert resp.status_code == 416
+    assert resp.headers["Content-Range"] == "bytes */0"
+    assert len(resp.data) == int(resp.headers["Content-Length"])
