@@ -185,7 +185,15 @@ def health() -> tuple[Any, int]:
     Write-capable probes are available on /health/storage/write.
     """
     storage_health_data = get_storage_read_health()
-    app_version = os.environ.get("APP_VERSION") or "v0.1.x"
+    # Deferred import: app.py imports this module while it is still executing,
+    # so a module-level import of app would be circular. By call time app is
+    # fully initialized (it registers this function as the /health route), and
+    # its release-please-managed DEFAULT_APP_VERSION is the shipped version.
+    # Issue #631: the previous hard-coded "v0.1.x" fallback drifted behind the
+    # bundled app.
+    import app
+
+    app_version = os.environ.get("APP_VERSION") or app.DEFAULT_APP_VERSION
 
     health_data = {
         "status": storage_health_data["status"],
