@@ -156,6 +156,19 @@ def run_configured_task(
     except ValueError as exc:
         return {"error": str(exc)}, 400
 
+    # Spawn-boundary guard (issue #635): execve forbids NUL bytes in argv
+    # strings, so subprocess.run would raise an uncaught
+    # ValueError("embedded null byte") that escapes the only-
+    # TimeoutExpired/OSError handling below and surfaces as an HTTP 500.
+    # Template text cannot contain NUL (env values are NUL-terminated C
+    # strings), so any NUL in argv arrived in a param value: reject it as
+    # client input before the concurrency slot is consumed or any spawn is
+    # attempted. The renderer keeps NUL-bearing values as opaque single argv
+    # entries (issue #630); the execve invariant is enforced here, where the
+    # spawn happens.
+    if any("\x00" in arg for arg in argv):
+        return {"error": "param values must not contain NUL bytes"}, 400
+
     if not argv:
         return {"error": "configured task produced an empty command"}, 500
 

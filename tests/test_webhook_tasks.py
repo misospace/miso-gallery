@@ -3,7 +3,7 @@ import shlex
 import threading
 import time
 
-from conftest import build_client
+from conftest import auth_header, build_client
 
 
 def setup_function():
@@ -647,3 +647,88 @@ def test_webhook_run_nested_placeholder_value_is_single_argv_entry(monkeypatch, 
         "--mode",
         "--evil-flag payload",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #635: a param value containing a NUL byte
+# rendered as one quoted argv element, but subprocess.run raises an uncaught
+# ValueError("embedded null byte") for such argv — escaping the
+# TimeoutExpired/OSError handling in run_configured_task and surfacing as an
+# HTTP 500 to the client. The spawn boundary now rejects NUL-bearing argv
+# with a 400 validation error before the concurrency slot is consumed or any
+# spawn is attempted. The renderer still treats NUL-bearing values as opaque
+# single argv entries (issue #630 contract, unchanged); the execve invariant
+# is enforced where the spawn happens, in run_configured_task.
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_run_rejects_null_byte_param_value_without_spawning(monkeypatch, tmp_path):
+    """#635: a NUL byte in a param value must return 400 with a clear
+    validation message from /api/webhook/run, with no subprocess spawned and
+    no concurrency slot burned. NUL-free values keep running normally."""
+    import webhook_tasks
+
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd='python3 -c "import sys; print(sys.argv[1])" {params.name}',
+    )
+
+    # NUL-free values are unaffected by the guard.
+    ok = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {"name": "plain"}},
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+    assert ok.status_code == 200, ok.get_json()
+    assert ok.get_json()["stdout"].strip() == "plain"
+
+    real_run = webhook_tasks.subprocess.run
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(f"task subprocess must not run: {args}")
+
+    monkeypatch.setattr(webhook_tasks.subprocess, "run", _boom)
+    resp = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {"name": "a\0b"}},
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "param values must not contain NUL bytes"}
+
+    # The rejected request must not have leaked the concurrency slot: with the
+    # real spawn path restored, a normal task runs again instead of hitting
+    # the 503 pool-saturation guard.
+    monkeypatch.setattr(webhook_tasks.subprocess, "run", real_run)
+    after = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {"name": "plain"}},
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+    assert after.status_code == 200, after.get_json()
+    assert after.get_json()["stdout"].strip() == "plain"
+
+
+def test_llm_task_run_rejects_null_byte_param_value(monkeypatch, tmp_path):
+    """#635: /api/llm/task/run must also return 400 (not 500) for a
+    NUL-bearing param value, with no subprocess spawned."""
+    import webhook_tasks
+
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd='python3 -c "import sys; print(sys.argv[1])" {params.name}',
+    )
+
+    def _boom(*args, **kwargs):
+        raise AssertionError(f"task subprocess must not run: {args}")
+
+    monkeypatch.setattr(webhook_tasks.subprocess, "run", _boom)
+    resp = client.post(
+        "/api/llm/task/run",
+        json={"task": "generate", "params": {"name": "a\0b"}},
+        headers=auth_header(),
+    )
+
+    assert resp.status_code == 400
+    assert resp.get_json() == {"error": "param values must not contain NUL bytes"}
