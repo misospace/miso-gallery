@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.1](https://github.com/misospace/miso-gallery/compare/0.4.0...0.4.1) (2026-11-06)
+
+
+### Bug Fixes
+
+* **deps:** update dependency click (8.5.0 → 8.5.1) ([#646](https://github.com/misospace/miso-gallery/issues/646)) ([c683c15](https://github.com/misospace/miso-gallery/commit/c683c151e2f17857d49a902cd4eb084fe83accf3))
+
 ## [0.4.0](https://github.com/misospace/miso-gallery/compare/0.3.0...0.4.0) (2026-11-06)
 
 
