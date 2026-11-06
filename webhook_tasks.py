@@ -23,6 +23,12 @@ import threading
 WEBHOOK_TASK_PREFIX = "WEBHOOK_TASK_"
 _VALID_TASK_RE = re.compile(r"^[a-zA-Z0-9_-]+$")
 
+# Command-template placeholders are matched template-side with a restricted
+# key pattern (issue #634). Per-key literal replacement let a caller-supplied
+# key containing `} ... {params.` match a span across two adjacent operator
+# placeholders and delete operator template text.
+_PARAM_PLACEHOLDER_RE = re.compile(r"\{params\.([A-Za-z0-9_-]+)\}")
+
 # Per-process concurrency cap for webhook task subprocesses (issue #448).
 #
 # `run_configured_task()` invokes a configured command via `subprocess.run(...)`
@@ -75,8 +81,16 @@ def _validate_task_name(task_name: str) -> str | None:
 def _render_task_command(template: str, params: dict[str, object]) -> str:
     """Substitute ``{params.<key>}`` placeholders with shell-quoted values.
 
+    Placeholders are matched template-side with a restricted key pattern
+    (``[A-Za-z0-9_-]+``, issue #634), never by literal string replacement of
+    caller-supplied keys: a key containing ``} ... {params.`` could otherwise
+    span two adjacent operator placeholders and swallow template text.
+    Behavior change for exotic param keys: keys outside ``[A-Za-z0-9_-]`` no
+    longer match a placeholder, so a template placeholder written with such a
+    key now fails the missing-params check instead of rendering.
+
     Rendering runs in two passes so a param value can never be re-substituted
-    (issue #630). Pass 1 replaces each known placeholder with a NUL-delimited
+    (issue #630). Pass 1 replaces each matched placeholder with a NUL-delimited
     sentinel token; NUL cannot appear in a template read from the environment
     (env values are NUL-terminated C strings), so placeholders left in the
     template afterwards are genuinely missing params. Pass 2 splices the
@@ -87,13 +101,19 @@ def _render_task_command(template: str, params: dict[str, object]) -> str:
     ``shlex.split`` into extra arguments.
     """
     quoted_by_sentinel: dict[str, str] = {}
-    rendered = template
-    for index, (key, value) in enumerate(params.items()):
+    for key, value in params.items():
         if isinstance(value, (dict, list)):
             raise ValueError(f"params.{key} must be a scalar value")
-        sentinel = f"\x00params{index}\x00"
-        rendered = rendered.replace(f"{{params.{key}}}", sentinel)
-        quoted_by_sentinel[sentinel] = shlex.quote(str(value))
+
+    def _to_sentinel(match: re.Match[str]) -> str:
+        key = match.group(1)
+        if key not in params:
+            return match.group(0)
+        sentinel = f"\x00params{len(quoted_by_sentinel)}\x00"
+        quoted_by_sentinel[sentinel] = shlex.quote(str(params[key]))
+        return sentinel
+
+    rendered = _PARAM_PLACEHOLDER_RE.sub(_to_sentinel, template)
 
     if "{params." in rendered:
         raise ValueError("missing required params for command template")

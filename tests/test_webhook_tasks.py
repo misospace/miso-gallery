@@ -64,6 +64,45 @@ def test_webhook_task_rejects_missing_template_params(monkeypatch, tmp_path):
     assert "missing required params" in payload["error"]
 
 
+def test_webhook_task_param_key_cannot_span_adjacent_placeholders(monkeypatch, tmp_path):
+    """Issue #634: a crafted param key must not span two operator placeholders."""
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd="python3 -c \"import sys;print('|'.join(sys.argv[1:]))\" --src {params.a} --mode {params.b}",
+    )
+    resp = client.post(
+        "/api/webhook/run",
+        json={
+            "task": "generate",
+            "params": {"a} --mode {params.b": "--evil", "a": "s", "b": "m"},
+        },
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+
+    assert resp.status_code == 200
+    payload = resp.get_json()
+    assert payload["success"] is True
+    # Both operator tokens and both substitutions survive; the crafted key
+    # matches no placeholder and is ignored.
+    assert payload["stdout"].strip() == "--src|s|--mode|m"
+
+
+def test_webhook_task_rejects_placeholder_key_outside_safe_set(monkeypatch, tmp_path):
+    """Issue #634: exotic placeholder keys no longer render; they fail as missing params."""
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd="echo {params.a.b}",
+    )
+    resp = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {"a.b": "x"}},
+        headers={"Authorization": "Bearer test-secret-123"},
+    )
+
+    assert resp.status_code == 400
+    assert "missing required params" in resp.get_json()["error"]
+
+
 def test_webhook_task_returns_403_when_disabled(monkeypatch, tmp_path):
     client = _build_webhook_client(
         monkeypatch, tmp_path,
