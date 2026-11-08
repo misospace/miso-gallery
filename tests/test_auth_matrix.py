@@ -579,6 +579,40 @@ def test_find_matching_key_write_falls_back_to_legacy(monkeypatch, tmp_path):
     assert key_class == "write"
 
 
+def test_verify_api_key_scope_non_ascii_token(monkeypatch, tmp_path):
+    """A non-ASCII token is compared as bytes instead of raising TypeError (issue #653).
+
+    ``secrets.compare_digest()`` only supports ASCII ``str`` arguments, so a
+    non-ASCII token used to raise ``TypeError: comparing strings with
+    non-ASCII characters is not supported`` instead of failing closed.
+    """
+    _reload_api_keys(monkeypatch, read_keys="agent-ké", write_keys="")
+    import auth
+
+    assert auth.verify_api_key_scope("agent-ké", "read") is True
+    assert auth.verify_api_key_scope("agent-kéx", "read") is False
+
+    # An ASCII configured key against a non-ASCII token must fail closed too.
+    monkeypatch.setattr(auth, "LLM_READ_API_KEYS", ["agent-key"])
+    assert auth.verify_api_key_scope("agent-ké", "read") is False
+
+
+def test_find_matching_key_non_ascii_token(monkeypatch, tmp_path):
+    """_find_matching_key matches a non-ASCII key without raising TypeError (issue #653)."""
+    _reload_api_keys(monkeypatch, read_keys="agent-ké", write_keys="")
+    import auth
+
+    matched, hint, key_class = auth._find_matching_key("agent-ké", "read")
+    assert matched is True
+    assert hint == auth._api_key_hint("agent-ké")
+    assert key_class == "read"
+
+    matched, hint, key_class = auth._find_matching_key("agent-kéx", "read")
+    assert matched is False
+    assert hint is None
+    assert key_class is None
+
+
 # ---------------------------------------------------------------------------
 # OIDC route rate limiting (issue #446)
 # ---------------------------------------------------------------------------

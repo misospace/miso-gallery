@@ -159,12 +159,22 @@ def _keys_for_scope(scope: Literal["read", "write"]) -> list[str]:
     return keys
 
 
+def _api_key_matches(token: str, configured: str) -> bool:
+    """Constant-time comparison of two API keys over their UTF-8 byte encoding.
+
+    secrets.compare_digest() only accepts ASCII ``str`` arguments; comparing
+    raw ``str`` raised TypeError for a non-ASCII bearer token and turned a
+    wrong-token request into an unhandled 500 instead of a 401 (issue #653).
+    """
+    return secrets.compare_digest(token.encode("utf-8"), configured.encode("utf-8"))
+
+
 def verify_api_key_scope(token: str, scope: Literal["read", "write"]) -> bool:
     """Verify a bearer token has the required scope."""
     keys = _keys_for_scope(scope)
     if not token or not keys:
         return False
-    return any(secrets.compare_digest(token, configured) for configured in keys)
+    return any(_api_key_matches(token, configured) for configured in keys)
 
 
 # API key identification helpers for audit logging.
@@ -197,7 +207,7 @@ def _find_matching_key(
     if not token or not keys:
         return False, None, None
     for configured in keys:
-        if secrets.compare_digest(token, configured):
+        if _api_key_matches(token, configured):
             return True, _api_key_hint(configured), scope
     return False, None, None
 
