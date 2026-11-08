@@ -52,11 +52,39 @@ WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET", "").strip()
 def _webhook_enabled() -> bool:
     return os.environ.get("WEBHOOK_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
 
+def _webhook_secret_matches(token: str, configured: str) -> bool:
+    """Compare a bearer token with the configured secret, constant time.
+
+    ``secrets.compare_digest`` accepts ASCII text only: passing a non-ASCII
+    ``str`` raises ``TypeError``, which escaped the ``/api/webhook/run``
+    route as an HTTP 500 instead of a 401 (issue #656). Comparing the UTF-8
+    byte encodings keeps the comparison constant time while accepting any
+    text.
+
+    ``surrogatepass`` keeps the encoding total on both sides:
+    ``WEBHOOK_SECRET`` comes from the process environment, which POSIX
+    decodes with ``surrogateescape``, so a secret holding a non-UTF-8 byte
+    carries lone surrogates that a plain ``.encode("utf-8")`` refuses to
+    encode — the same unhandled 500. The comparison stays fail-closed:
+    request header values are latin-1 decoded, so a request token can never
+    contain a lone surrogate and therefore never matches such a secret.
+
+    Operator note: WSGI decodes request header bytes as latin-1, so a
+    non-ASCII secret matches only a client that sends the matching
+    single-byte characters. A client that sends UTF-8 bytes for a UTF-8
+    secret does not match and gets the normal 401.
+    """
+    return secrets.compare_digest(
+        token.encode("utf-8", "surrogatepass"),
+        configured.encode("utf-8", "surrogatepass"),
+    )
+
+
 def _verify_webhook_secret(token: str) -> bool:
     """Verify Bearer token matches WEBHOOK_SECRET if configured."""
     if not WEBHOOK_SECRET:
         return False
-    return secrets.compare_digest(token, WEBHOOK_SECRET)
+    return _webhook_secret_matches(token, WEBHOOK_SECRET)
 
 
 def _task_env_key(task_name: str) -> str:
