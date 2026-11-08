@@ -36,6 +36,8 @@ log = logging.getLogger(__name__)
 MAX_PROMPT_CHARS = 4000
 MAX_RECIPE_CHARS = 2000
 MAX_ROLLS = 50
+MAX_CATEGORY_CHARS = 200
+MAX_ROLL_ENTRY_CHARS = 400
 
 _BODY_FIELDS = ("positive", "negative", "seed", "model", "sampler", "steps", "cfg", "size")
 
@@ -141,7 +143,8 @@ def _apply_body(metadata: dict, chunks: dict) -> None:
 
 def _apply_miso_keys(metadata: dict, chunks: dict) -> None:
     """Apply our own ``miso:`` chunks, which override the body source."""
-    metadata["category"] = _chunk_text(chunks, "miso:category")
+    category = _chunk_text(chunks, "miso:category")
+    metadata["category"] = _truncate(category, MAX_CATEGORY_CHARS) if category else None
 
     recipe = _chunk_text(chunks, "miso:recipe")
     metadata["recipe"] = _truncate(recipe, MAX_RECIPE_CHARS) if recipe else None
@@ -306,7 +309,9 @@ def _parse_rolls(raw: str) -> list[str]:
         entries = re.split(r"[\n;]", raw)
 
     cleaned = [entry.strip() for entry in entries]
-    return [entry for entry in cleaned if entry][:MAX_ROLLS]
+    return [
+        _truncate(entry, MAX_ROLL_ENTRY_CHARS) for entry in cleaned if entry
+    ][:MAX_ROLLS]
 
 
 def _clean_text(text: str) -> str | None:
