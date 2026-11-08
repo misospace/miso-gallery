@@ -89,7 +89,11 @@ def _parse_pagination(args):
 
 
 def sanitize_rel_path(rel_path: str) -> str:
-    normalized = os.path.normpath(rel_path).replace("\\", "/").lstrip("/")
+    # Normalize backslashes to slashes *before* normpath (issue #649): on
+    # POSIX, ``foo\..\..`` is one opaque component, so normalizing first is a
+    # no-op and the later replacement would yield live, un-normalized ``../``
+    # segments that never trip the ``..`` abort below.
+    normalized = os.path.normpath(rel_path.replace("\\", "/")).replace("\\", "/").lstrip("/")
     if normalized.startswith(".."):
         abort(404)
     return normalized
