@@ -247,6 +247,51 @@ def test_check_storage_write_removes_temp_file_on_success(tmp_path):
     assert msg == "Write access OK"
 
 
+def test_check_storage_write_cleans_up_probe_when_write_raises_os_error(
+    monkeypatch, tmp_path
+):
+    """Issue #651: a probe whose write raises OSError must leave zero files
+    behind in the probed directory (health endpoints are polled continuously,
+    so a failing volume must not accumulate one leaked tmpXXXX per poll).
+    """
+    p = tmp_path / "dir"
+    p.mkdir()
+
+    real_ntf = health.tempfile.NamedTemporaryFile
+
+    def failing_ntf(*args, **kwargs):
+        handle = real_ntf(*args, **kwargs)
+
+        def boom(_data):
+            raise OSError("ENOSPC during probe write")
+
+        handle.write = boom
+        return handle
+
+    monkeypatch.setattr(health.tempfile, "NamedTemporaryFile", failing_ntf)
+
+    ok, msg = health.check_storage_write(p)
+    assert ok is False
+    assert "OS error" in msg
+    assert list(p.iterdir()) == []
+
+
+def test_check_storage_write_tolerates_unlink_failure(monkeypatch, tmp_path):
+    """Issue #651: the cleanup unlink must be tolerant of its own failure and
+    never mask the probe result.
+    """
+    p = tmp_path / "dir"
+    p.mkdir()
+
+    def failing_unlink(_path, *args, **kwargs):
+        raise OSError("cannot unlink")
+
+    monkeypatch.setattr(health.os, "unlink", failing_unlink)
+    ok, msg = health.check_storage_write(p)
+    assert ok is True
+    assert msg == "Write access OK"
+
+
 # ---------------------------------------------------------------------------
 # update_unhealthy_signal OSError branch
 # ---------------------------------------------------------------------------

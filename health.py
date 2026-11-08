@@ -10,6 +10,7 @@ Provides health check endpoint for DATA_FOLDER/NFS path:
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 from datetime import datetime, timezone
@@ -42,6 +43,7 @@ def check_storage_read(path: Path) -> tuple[bool, str]:
 
 def check_storage_write(path: Path) -> tuple[bool, str]:
     """Check if we can write to the storage path (safe test)."""
+    tmp_path: str | None = None
     try:
         if not path.exists():
             return False, "Path does not exist"
@@ -49,15 +51,18 @@ def check_storage_write(path: Path) -> tuple[bool, str]:
             return False, "Path is not writable"
 
         with tempfile.NamedTemporaryFile(dir=path, delete=False) as tmp:
-            tmp.write(b"health probe write test")
             tmp_path = tmp.name
+            tmp.write(b"health probe write test")
 
-        os.unlink(tmp_path)
         return True, "Write access OK"
     except PermissionError:
         return False, "Permission denied writing"
     except OSError:
         return False, "OS error writing"
+    finally:
+        if tmp_path is not None:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
 
 
 def update_unhealthy_signal(health: dict[str, Any]) -> None:
