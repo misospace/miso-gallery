@@ -771,3 +771,129 @@ def test_llm_task_run_rejects_null_byte_param_value(monkeypatch, tmp_path):
 
     assert resp.status_code == 400
     assert resp.get_json() == {"error": "param values must not contain NUL bytes"}
+
+
+# ---------------------------------------------------------------------------
+# Regression tests for issue #656: _verify_webhook_secret compared the bearer
+# token and WEBHOOK_SECRET as `str`, and secrets.compare_digest accepts ASCII
+# text only — a non-ASCII token raised TypeError, which escaped the
+# /api/webhook/run route as an HTTP 500 instead of the normal 401. The
+# comparison now runs over the UTF-8 byte encodings of both sides, so it stays
+# constant time and never raises on non-ASCII text.
+# ---------------------------------------------------------------------------
+
+
+def test_webhook_run_non_ascii_bearer_token_returns_401_not_500(monkeypatch, tmp_path):
+    """#656: a non-ASCII bearer token must 401 with the normal unauthorized
+    body, not 500."""
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd="echo hi",
+    )
+    # Render the unhandled TypeError as the 500 response it becomes in
+    # production, so this asserts the status code instead of only "no raise".
+    client.application.config["PROPAGATE_EXCEPTIONS"] = False
+
+    resp = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {}},
+        headers={"Authorization": "Bearer sécret"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.get_json() == {"error": "Webhook secret required"}
+
+
+def test_webhook_run_non_ascii_token_mismatch_returns_401(monkeypatch, tmp_path):
+    """#656: a non-ASCII token must also 401 against a non-ASCII secret."""
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd="echo hi",
+        webhook_secret="sécret",
+    )
+    client.application.config["PROPAGATE_EXCEPTIONS"] = False
+
+    resp = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {}},
+        headers={"Authorization": "Bearer sécret-mismatch"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.get_json() == {"error": "Webhook secret required"}
+
+
+def test_webhook_run_non_ascii_secret_authenticates_and_runs_task(monkeypatch, tmp_path):
+    """#656: a non-ASCII secret must still authenticate and run its task."""
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd="echo ok",
+        webhook_secret="sécret",
+    )
+    client.application.config["PROPAGATE_EXCEPTIONS"] = False
+
+    resp = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {}},
+        headers={"Authorization": "Bearer sécret"},
+    )
+
+    assert resp.status_code == 200, resp.get_json()
+    payload = resp.get_json()
+    assert payload["success"] is True
+    assert payload["stdout"].strip() == "ok"
+
+
+def test_webhook_secret_comparison_runs_over_bytes(monkeypatch):
+    """#656: the secret comparison must be made over byte encodings."""
+    import secrets as secrets_module
+
+    import webhook_tasks
+
+    calls = []
+    real_compare_digest = secrets_module.compare_digest
+
+    def spy(left, right):
+        calls.append((left, right))
+        return real_compare_digest(left, right)
+
+    monkeypatch.setattr(webhook_tasks.secrets, "compare_digest", spy)
+
+    assert webhook_tasks._webhook_secret_matches("sécret", "sécret") is True
+    assert webhook_tasks._webhook_secret_matches("sécret", "other-secret") is False
+
+    assert len(calls) == 2
+    for left, right in calls:
+        assert isinstance(left, bytes)
+        assert isinstance(right, bytes)
+    assert calls[0][0] == "sécret".encode("utf-8")
+    assert calls[0][1] == "sécret".encode("utf-8")
+
+
+def test_webhook_secret_with_non_utf8_env_byte_fails_closed(monkeypatch, tmp_path):
+    """#656: a secret holding a non-UTF-8 environment byte must not raise.
+
+    Such a secret carries a lone surrogate (POSIX decodes environment values
+    with surrogateescape); encoding it must not blow up, and no request token
+    can match it, so the request fails closed with 401.
+    """
+    import webhook_tasks
+
+    secret = "\udcff"
+    assert webhook_tasks._webhook_secret_matches("sécret", secret) is False
+
+    client = _build_webhook_client(
+        monkeypatch, tmp_path,
+        task_cmd="echo hi",
+        webhook_secret=secret,
+    )
+    client.application.config["PROPAGATE_EXCEPTIONS"] = False
+
+    resp = client.post(
+        "/api/webhook/run",
+        json={"task": "generate", "params": {}},
+        headers={"Authorization": "Bearer sécret"},
+    )
+
+    assert resp.status_code == 401
+    assert resp.get_json() == {"error": "Webhook secret required"}
