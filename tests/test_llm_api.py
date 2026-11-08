@@ -59,6 +59,47 @@ def test_llm_api_requires_configured_valid_bearer_token(monkeypatch, tmp_path):
     assert client.get("/api/llm/images", headers=auth_header()).status_code == 200
 
 
+def test_llm_api_non_ascii_bearer_token_rejected(monkeypatch, tmp_path):
+    """A non-ASCII bearer token must fail closed with 401, not 500 (issue #653).
+
+    ``secrets.compare_digest()`` only accepts ASCII ``str`` arguments, so the
+    raw ``str`` comparison raised ``TypeError: comparing strings with
+    non-ASCII characters is not supported`` and the request escaped as an
+    HTTP 500 instead of the normal unauthorized response.
+    """
+    client, _ = build_client(monkeypatch, tmp_path)
+
+    resp = client.get("/api/llm/images", headers=auth_header("agent-ké"))
+
+    assert resp.status_code == 401
+    assert resp.get_json()["error"] == "Bearer token required"
+
+    # The ASCII happy path is unaffected by the byte-encoding comparison.
+    assert client.get("/api/llm/images", headers=auth_header()).status_code == 200
+
+
+def test_llm_api_non_ascii_bearer_token_matches_configured_key(monkeypatch, tmp_path):
+    """A configured non-ASCII API key still authenticates (issue #653).
+
+    Comparing the UTF-8 byte encodings keeps the check constant-time and
+    lets a legitimately non-ASCII key match, while a wrong non-ASCII token
+    still fails closed with a 401.
+    """
+    client, _ = build_client(
+        monkeypatch,
+        tmp_path,
+        api_keys=None,
+        extra_env={"LLM_READ_API_KEYS": "agent-ké"},
+    )
+
+    ok = client.get("/api/llm/images", headers=auth_header("agent-ké"))
+    assert ok.status_code == 200
+
+    wrong = client.get("/api/llm/images", headers=auth_header("agent-kéx"))
+    assert wrong.status_code == 401
+    assert wrong.get_json()["error"] == "Bearer token required"
+
+
 def test_llm_api_reports_unconfigured_keys(monkeypatch, tmp_path):
     client, _ = build_client(monkeypatch, tmp_path, api_keys=None, auth_type="none")
 
