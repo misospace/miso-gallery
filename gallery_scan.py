@@ -145,16 +145,22 @@ def is_gallery_root_path(path: Path) -> bool:
     reject the entry explicitly.
 
     Both sides are resolved, so a symlink inside DATA_FOLDER that points at
-    DATA_FOLDER is rejected too.
+    DATA_FOLDER is rejected too. Selections that cannot be resolved at all
+    (NUL bytes, symlink loops) are rejected as well: they cannot be proven
+    to differ from DATA_FOLDER, so the guard fails closed.
     """
     app = _app()
     try:
         return path.resolve() == app.DATA_FOLDER.resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         # RuntimeError: a symlink loop raises it on the declared Python floor
         # (< 3.13). On Python >= 3.13 resolve() no longer raises for a loop
         # and returns the unresolved path instead; that path is not
         # DATA_FOLDER and is skipped later because it cannot be stat()ed.
+        # ValueError: resolve() calls lstat(), which rejects strings with an
+        # embedded NUL byte. Such a selection passes sanitize_path() (it
+        # strips NULs before looking for ".."), so without this lane
+        # /bulk-delete would answer 500 instead of denying the entry.
         return True
 
 
