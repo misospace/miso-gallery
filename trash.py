@@ -273,11 +273,54 @@ def _write_claim_meta(claim_fd: int, meta: dict) -> None:
         written += os.write(claim_fd, payload[written:])
 
 
+def _nested_trash_move_reason(file_path: Path, data_folder: Path) -> str | None:
+    """Why *file_path* must not be moved into the trash, or None.
+
+    The trash directory lives inside the data folder, so trashing the data
+    folder itself — or any ancestor of it — would put the destination
+    inside the source. The rename cannot express that (the kernel refuses
+    with EINVAL), so ``move_to_trash`` fell back to its cross-device
+    ``shutil.copytree`` + ``shutil.rmtree`` path: the copy then walked
+    into the ``.trash`` directory it was writing, and a copy that had
+    succeeded would have been followed by ``shutil.rmtree(DATA_FOLDER)`` —
+    the gallery deleting itself (issue #664). The trash directory itself
+    is refused for the same reason: the copy fallback would recurse into
+    it.
+
+    Both sides are compared as resolved paths, so a symlink pointing at
+    the data folder is caught as well. A path that cannot be resolved (a
+    symlink loop, an embedded null byte) is refused too: the move fails
+    closed instead of guessing.
+
+    Returns the reason for the refusal — it names what was refused, so the
+    log line states the actual cause instead of a catch-all — or None when
+    the move is allowed.
+    """
+    try:
+        source = file_path.resolve()
+        root = data_folder.resolve()
+        trash_path = (data_folder / TRASH_DIR_NAME).resolve()
+    except (OSError, RuntimeError, ValueError):
+        # Fail closed: a path that cannot be resolved cannot be proven safe.
+        return "its path could not be resolved, so it cannot be proven safe to trash"
+    if trash_path == source:
+        return f"it resolves to {source}, which is the trash directory itself"
+    if root.is_relative_to(source) or trash_path.is_relative_to(source):
+        return f"it resolves to {source}, which contains the trash directory {trash_path}"
+    return None
+
+
 def move_to_trash(file_path: Path, data_folder: Path) -> bool:
     """Move a file or directory to the trash.
 
     Returns True on success, False if the path does not exist or is inaccessible.
     For directories, the entire tree is moved atomically via rename.
+
+    A source that is the data folder itself (or an ancestor of it), or the
+    trash directory, is refused before anything is renamed or copied: the
+    destination would live inside the source, and the cross-device copy
+    fallback would then walk into the trash directory it is writing and
+    remove the source it just copied (issue #664).
 
     The destination is claimed atomically before the move (see
     ``_claim_trash_dest``), so a concurrent delete in this process or any
@@ -294,6 +337,11 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
     A failed move releases the claim so the trash dir keeps no residue for
     the retry beyond what maintenance already reclaims.
     """
+    reason = _nested_trash_move_reason(file_path, data_folder)
+    if reason is not None:
+        logger.warning("Refusing to move %r to the trash: %s", file_path, reason)
+        return False
+
     if not file_path.exists():
         return False
 

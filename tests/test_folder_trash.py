@@ -318,6 +318,116 @@ def test_move_to_trash_rejects_paths_with_null_bytes(tmp_path):
     assert list(trash.trash_dir(data).iterdir()) == []
 
 
+def test_move_to_trash_refuses_the_data_folder_itself(tmp_path, monkeypatch):
+    """The data folder must never be moved into its own trash (#664).
+
+    ``move_to_trash`` renames the source into the trash directory and falls
+    back to ``shutil.copytree`` + ``shutil.rmtree`` when the rename fails.
+    Renaming the data folder into ``DATA_FOLDER/.trash`` fails with EINVAL,
+    so the copy fallback ran — and the copy walked into the ``.trash``
+    directory it was writing (hundreds of nested copies) before it failed.
+    A copy that had succeeded would have been followed by
+    ``shutil.rmtree(DATA_FOLDER)``: the gallery deleting itself.
+
+    The move must therefore be refused up front, before any rename or copy
+    is attempted — the rename and the copy are pinned here so that an
+    attempt would fail loudly instead of running the runaway copy.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "photo.png").write_bytes(b"photo")
+
+    attempts = []
+
+    def forbidden_rename(path, destination):
+        attempts.append(("rename", path, destination))
+        raise AssertionError("the data folder must not be renamed into its own trash")
+
+    def forbidden_copytree(*args, **kwargs):
+        attempts.append(("copytree", *args))
+        raise AssertionError("the data folder must not be copied into its own trash")
+
+    monkeypatch.setattr(trash.Path, "rename", forbidden_rename)
+    monkeypatch.setattr(trash.shutil, "copytree", forbidden_copytree)
+
+    assert move_to_trash(data, data) is False
+
+    assert attempts == [], "the move must be refused before any rename or copy"
+    # The data folder and its payload are intact.
+    assert data.is_dir()
+    assert (data / "photo.png").read_bytes() == b"photo"
+    # The refusal had no side effect at all: the trash directory was not
+    # even created, and it stays empty.
+    assert not (data / trash.TRASH_DIR_NAME).exists()
+    assert list(trash.trash_dir(data).iterdir()) == []
+
+
+def test_move_to_trash_refuses_a_symlink_pointing_at_the_data_folder(tmp_path):
+    """A symlink to the data folder is refused like the data folder itself (#664).
+
+    The guard compares resolved paths, so a link inside the data folder that
+    points back at the data folder is recognised as the data folder: trashing
+    it would put the destination (the trash directory) inside the source
+    (the data folder), and the cross-device copy fallback would copy the
+    gallery into its own trash. The link, the data folder and its payload
+    must all survive untouched.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "photo.png").write_bytes(b"photo")
+    link = data / "self"
+    link.symlink_to(data)
+
+    assert move_to_trash(link, data) is False
+
+    assert link.is_symlink(), "the link must stay a link, untouched"
+    assert data.is_dir()
+    assert (data / "photo.png").read_bytes() == b"photo"
+    assert list(trash.trash_dir(data).iterdir()) == []
+
+
+def test_move_to_trash_refuses_an_ancestor_of_the_data_folder(tmp_path):
+    """An ancestor of the data folder must not be trashed either (#664).
+
+    A source that contains the data folder also contains the trash
+    directory, so the destination would live inside the source: the
+    cross-device copy fallback would copy the gallery into the trash
+    directory it is writing and then remove the source — the data folder
+    and everything in it. The move is refused up front instead.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "photo.png").write_bytes(b"photo")
+
+    assert move_to_trash(tmp_path, data) is False
+
+    # The data folder and its payload are intact, and nothing was trashed.
+    assert data.is_dir()
+    assert (data / "photo.png").read_bytes() == b"photo"
+    assert list(trash.trash_dir(data).iterdir()) == []
+
+
+def test_move_to_trash_refuses_the_trash_directory_itself(tmp_path):
+    """The trash directory must not be moved into itself (#664).
+
+    The copy fallback would copy the trash directory into the trash
+    directory it is writing, and then remove the trash it just copied. The
+    move is refused up front, and the trashed items stay where they are.
+    """
+    data = tmp_path / "data"
+    data.mkdir()
+    (data / "photo.png").write_bytes(b"photo")
+    td = trash.trash_dir(data)
+    (td / "old-item").write_text("old")
+
+    assert move_to_trash(td, data) is False
+
+    # The trash directory and its items survive; nothing new landed in it.
+    assert td.is_dir()
+    assert sorted(path.name for path in td.iterdir()) == ["old-item"]
+    assert (data / "photo.png").read_bytes() == b"photo"
+
+
 def test_move_to_trash_keeps_symlinks_as_links(tmp_path):
     """A trashed symlink stays a symlink; its target is left alone.
 
