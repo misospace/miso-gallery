@@ -16,8 +16,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from metadata import (  # noqa: E402
+    MAX_CATEGORY_CHARS,
     MAX_PROMPT_CHARS,
     MAX_RECIPE_CHARS,
+    MAX_ROLL_ENTRY_CHARS,
     MAX_ROLLS,
     _read_metadata,
     read_image_metadata,
@@ -172,6 +174,28 @@ def test_read_image_metadata_rolls_from_newlines_and_capped(tmp_path):
     rolls = read_image_metadata(path)["rolls"]
     assert len(rolls) == MAX_ROLLS
     assert rolls[0] == "roll0"
+
+
+def test_read_image_metadata_caps_category_and_roll_entry_lengths(tmp_path):
+    """A megabyte-sized ``miso:category``/``miso:rolls`` tEXt value stays bounded (#650)."""
+    oversized = "x" * 5_000_000
+    path = _write_png(tmp_path / "flooded.png", {"miso:category": oversized, "miso:rolls": oversized})
+    meta = read_image_metadata(path)
+    assert meta["category"] is not None
+    assert len(meta["category"]) == MAX_CATEGORY_CHARS
+    assert meta["category"] == "x" * MAX_CATEGORY_CHARS
+    assert len(meta["rolls"]) == 1
+    assert meta["rolls"][0] == "x" * MAX_ROLL_ENTRY_CHARS
+    payload = json.dumps(meta)
+    assert len(payload) < 8_000
+
+    # The caps apply to JSON-encoded rolls too, entry by entry.
+    path = _write_png(tmp_path / "flooded-json.png", {"miso:rolls": json.dumps([oversized, "tiny", oversized])})
+    rolls = read_image_metadata(path)["rolls"]
+    assert len(rolls) == 3
+    assert rolls[0] == "x" * MAX_ROLL_ENTRY_CHARS
+    assert rolls[1] == "tiny"
+    assert rolls[2] == "x" * MAX_ROLL_ENTRY_CHARS
 
 
 def test_read_image_metadata_returns_none_for_png_without_chunks(tmp_path):
