@@ -1033,7 +1033,15 @@ def add_tag():
         log_security_event("add_tag", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
 
-    rel_path = sanitize_rel_path(request.form.get("rel_path", ""))
+    # Same path guards as the mutating routes (issue #649): reject traversal
+    # shapes ``sanitize_path`` considers unsafe before normalizing, then only
+    # write tags for existing, servable media — matching ``/api/llm/tags``.
+    raw_rel_path = str(request.form.get("rel_path", ""))
+    if not sanitize_path(raw_rel_path):
+        log_security_event("add_tag", "denied", reason="invalid_path", rel_path=raw_rel_path)
+        return {"error": "Invalid rel_path"}, 400
+
+    rel_path = sanitize_rel_path(raw_rel_path)
 
     # Accept multiple tags via `tags[]` form field for batch inserts (Fixes #330).
     # Falls back to single `tag` field for backward compatibility.
@@ -1045,6 +1053,10 @@ def add_tag():
 
     if not rel_path or not tags:
         return {"error": "Missing rel_path or tag"}, 400
+
+    if not is_servable_media(source_file_path(rel_path)):
+        log_security_event("add_tag", "denied", reason="not_servable_media", rel_path=rel_path)
+        return {"error": "Not found"}, 404
 
     _tag_store().add_tags(rel_path, tags)
     log_security_event(

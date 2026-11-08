@@ -368,6 +368,98 @@ def test_add_tag_single_tag_backward_compatible(monkeypatch, tmp_path):
     assert images.get_json()["images"][0]["tags"] == ["solo"]
 
 
+def test_sanitize_rel_path_normalizes_backslashes_before_normpath():
+    """#649: backslashes are slash-normalized before normpath, so a
+    backslashed ``..`` escape aborts instead of surviving as live ``../``."""
+    from werkzeug.exceptions import NotFound
+
+    import gallery_scan
+
+    assert gallery_scan.sanitize_rel_path("a\\b\\c.png") == "a/b/c.png"
+    with pytest.raises(NotFound):
+        gallery_scan.sanitize_rel_path("foo\\..\\..\\secret.png")
+    with pytest.raises(NotFound):
+        gallery_scan.sanitize_rel_path("..\\..\\secret.png")
+
+
+def test_add_tag_rejects_backslash_traversal_payload(monkeypatch, tmp_path):
+    """#649: /tag must reject backslash-escaped parent-directory payloads and
+    write no tag rows, like the sanitize_path-guarded routes."""
+    tag_database = tmp_path / "tags.sqlite3"
+    client, _ = build_client(
+        monkeypatch,
+        tmp_path,
+        extra_env={"TAG_DATABASE": str(tag_database)},
+    )
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["csrf_token"] = "test-csrf-token"
+
+    escape = client.post(
+        "/tag",
+        data={"rel_path": "foo\\..\\..\\secret.png", "tag": "sneaky", "csrf_token": "test-csrf-token"},
+    )
+    # ``sanitize_path`` rejects the payload (it contains ``..``); the 404
+    # abort for the same shape is covered at the unit level by
+    # ``test_sanitize_rel_path_normalizes_backslashes_before_normpath``.
+    assert escape.status_code == 400
+
+    absolute = client.post(
+        "/tag",
+        data={"rel_path": "/etc/passwd", "tag": "sneaky", "csrf_token": "test-csrf-token"},
+    )
+    assert absolute.status_code == 400
+
+    store = _fresh_app()._tag_store()
+    assert store.get_tags("foo/../../secret.png") == []
+    assert store.get_tags("etc/passwd") == []
+
+
+def test_add_tag_rejects_nonservable_media(monkeypatch, tmp_path):
+    """#649: /tag matches /api/llm/tags — nonexistent or hidden paths write
+    no tag rows; real servable media still tags fine."""
+    tag_database = tmp_path / "tags.sqlite3"
+    client, _ = build_client(
+        monkeypatch,
+        tmp_path,
+        extra_env={"TAG_DATABASE": str(tag_database)},
+    )
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["csrf_token"] = "test-csrf-token"
+
+    missing = client.post(
+        "/tag",
+        data={"rel_path": "missing.png", "tag": "ghost", "csrf_token": "test-csrf-token"},
+    )
+    assert missing.status_code == 404
+
+    hidden = client.post(
+        "/tag",
+        data={"rel_path": ".thumb_cache/ghost.png", "tag": "ghost", "csrf_token": "test-csrf-token"},
+    )
+    assert hidden.status_code == 404
+
+    store = _fresh_app()._tag_store()
+    assert store.get_tags("missing.png") == []
+    assert store.get_tags(".thumb_cache/ghost.png") == []
+
+    ok = client.post(
+        "/tag",
+        data={"rel_path": "sample.png", "tag": "real", "csrf_token": "test-csrf-token"},
+    )
+    assert ok.status_code == 200
+    assert store.get_tags("sample.png") == ["real"]
+
+    # A backslash-nested path inside the gallery normalizes and tags cleanly.
+    nested = client.post(
+        "/tag",
+        data={"rel_path": "cats\\cat.jpg", "tag": "nested", "csrf_token": "test-csrf-token"},
+    )
+    assert nested.status_code == 200
+    assert store.get_tags("cats/cat.jpg") == ["nested"]
+
+
 def test_read_key_rejected_from_task_run(monkeypatch, tmp_path):
     monkeypatch.setenv("WEBHOOK_ENABLED", "true")
     monkeypatch.setenv("WEBHOOK_TASK_ECHO", "python3 -c \"import sys;print(sys.argv[1])\" {params.value}")
