@@ -134,6 +134,40 @@ def is_excluded_gallery_path(path: Path) -> bool:
     return any(part in {app.THUMBNAIL_CACHE_DIR.name, ".trash"} or part.startswith(".") for part in rel_parts)
 
 
+def is_gallery_root_path(path: Path) -> bool:
+    """True when *path* resolves to DATA_FOLDER itself.
+
+    ``sanitize_path`` accepts the empty string and ``os.path.normpath("")``
+    is ``"."``, so a bulk-delete folder entry like ``""`` or ``"."`` resolves
+    to DATA_FOLDER (issue #662). Moving DATA_FOLDER into its own ``.trash/``
+    subdirectory is not a harmless no-op: the rename fails with EINVAL and
+    ``move_to_trash`` then falls back to ``shutil.copytree`` +
+    ``shutil.rmtree``, which recursively copies the gallery into the trash
+    directory before the copy fails, and a successful copy would be followed
+    by the removal of DATA_FOLDER itself. The gallery survived only because
+    that copy failed and the partial copy was cleaned up, so the caller must
+    reject the entry explicitly.
+
+    Both sides are resolved, so a symlink inside DATA_FOLDER that points at
+    DATA_FOLDER is rejected too. Selections that cannot be resolved at all
+    (NUL bytes, symlink loops) are rejected as well: they cannot be proven
+    to differ from DATA_FOLDER, so the guard fails closed.
+    """
+    app = _app()
+    try:
+        return path.resolve() == app.DATA_FOLDER.resolve()
+    except (OSError, RuntimeError, ValueError):
+        # RuntimeError: a symlink loop raises it on the declared Python floor
+        # (< 3.13). On Python >= 3.13 resolve() no longer raises for a loop
+        # and returns the unresolved path instead; that path is not
+        # DATA_FOLDER and is skipped later because it cannot be stat()ed.
+        # ValueError: resolve() calls lstat(), which rejects strings with an
+        # embedded NUL byte. Such a selection passes sanitize_path() (it
+        # strips NULs before looking for ".."), so without this lane
+        # /bulk-delete would answer 500 instead of denying the entry.
+        return True
+
+
 def is_excluded_media_path(path: Path) -> bool:
     """Return True when a media path must not be served.
 
