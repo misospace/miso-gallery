@@ -293,6 +293,90 @@ def test_verify_local_password_plaintext_constant_time(monkeypatch, tmp_path):
     assert auth_module.verify_local_password("short") is True
 
 
+def test_verify_local_password_plaintext_non_ascii(monkeypatch, tmp_path):
+    """Non-ASCII plaintext passwords compare as bytes instead of raising TypeError.
+
+    ``hmac.compare_digest()`` only supports ASCII ``str`` arguments, so a
+    non-ASCII attempt used to raise ``TypeError: comparing strings with
+    non-ASCII characters is not supported`` (issue #648).
+    """
+    import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "ADMIN_PASSWORD", "pässwort")
+
+    assert auth_module.verify_local_password("pässwort") is True
+    assert auth_module.verify_local_password("passwort") is False
+    assert auth_module.verify_local_password("pässwörd") is False
+
+
+def test_auth_non_ascii_password_mismatch_redirects(monkeypatch, tmp_path):
+    """POST /auth with a non-ASCII password fails closed with the invalid redirect.
+
+    Regression test for issue #648: the plaintext fallback raised TypeError for
+    non-ASCII passwords, escaping the /auth route as an HTTP 500 instead of
+    the normal redirect to /login?error=invalid.
+    """
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="local")
+
+    # Import after build_client(): it re-imports the auth module, so the
+    # patched module object must be the one the running app uses.
+    import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "ADMIN_PASSWORD", "pässwort")
+
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "test-csrf"
+
+    resp = client.post(
+        "/auth",
+        data={"csrf_token": "test-csrf", "password": "pässwörd"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 302
+    assert "/login" in resp.headers["Location"]
+    assert "error=invalid" in resp.headers["Location"]
+    with client.session_transaction() as sess:
+        assert sess.get("authenticated") is not True
+
+    # An ASCII stored password must fail the same way for a non-ASCII attempt.
+    monkeypatch.setattr(auth_module, "ADMIN_PASSWORD", "pass123")
+
+    resp = client.post(
+        "/auth",
+        data={"csrf_token": "test-csrf", "password": "pässwort"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 302
+    assert "error=invalid" in resp.headers["Location"]
+
+
+def test_auth_non_ascii_password_match_authenticates(monkeypatch, tmp_path):
+    """A matching non-ASCII plaintext password still authenticates (issue #648)."""
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="local")
+
+    # Import after build_client(): it re-imports the auth module, so the
+    # patched module object must be the one the running app uses.
+    import auth as auth_module
+
+    monkeypatch.setattr(auth_module, "ADMIN_PASSWORD", "pässwort")
+
+    with client.session_transaction() as sess:
+        sess["csrf_token"] = "test-csrf"
+
+    resp = client.post(
+        "/auth",
+        data={"csrf_token": "test-csrf", "password": "pässwort"},
+        follow_redirects=False,
+    )
+
+    assert resp.status_code == 302
+    assert resp.headers["Location"] == "/"
+    with client.session_transaction() as sess:
+        assert sess.get("authenticated") is True
+
+
 def test_oidc_tokens_not_in_cookie_payload(monkeypatch, tmp_path):
     """Session cookie payload must not contain plaintext OIDC credentials.
 

@@ -234,7 +234,10 @@ print(generate_password_hash('your-password'))"
         "deprecated in a future release. Migrate to a hashed password by "
         "setting ADMIN_PASSWORD to a Werkzeug hash (e.g., pbkdf2:sha256:...)."
     )
-    return hmac.compare_digest(password, stored)
+    # Compare UTF-8 bytes: hmac.compare_digest() rejects non-ASCII ``str``
+    # arguments with TypeError, which would turn a wrong-password attempt
+    # into an unhandled 500 instead of a failed login (issue #648).
+    return hmac.compare_digest(password.encode("utf-8"), stored.encode("utf-8"))
 
 
 def require_auth(view_fn):
