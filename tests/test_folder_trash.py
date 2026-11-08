@@ -16,6 +16,7 @@ from __future__ import annotations
 import contextlib
 import errno
 import json
+import logging
 import os
 import re
 import threading
@@ -1360,6 +1361,93 @@ class TestBulkDelete:
         body = resp.data.decode()
         # Should show success feedback (moved_files=1 and moved_folders=1)
         assert "success" in body.lower() or "moved" in body.lower()
+
+    def test_bulk_delete_rejects_gallery_root_folder_entries(self, monkeypatch, tmp_path, caplog):
+        """Regression for issue #662: DATA_FOLDER itself must never be trashed.
+
+        ``sanitize_path("")`` is True and ``os.path.normpath("")`` is ".", so a
+        bulk-delete folder entry of "" or "." resolves to DATA_FOLDER itself.
+        Such an entry must be rejected explicitly: reaching
+        ``move_to_trash(DATA_FOLDER, DATA_FOLDER)`` makes the move fall back to
+        shutil.copytree + shutil.rmtree, which copies the gallery into its own
+        trash directory and would remove DATA_FOLDER itself. The gallery must
+        stay intact, nothing may land in the trash, and the denial must be
+        logged as a bulk_delete security event.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        caplog.set_level(logging.INFO, logger="app")
+
+        # Login to get session cookie
+        login_resp = client.get("/login")
+        csrf_match = re.search(
+            r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']',
+            login_resp.data.decode(),
+        )
+        assert csrf_match, "CSRF token not found in login form"
+        login_csrf = csrf_match.group(1)
+
+        auth_resp = client.post(
+            "/auth",
+            data={"password": "pass123", "next": "/", "csrf_token": login_csrf},
+            follow_redirects=False,
+        )
+        assert auth_resp.status_code == 302
+
+        # Now get the main page to extract CSRF for bulk-delete form
+        main_resp = client.get("/")
+        main_html = main_resp.data.decode()
+        csrf_match2 = re.search(
+            r'name=["\']csrf_token["\']\s+value=["\']([^"\']+)["\']',
+            main_html,
+        )
+        assert csrf_match2, "CSRF token not found in main page"
+        bulk_csrf = csrf_match2.group(1)
+
+        # Every spelling of the gallery root must be rejected.
+        for entry in ("", ".", "./", "\\"):
+            resp = client.post(
+                "/bulk-delete",
+                data={
+                    "csrf_token": bulk_csrf,
+                    "current_subpath": "",
+                    "filenames": [],
+                    "folders": [entry],
+                },
+                follow_redirects=True,
+            )
+
+            assert resp.status_code == 200
+            # The gallery root must survive untouched.
+            assert data_dir.is_dir()
+            assert (data_dir / "cats" / "cat.jpg").exists()
+            # Nothing may have been moved to the trash.
+            assert list_trash(data_dir) == []
+
+        # The rejection must be logged as a denied bulk_delete security event.
+        msgs = [r.message for r in caplog.records]
+        assert any(
+            '"event":"bulk_delete"' in m and '"outcome":"denied"' in m and '"reason":"gallery_root"' in m for m in msgs
+        ), f"Expected bulk_delete denied gallery_root security event, got: {msgs}"
+
+        # A gallery-root entry must be skipped, not deny the whole request:
+        # the sibling folder is still trashed while the root survives.
+        resp = client.post(
+            "/bulk-delete",
+            data={
+                "csrf_token": bulk_csrf,
+                "current_subpath": "",
+                "filenames": [],
+                "folders": ["", "cats"],
+            },
+            follow_redirects=True,
+        )
+
+        assert resp.status_code == 200
+        assert data_dir.is_dir()
+        assert (data_dir / "sample.png").exists()
+        assert not (data_dir / "cats").exists()
+        assert [item["original"] for item in list_trash(data_dir)] == ["cats"]
 
     def test_bulk_delete_no_selection_is_nop(self, monkeypatch, tmp_path):
         """Bulk delete with no files/folders selected should be a noop."""

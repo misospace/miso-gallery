@@ -62,6 +62,7 @@ from gallery_scan import (
     format_size,
     is_excluded_gallery_path,
     is_excluded_media_path,
+    is_gallery_root_path,
     is_media_file,
     is_servable_media,
     iter_gallery_items,
@@ -138,6 +139,7 @@ __all__ = [
     "format_size",
     "is_excluded_gallery_path",
     "is_excluded_media_path",
+    "is_gallery_root_path",
     "is_media_file",
     "is_servable_media",
     "iter_gallery_items",
@@ -771,6 +773,14 @@ def bulk_delete():
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
+        # Guard: never move DATA_FOLDER itself into its own trash (issue #662).
+        # move_to_trash(DATA_FOLDER, DATA_FOLDER) falls back to copytree +
+        # rmtree, which copies the gallery into its own trash directory.
+        # Evaluated before dir_size() so a gallery-root entry cannot trigger a
+        # full-gallery size scan (and a bogus "folder too large" 422).
+        if is_gallery_root_path(folder_path):
+            log_security_event("bulk_delete", "denied", reason="gallery_root", stage="preflight", rel_path=safe_rel_path)
+            continue
         if folder_path.exists() and folder_path.is_dir():
             size = dir_size(folder_path)
             if size > BULK_DELETE_FOLDER_SIZE_CAP:
@@ -799,6 +809,12 @@ def bulk_delete():
             continue
         safe_rel_path = sanitize_rel_path(rel_path)
         folder_path = DATA_FOLDER / safe_rel_path
+        # Guard: never move DATA_FOLDER itself into its own trash (issue #662).
+        # Same check as in the preflight loop: the entry is skipped, the
+        # request continues with the remaining selections.
+        if is_gallery_root_path(folder_path):
+            log_security_event("bulk_delete", "denied", reason="gallery_root", stage="delete_folders", rel_path=safe_rel_path)
+            continue
         if folder_path.exists() and folder_path.is_dir() and move_to_trash(folder_path, DATA_FOLDER):
             moved_folders += 1
             purged_thumbnails.append(safe_rel_path)
