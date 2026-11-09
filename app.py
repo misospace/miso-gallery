@@ -456,15 +456,6 @@ def service_worker():
 
 
 
-@app.route("/images/<path:filename>")
-def images(filename: str):
-    rel_path = sanitize_rel_path(filename)
-    media_path = DATA_FOLDER / rel_path
-    if not is_servable_media(media_path):
-        abort(404)
-    return send_from_directory(str(DATA_FOLDER), rel_path)
-
-
 @app.route("/")
 @app.route("/<path:subpath>")
 @require_auth
@@ -704,8 +695,11 @@ def thumb(filename: str):
     return send_from_directory(str(THUMBNAIL_CACHE_DIR), cached_name)
 
 
-@app.route("/view/<path:filename>")
+@app.route("/images/<path:filename>", endpoint="images")
+@app.route("/view/<path:filename>", endpoint="view")
 def view(filename: str):
+    # One shared body for the two public media routes; the explicit endpoint
+    # names keep url_for("view") and url_for("images") building their own paths.
     rel_path = sanitize_rel_path(filename)
     media_path = DATA_FOLDER / rel_path
     if not is_servable_media(media_path):
