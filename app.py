@@ -1043,9 +1043,10 @@ def add_tag():
         log_security_event("add_tag", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
 
-    # Same path guards as the mutating routes (issue #649): reject traversal
-    # shapes ``sanitize_path`` considers unsafe before normalizing, then only
-    # write tags for existing, servable media — matching ``/api/llm/tags``.
+    # Same path guards as the mutating routes (issues #649, #654): reject
+    # traversal shapes and null bytes via ``sanitize_path`` before
+    # normalizing, then only write tags for existing, servable media —
+    # matching ``/api/llm/tags``.
     raw_rel_path = str(request.form.get("rel_path", ""))
     if not sanitize_path(raw_rel_path):
         log_security_event("add_tag", "denied", reason="invalid_path", rel_path=raw_rel_path)
