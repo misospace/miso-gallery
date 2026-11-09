@@ -281,6 +281,28 @@ def test_tag_route_rejects_null_byte_rel_path(monkeypatch, tmp_path):
     assert resp.status_code == 400
 
 
+def test_tag_route_rejects_missing_media(monkeypatch, tmp_path):
+    """#654: /tag answers 404 for a valid path naming no gallery file, writing no tag row.
+
+    The AI review of PR #661 flagged that sanitize_path alone still let a
+    syntactically valid ``missing.png`` gain a tag row. The route must apply
+    the same servable-media guard /api/llm/tags applies before add_tags().
+    """
+    tag_database = tmp_path / "tags.sqlite3"
+    client, _ = build_client(
+        monkeypatch, tmp_path, auth_type="none", extra_env={"TAG_DATABASE": str(tag_database)}
+    )
+    _seed_csrf(client)
+    resp = client.post(
+        "/tag",
+        data={"rel_path": "missing.png", "tag": "x", "csrf_token": _SEED_TOKEN},
+    )
+    assert resp.status_code == 404
+    from tag_store import TagStore
+
+    assert TagStore(tag_database).get_tags("missing.png") == []
+
+
 def test_delete_route_rejects_null_byte_filename(monkeypatch, tmp_path):
     """#654: /delete answers 400 for a null-byte filename."""
     client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
