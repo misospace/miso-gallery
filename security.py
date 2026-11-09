@@ -555,7 +555,18 @@ def rate_limit(max_requests: int = 30, window: int = 60):
 
 
 def sanitize_path(path: str) -> bool:
-    path = str(path or "").replace("\x00", "")
+    path = str(path or "")
+    # Reject embedded null bytes instead of stripping them for the check
+    # (issue #654). Stripping let ``a\x00b.png`` pass the guard while the
+    # caller kept using the null byte, so the checked string was not the
+    # string used downstream; and stripping would alias the payload onto
+    # ``ab.png``, mutating a file the caller never named. Null bytes are
+    # never valid in gallery-relative paths, and ``os.stat``/``open``/
+    # ``os.path.realpath`` raise ``ValueError: embedded null byte`` on them
+    # (only ``Path.exists()`` swallows it), so every guarded route must stop
+    # the payload here and return 400/404 instead of an unhandled error.
+    if "\x00" in path:
+        return False
     return not (".." in path or path.startswith("/"))
 
 

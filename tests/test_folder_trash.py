@@ -1562,12 +1562,12 @@ class TestBulkDelete:
     def test_bulk_delete_denies_nul_byte_folder_entries(self, monkeypatch, tmp_path, caplog):
         r"""A NUL byte inside a folder selection must be denied, not 500.
 
-        ``sanitize_path`` strips NUL bytes before looking for "..", so a
-        selection like ``"cats\x00"`` passes validation. ``Path.resolve()``
-        then hits ``lstat()``, which rejects embedded NULs with a
-        ``ValueError`` the gallery-root guard must catch: the entry is
-        denied like any other unresolvable selection, the gallery stays
-        intact, and the request still answers 200.
+        ``sanitize_path`` rejects embedded NUL bytes outright (issue #654),
+        so a selection like ``"cats\x00"`` is denied at the path-validation
+        stage with ``reason=invalid_path`` before any filesystem call can
+        raise ``ValueError``. The entry is denied like any other invalid
+        selection, the gallery stays intact, and the request still answers
+        200.
         """
         client, data_dir = build_client(monkeypatch, tmp_path)
 
@@ -1613,8 +1613,8 @@ class TestBulkDelete:
 
         msgs = [r.message for r in caplog.records]
         assert any(
-            '"event":"bulk_delete"' in m and '"outcome":"denied"' in m and '"reason":"gallery_root"' in m for m in msgs
-        ), f"Expected bulk_delete denied gallery_root security event, got: {msgs}"
+            '"event":"bulk_delete"' in m and '"outcome":"denied"' in m and '"reason":"invalid_path"' in m for m in msgs
+        ), f"Expected bulk_delete denied invalid_path security event, got: {msgs}"
 
     def test_bulk_delete_denies_symlink_pointing_at_gallery_root(self, monkeypatch, tmp_path, caplog):
         """A symlink inside DATA_FOLDER aimed at DATA_FOLDER itself is skipped.

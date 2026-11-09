@@ -256,12 +256,101 @@ def test_sanitize_path_rejects_leading_slash(monkeypatch, tmp_path):
 
 
 def test_sanitize_path_rejects_null_bytes(monkeypatch, tmp_path):
-    """sanitize_path should strip null bytes (but not make path safe on its own)."""
+    """sanitize_path must reject, not strip, embedded null bytes (issue #654)."""
     from security import sanitize_path
 
-    # Null byte injection — sanitize_path strips nulls but '..' still present
-    assert sanitize_path("normal\x00.png") is True  # null stripped, becomes "normal.png"
-    assert sanitize_path("../secret\x00.png") is False  # ".." still present
+    # Stripping nulls for the check only would let "a\x00b.png" pass while the
+    # caller still used the null byte, and would alias the payload onto the
+    # different real file "ab.png". The guard now rejects outright.
+    assert sanitize_path("normal\x00.png") is False
+    assert sanitize_path("../secret\x00.png") is False
+    assert sanitize_path("\x00") is False
+    assert sanitize_path("normal.png") is True
+
+
+def test_tag_route_rejects_null_byte_rel_path(monkeypatch, tmp_path):
+    """#654: /tag answers 400 for a null-byte rel_path instead of writing a
+    tag row for a path that can never exist on disk."""
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
+    _seed_csrf(client)
+
+    resp = client.post(
+        "/tag",
+        data={"rel_path": "sample\x00.png", "tag": "x", "csrf_token": _SEED_TOKEN},
+    )
+    assert resp.status_code == 400
+
+
+def test_tag_route_rejects_missing_media(monkeypatch, tmp_path):
+    """#654: /tag answers 404 for a valid path naming no gallery file, writing no tag row.
+
+    The AI review of PR #661 flagged that sanitize_path alone still let a
+    syntactically valid ``missing.png`` gain a tag row. The route must apply
+    the same servable-media guard /api/llm/tags applies before add_tags().
+    """
+    tag_database = tmp_path / "tags.sqlite3"
+    client, _ = build_client(
+        monkeypatch, tmp_path, auth_type="none", extra_env={"TAG_DATABASE": str(tag_database)}
+    )
+    _seed_csrf(client)
+    resp = client.post(
+        "/tag",
+        data={"rel_path": "missing.png", "tag": "x", "csrf_token": _SEED_TOKEN},
+    )
+    assert resp.status_code == 404
+    from tag_store import TagStore
+
+    assert TagStore(tag_database).get_tags("missing.png") == []
+
+
+def test_delete_route_rejects_null_byte_filename(monkeypatch, tmp_path):
+    """#654: /delete answers 400 for a null-byte filename."""
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
+    _seed_csrf(client)
+
+    resp = client.post("/delete/sample%00.png", data={"csrf_token": _SEED_TOKEN})
+    assert resp.status_code == 400
+
+
+def test_llm_delete_rejects_null_byte_rel_path(monkeypatch, tmp_path):
+    """#654: /api/llm/delete answers 400 for a null-byte rel_path."""
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
+
+    resp = client.post(
+        "/api/llm/delete",
+        json={"rel_path": "sample\x00.png"},
+        headers=auth_header(),
+    )
+    assert resp.status_code == 400
+
+
+def test_llm_tags_skips_null_byte_paths(monkeypatch, tmp_path):
+    """#654: /api/llm/tags skips null-byte entries but still tags the valid ones."""
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
+
+    resp = client.post(
+        "/api/llm/tags",
+        json={"rel_paths": ["sample.png", "sample\x00.png"], "tags": ["x"]},
+        headers=auth_header(),
+    )
+    assert resp.status_code == 200
+    assert resp.get_json()["updated"] == ["sample.png"]
+
+
+def test_llm_image_rejects_null_byte_relpath(monkeypatch, tmp_path):
+    """#654: /api/llm/image answers 400 for a null-byte relpath."""
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
+
+    resp = client.get("/api/llm/image/sample%00.png", headers=auth_header())
+    assert resp.status_code == 400
+
+
+def test_image_metadata_rejects_null_byte_relpath(monkeypatch, tmp_path):
+    """#654: /api/image-metadata answers 400 for a null-byte relpath."""
+    client, _ = build_client(monkeypatch, tmp_path, auth_type="none")
+
+    resp = client.get("/api/image-metadata/sample%00.png")
+    assert resp.status_code == 400
 
 
 def test_images_route_rejects_path_traversal(monkeypatch, tmp_path):
