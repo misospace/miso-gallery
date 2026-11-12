@@ -505,10 +505,15 @@ def find_duplicate_media(limit: int | None = None) -> list[dict[str, object]]:
             if len(groups) >= effective_limit:
                 return groups
             matches = sorted(matches, key=lambda p: p.relative_to(app.DATA_FOLDER).as_posix().lower())
+            try:
+                size = matches[0].stat().st_size
+            except OSError:
+                # Vanished between hashing and the group build (issue #668).
+                continue
             groups.append(
                 {
                     "hash": digest,
-                    "size": matches[0].stat().st_size,
+                    "size": size,
                     "keep": matches[0].relative_to(app.DATA_FOLDER).as_posix(),
                     "duplicates": [p.relative_to(app.DATA_FOLDER).as_posix() for p in matches[1:]],
                     "all": [p.relative_to(app.DATA_FOLDER).as_posix() for p in matches],

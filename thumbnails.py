@@ -168,7 +168,11 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
         if stats["checked"] > effective_limit:
             break
 
-        cached_name = thumbnail_filename(rel_posix, item)
+        try:
+            cached_name = thumbnail_filename(rel_posix, item)
+        except OSError:
+            # Vanished since the walk — nothing to check (issue #668).
+            continue
         cached_path = app.THUMBNAIL_CACHE_DIR / cached_name
 
         needs_regen = not cached_path.exists()

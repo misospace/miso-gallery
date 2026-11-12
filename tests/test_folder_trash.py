@@ -563,11 +563,15 @@ def test_failed_move_does_not_remove_a_payload_the_move_no_longer_owns(tmp_path,
 
 
 def test_list_trash_ignores_corrupt_metadata_and_unreadable_entries(tmp_path, monkeypatch):
+    # Issue #668: an entry that vanished (or became unreadable) between
+    # td.iterdir() and item.stat() is skipped instead of 500-ing the /trash page.
     data = tmp_path / "data"
     td = trash.trash_dir(data)
     item = td / "item"
     item.write_text("contents")
     item.with_name(item.name + trash.META_SUFFIX).write_text("not-json")
+    surviving = td / "survivor"
+    surviving.write_text("ok")
     original_stat = trash.Path.stat
 
     def failing_stat(path, *args, **kwargs):
@@ -576,8 +580,9 @@ def test_list_trash_ignores_corrupt_metadata_and_unreadable_entries(tmp_path, mo
         return original_stat(path, *args, **kwargs)
 
     monkeypatch.setattr(trash.Path, "stat", failing_stat)
-    with pytest.raises(OSError):
-        list_trash(data)
+    entries = list_trash(data)
+    assert [e["name"] for e in entries] == ["survivor"]
+    assert entries[0]["size"] == len(b"ok")
 
 
 def test_restore_rejects_traversal_and_renames_collisions(tmp_path):

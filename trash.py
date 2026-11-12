@@ -426,12 +426,17 @@ def list_trash(data_folder: Path) -> list[dict]:
                 meta = json.loads(meta_file.read_text())
             except Exception:
                 meta = {}
-        size = dir_size(item) if item.is_dir() else item.stat().st_size
+        try:
+            item_stat = item.stat()
+        except OSError:
+            # Reclaimed by a concurrent empty_trash/purge_old_trash (issue #668).
+            continue
+        size = dir_size(item) if item.is_dir() else item_stat.st_size
         out.append(
             {
                 "name": item.name,
                 "original": meta.get("original", "unknown"),
-                "deleted_at": meta.get("deleted_at", _from_timestamp(item.stat().st_mtime).isoformat()),
+                "deleted_at": meta.get("deleted_at", _from_timestamp(item_stat.st_mtime).isoformat()),
                 "size": size,
             }
         )

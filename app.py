@@ -504,8 +504,12 @@ def index(subpath: str = ""):
                 }
             )
         elif item.suffix.lower() in IMAGE_EXTENSIONS or item.suffix.lower() in VIDEO_EXTENSIONS:
+            try:
+                item_stat = item.stat()
+            except OSError:
+                # Vanished between iterdir() and stat() — drop the item (issue #668).
+                continue
             stats["images"] += 1
-            item_stat = item.stat()
             is_video = item.suffix.lower() in VIDEO_EXTENSIONS
             items.append(
                 {
@@ -612,7 +616,11 @@ def _serve_video_with_range(source_path: Path):
     Returns 206 Partial Content when a Range header is present, otherwise 200 OK
     with the full file.
     """
-    file_size = source_path.stat().st_size
+    try:
+        file_size = source_path.stat().st_size
+    except FileNotFoundError:
+        # Source vanished after the existence check — answer 404 (issue #668).
+        return "Not found", 404
     range_header = request.headers.get("Range")
 
     if not range_header:
@@ -679,7 +687,11 @@ def thumb(filename: str):
         return "Not found", 404
 
     ensure_thumbnail_cache_dir()
-    cached_name = thumbnail_filename(rel_path, source_path)
+    try:
+        cached_name = thumbnail_filename(rel_path, source_path)
+    except FileNotFoundError:
+        # Source vanished after is_servable_media() — answer 404 (issue #668).
+        return "Not found", 404
     cached_path = THUMBNAIL_CACHE_DIR / cached_name
 
     # Videos are served directly with Range-request support for seeking/scrubbing.
