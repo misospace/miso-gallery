@@ -1292,3 +1292,119 @@ def test_llm_folders_survives_relative_to_no_longer_resolving(monkeypatch, tmp_p
     # machine clients (issue #480 review).
     assert payload["total"] == 0
     assert payload["has_more"] is False
+
+
+def test_tag_route_rejects_overlong_tag(monkeypatch, tmp_path):
+    """Regression #669: /tag rejects a tag longer than MAX_TAG_CHARS with 400."""
+    from tag_store import MAX_TAG_CHARS
+
+    client, _ = build_client(monkeypatch, tmp_path)
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["csrf_token"] = "test-csrf-token"
+
+    resp = client.post(
+        "/tag",
+        data={
+            "rel_path": "sample.png",
+            "tags[]": ["ok", "x" * (MAX_TAG_CHARS + 1)],
+            "csrf_token": "test-csrf-token",
+        },
+    )
+    assert resp.status_code == 400
+    assert "maximum length" in resp.get_json()["error"]
+
+
+def test_tag_route_rejects_too_many_tags(monkeypatch, tmp_path):
+    """Regression #669: /tag rejects requests exceeding MAX_TAGS_PER_REQUEST."""
+    from tag_store import MAX_TAGS_PER_REQUEST
+
+    client, _ = build_client(monkeypatch, tmp_path)
+    with client.session_transaction() as session:
+        session["authenticated"] = True
+        session["csrf_token"] = "test-csrf-token"
+
+    resp = client.post(
+        "/tag",
+        data={
+            "rel_path": "sample.png",
+            "tags[]": [f"tag{i}" for i in range(MAX_TAGS_PER_REQUEST + 1)],
+            "csrf_token": "test-csrf-token",
+        },
+    )
+    assert resp.status_code == 400
+    assert "Too many tags" in resp.get_json()["error"]
+
+
+def test_llm_tags_rejects_overlong_tag(monkeypatch, tmp_path):
+    """Regression #669: /api/llm/tags rejects a tag longer than MAX_TAG_CHARS."""
+    from tag_store import MAX_TAG_CHARS
+
+    client, _ = build_client(monkeypatch, tmp_path)
+    resp = client.post(
+        "/api/llm/tags",
+        json={"rel_path": "sample.png", "tags": ["x" * (MAX_TAG_CHARS + 1)]},
+        headers=auth_header(),
+    )
+    assert resp.status_code == 400
+    assert "maximum length" in resp.get_json()["error"]
+
+
+def test_llm_tags_rejects_too_many_tags(monkeypatch, tmp_path):
+    """Regression #669: /api/llm/tags rejects requests exceeding MAX_TAGS_PER_REQUEST."""
+    from tag_store import MAX_TAGS_PER_REQUEST
+
+    client, _ = build_client(monkeypatch, tmp_path)
+    resp = client.post(
+        "/api/llm/tags",
+        json={"rel_path": "sample.png", "tags": [f"tag{i}" for i in range(MAX_TAGS_PER_REQUEST + 1)]},
+        headers=auth_header(),
+    )
+    assert resp.status_code == 400
+    assert "Too many tags" in resp.get_json()["error"]
+
+
+def test_tags_at_caps_are_accepted(monkeypatch, tmp_path):
+    """Regression #669: tags exactly at the caps still behave as before."""
+    from tag_store import MAX_TAGS_PER_REQUEST
+
+    client, _ = build_client(monkeypatch, tmp_path)
+    resp = client.post(
+        "/api/llm/tags",
+        json={"rel_path": "sample.png", "tags": [f"tag{i}" for i in range(MAX_TAGS_PER_REQUEST)]},
+        headers=auth_header(),
+    )
+    assert resp.status_code == 200
+    assert len(resp.get_json()["tags"]) == MAX_TAGS_PER_REQUEST
+
+
+def test_llm_tags_count_cap_applies_before_dedup(monkeypatch, tmp_path):
+    """Regression #669 review fix: duplicate entries cannot bypass the count cap."""
+    from tag_store import MAX_TAGS_PER_REQUEST
+
+    client, _ = build_client(monkeypatch, tmp_path)
+    resp = client.post(
+        "/api/llm/tags",
+        json={"rel_path": "sample.png", "tags": ["dup"] * (MAX_TAGS_PER_REQUEST + 1)},
+        headers=auth_header(),
+    )
+    assert resp.status_code == 400
+    assert "Too many tags" in resp.get_json()["error"]
+
+
+def test_llm_tags_remove_allows_overlong_tags(monkeypatch, tmp_path):
+    """Regression #669 review fix: removal is not blocked by the length cap."""
+    import tag_store
+    from tag_store import MAX_TAG_CHARS
+
+    client, _ = build_client(monkeypatch, tmp_path, extra_env={"TAG_DATABASE": str(tmp_path / "tags.sqlite3")})
+    # Seed an over-long tag directly through the store, bypassing route caps.
+    store = tag_store.TagStore(tmp_path / "tags.sqlite3")
+    store.add_tags("sample.png", ["x" * (MAX_TAG_CHARS + 1)])
+    resp = client.post(
+        "/api/llm/tags",
+        json={"rel_path": "sample.png", "tags": ["x" * (MAX_TAG_CHARS + 1)], "action": "remove"},
+        headers=auth_header(),
+    )
+    assert resp.status_code == 200
+    assert store.get_tags("sample.png") == []

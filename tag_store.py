@@ -16,6 +16,24 @@ CREATE TABLE IF NOT EXISTS media_tags (
 
 Result = TypeVar("Result")
 
+# Caps for untrusted tag input (issue #669), mirroring the miso: metadata
+# chunk caps in metadata.py (issue #650): tag values are stored as TEXT rows
+# and MAX_CONTENT_LENGTH does not bound them, so each route rejects tags
+# longer than MAX_TAG_CHARS and requests carrying more than
+# MAX_TAGS_PER_REQUEST tags with 400.
+MAX_TAG_CHARS = 200
+MAX_TAGS_PER_REQUEST = 50
+
+
+def validate_tags(tags: Sequence[str]) -> str | None:
+    """Return an error message when the stripped tag list exceeds caps, else None."""
+    if len(tags) > MAX_TAGS_PER_REQUEST:
+        return f"Too many tags (max {MAX_TAGS_PER_REQUEST} per request)"
+    for tag in tags:
+        if len(tag) > MAX_TAG_CHARS:
+            return f"Tag exceeds maximum length of {MAX_TAG_CHARS} characters"
+    return None
+
 
 class TagStore:
     """Store tags for gallery media using gallery-relative paths."""
