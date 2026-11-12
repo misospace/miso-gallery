@@ -585,6 +585,40 @@ def test_list_trash_ignores_corrupt_metadata_and_unreadable_entries(tmp_path, mo
     assert entries[0]["size"] == len(b"ok")
 
 
+def test_list_trash_uses_recorded_meta_size_without_recomputing(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+    item = td / "album"
+    item.mkdir()
+    (item / "a.txt").write_text("hello")
+    (td / "album.meta.json").write_text(
+        json.dumps({"original": "albums/album", "deleted_at": "2026-01-01T00:00:00+00:00", "size": 123})
+    )
+
+    def fail_dir_size(path):
+        raise AssertionError("dir_size should not be called when meta records a size")
+
+    monkeypatch.setattr(trash, "dir_size", fail_dir_size)
+    items = list_trash(data)
+    assert len(items) == 1
+    assert items[0]["name"] == "album"
+    assert items[0]["size"] == 123
+
+
+def test_list_trash_falls_back_to_live_size_without_meta_size(tmp_path, monkeypatch):
+    data = tmp_path / "data"
+    td = trash.trash_dir(data)
+    item = td / "album"
+    item.mkdir()
+    (item / "a.txt").write_text("hello")
+    (td / "album.meta.json").write_text(json.dumps({"original": "albums/album"}))
+
+    items = list_trash(data)
+    assert len(items) == 1
+    assert items[0]["name"] == "album"
+    assert items[0]["size"] == (item / "a.txt").stat().st_size
+
+
 def test_restore_rejects_traversal_and_renames_collisions(tmp_path):
     data = tmp_path / "data"
     td = trash.trash_dir(data)

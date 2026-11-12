@@ -431,7 +431,9 @@ def list_trash(data_folder: Path) -> list[dict]:
         except OSError:
             # Reclaimed by a concurrent empty_trash/purge_old_trash (issue #668).
             continue
-        size = dir_size(item) if item.is_dir() else item_stat.st_size
+        size = meta.get("size")
+        if not isinstance(size, (int, float)) or isinstance(size, bool):
+            size = dir_size(item) if item.is_dir() else item_stat.st_size
         out.append(
             {
                 "name": item.name,
