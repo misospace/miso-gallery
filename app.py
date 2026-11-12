@@ -85,6 +85,7 @@ from security import (
     sanitize_path,
     validate_csrf,
 )
+from tag_store import validate_tags
 from thumbnails import (
     batch_remove_thumbnails,
     ensure_thumbnail_cache_dir,
@@ -1064,6 +1065,11 @@ def add_tag():
 
     if not rel_path or not tags:
         return {"error": "Missing rel_path or tag"}, 400
+
+    tag_error = validate_tags(tags)
+    if tag_error:
+        log_security_event("add_tag", "denied", reason="tag_limit_exceeded", rel_path=rel_path)
+        return {"error": tag_error}, 400
 
     if not is_servable_media(source_file_path(rel_path)):
         log_security_event("add_tag", "denied", reason="not_servable_media", rel_path=rel_path)

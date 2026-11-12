@@ -271,7 +271,7 @@ Response shape:
 
 | Method | Path | Body | Description |
 |--------|------|------|-------------|
-| `POST` | `/api/llm/tags` | `{"rel_path":"cats/cat.jpg","tag":"favorite","action":"add"}` | Add/remove tags. Tag persistence is currently log-only. |
+| `POST` | `/api/llm/tags` | `{"rel_path":"cats/cat.jpg","tag":"favorite","action":"add"}` | Add/remove tags. Caps per request (issue #669): max 50 tags per request and 200 characters per tag; over-limit `add` requests are rejected with 400. |
 | `POST` | `/api/llm/delete` | `{"rel_path":"cats/cat.jpg"}` | Move one media file to trash and clear its thumbnail cache. |
 | `POST` | `/api/llm/bulk-delete` | `{"rel_paths":["a.jpg","b.jpg"]}` | Move multiple media files to trash. |
 | `POST` | `/api/llm/dedup` | `{}` or `{"remove":true}` | Find duplicate media by SHA-256. Defaults to dry-run; `remove:true` moves duplicates to trash. |

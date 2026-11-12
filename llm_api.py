@@ -18,6 +18,7 @@ from flask import request
 
 from auth import require_api_key_with_scope
 from security import rate_limit, sanitize_path
+from tag_store import MAX_TAG_CHARS, MAX_TAGS_PER_REQUEST
 from thumbnails import batch_remove_thumbnails, remove_thumbnail_cache_for
 from trash import move_to_trash
 from webhook_tasks import _validate_task_name
@@ -295,7 +296,16 @@ def register_llm_routes(app, log_security_event) -> None:
             tags = [tags]
         if not isinstance(rel_paths, list) or not isinstance(tags, list) or action not in {"add", "remove"}:
             return {"error": "rel_paths/images, tags, and action=add|remove are required"}, 400
+        # Count cap applies to the raw list before dedup so batches of many
+        # duplicate entries cannot bypass it; the length cap is enforced for
+        # adds only, so tags stored before the cap can still be removed.
+        if len(tags) > MAX_TAGS_PER_REQUEST:
+            log_security_event("llm_tags", "rejected", reason="tag_limit_exceeded")
+            return {"error": f"Too many tags (max {MAX_TAGS_PER_REQUEST} per request)"}, 400
         normalized_tags = sorted({str(tag).strip() for tag in tags if str(tag).strip()})
+        if action == "add" and any(len(tag) > MAX_TAG_CHARS for tag in normalized_tags):
+            log_security_event("llm_tags", "rejected", reason="tag_limit_exceeded")
+            return {"error": f"Tag exceeds maximum length of {MAX_TAG_CHARS} characters"}, 400
         store = app_module._tag_store()
         updated = []
         for rel_path in rel_paths:
