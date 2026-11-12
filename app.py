@@ -1173,6 +1173,7 @@ def trash_empty():
 @rate_limit(max_requests=5, window=60)
 def trash_purge():
     if not validate_csrf(request.form.get("csrf_token")):
+        log_security_event("trash_purge", "denied", reason="invalid_csrf")
         return {"error": "Invalid CSRF token"}, 403
     days = request.form.get("days", "30")
     try:
@@ -1184,7 +1185,8 @@ def trash_purge():
         )
         flash("Invalid retention period provided; using default of 30 days.", "warning")
         retention_days = 30
-    purge_old_trash(DATA_FOLDER, retention_days)
+    deleted = purge_old_trash(DATA_FOLDER, retention_days)
+    log_security_event("trash_purge", "success", retention_days=retention_days, deleted=deleted)
     _invalidate_gallery_scan_cache()
     return redirect(url_for("trash_view"))
 

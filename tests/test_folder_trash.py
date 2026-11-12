@@ -3745,6 +3745,59 @@ class TestTrashPurgeValidation:
         )
         assert response.status_code == 302
 
+    def test_trash_purge_emits_audit_event_with_deleted_count(self, monkeypatch, tmp_path, caplog):
+        """POST /trash/purge must emit a trash_purge audit event (#670).
+
+        The event carries the requested retention days and the number of
+        entries deleted, like every other destructive route.
+        """
+        client, data_dir = build_client(monkeypatch, tmp_path)
+
+        # Create two trashed items old enough to be purged with days=1
+        td = trash.trash_dir(data_dir)
+        old_iso = (trash._utcnow() - timedelta(days=40)).isoformat()
+        for name in ("gone1.txt", "gone2.txt"):
+            entry = td / name
+            entry.write_text(name)
+            entry.with_name(entry.name + trash.META_SUFFIX).write_text(json.dumps({"original": name, "deleted_at": old_iso}))
+
+        # A fresh entry that must survive the retention window
+        (td / "fresh.txt").write_text("fresh")
+
+        # Login first
+        login_resp = client.get("/login")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', login_resp.data.decode())
+        assert csrf_match, "CSRF token not found in login form"
+        login_csrf = csrf_match.group(1)
+        auth_resp = client.post(
+            "/auth",
+            data={"password": "pass123", "next": "/", "csrf_token": login_csrf},
+            follow_redirects=False,
+        )
+        assert auth_resp.status_code == 302
+
+        # Get CSRF token from trash page
+        trash_resp = client.get("/trash")
+        csrf_match = re.search(r'name="csrf_token" value="([^"]+)"', trash_resp.data.decode())
+        assert csrf_match, "CSRF token not found on trash page"
+        csrf_token = csrf_match.group(1)
+
+        with caplog.at_level("INFO"):
+            response = client.post(
+                "/trash/purge",
+                data={"csrf_token": csrf_token, "days": "1"},
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 302
+        assert (td / "fresh.txt").exists()
+        assert not (td / "gone1.txt").exists()
+        msgs = [r.message for r in caplog.records]
+        assert any(
+            '"event":"trash_purge"' in m and '"outcome":"success"' in m and '"retention_days":1' in m and '"deleted":2' in m
+            for m in msgs
+        ), f"Expected trash_purge success audit event with deleted count, got: {msgs}"
+
     def test_trash_purge_route_survives_failed_entry_in_sweep(self, monkeypatch, tmp_path):
         """A raced non-ENOENT OSError mid-sweep no longer 500s /trash/purge (#597).
 
