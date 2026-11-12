@@ -23,8 +23,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=9.2.0,<10",
-    "ruff>=0.17.4,<1",
-    "coverage>=7.17.2,<8",
+    "ruff>=0.17.5,<1",
+    "coverage>=7.17.3,<8",
 ]
 
 # Flat py-modules list is deliberate: runtime modules live at the repo root, and
