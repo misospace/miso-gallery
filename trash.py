@@ -1455,6 +1455,27 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                 lock_fh.close()
 
 
+def _delete_trash_entry(item: Path) -> None:
+    """Delete a trash entry without ever following a symlink out of the trash.
+
+    Shared by the maintenance sweeps (``empty_trash``, ``purge_old_trash``),
+    which must apply exactly this order. ``is_symlink()`` is checked FIRST:
+    it is lstat-based and never follows the link, while a symlink to a live
+    directory is True for both ``is_symlink()`` and ``is_dir()`` — so
+    ``rmtree()`` would fail on it (OSError swallowed by ``ignore_errors``)
+    and the link would survive every sweep. Unlink the link itself;
+    ``is_symlink()`` catches a loop first, and ``is_dir()`` would also return
+    False on a loop (ELOOP is swallowed by ``Path.is_dir()``) so the unlinked
+    loop under the old order already worked (#595).
+    """
+    if item.is_symlink():
+        item.unlink(missing_ok=True)
+    elif item.is_dir():
+        shutil.rmtree(item, ignore_errors=True)
+    else:
+        item.unlink(missing_ok=True)
+
+
 def empty_trash(data_folder: Path) -> int:
     """Delete every trash item, skipping items whose source lock is held.
 
@@ -1541,22 +1562,7 @@ def empty_trash(data_folder: Path) -> int:
                 # restore of media that is only partially copied (#557).
                 continue
             try:
-                # Symlink-aware delete, mirrored from purge_old_trash (#595):
-                # is_symlink() is lstat-based and never follows the link,
-                # and a symlink to a live directory is True for both
-                # is_symlink() and is_dir() — so rmtree() would fail on it
-                # (OSError swallowed), the meta would still be deleted, and
-                # the link would survive every empty_trash call. Unlink the
-                # link itself; is_symlink() catches a loop first, and
-                # is_dir() would also return False on a loop (ELOOP is
-                # swallowed by Path.is_dir()) so the unlinked loop under
-                # the old order already worked.
-                if item.is_symlink():
-                    item.unlink(missing_ok=True)
-                elif item.is_dir():
-                    shutil.rmtree(item, ignore_errors=True)
-                else:
-                    item.unlink(missing_ok=True)
+                _delete_trash_entry(item)
                 deleted += 1
                 meta_file = _meta_path(item)
                 if meta_file.exists():
@@ -1664,23 +1670,7 @@ def purge_old_trash(data_folder: Path, retention_days: int = 30) -> int:
                 # item and its meta both stay, uncounted.
                 continue
             try:
-                # is_symlink() is checked FIRST: it is lstat-based and never
-                # follows the link, while a symlink to a live directory is
-                # True for both is_symlink() and is_dir(). rmtree() cannot
-                # remove a symlink (its OSError is swallowed by
-                # ignore_errors) and the link must never be followed to its
-                # still-live target — the old order deleted the meta,
-                # counted the entry as purged, and let the link survive
-                # every sweep forever (#595). Checking is_symlink() first
-                # also closes the reviewed race where a dangling link's
-                # target reappears as a directory between the age decision
-                # and the is_dir() check.
-                if item.is_symlink():
-                    item.unlink(missing_ok=True)
-                elif item.is_dir():
-                    shutil.rmtree(item, ignore_errors=True)
-                else:
-                    item.unlink(missing_ok=True)
+                _delete_trash_entry(item)
                 meta_file.unlink(missing_ok=True)
                 deleted += 1
             except OSError as exc:
