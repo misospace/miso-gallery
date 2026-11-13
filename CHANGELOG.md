@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.5.0](https://github.com/misospace/miso-gallery/compare/0.4.0...0.5.0) (2026-11-13)
+
+
+### Features
+
+* **deps:** update dependency gunicorn (26.2.0 → 27.0.0) ([#667](https://github.com/misospace/miso-gallery/issues/667)) ([d6ad2ad](https://github.com/misospace/miso-gallery/commit/d6ad2add363e61f94b9dfddf1fd4408237a137cf))
+
+
+### Bug Fixes
+
+* **audit:** emit trash_purge security event from /trash/purge (issue [#670](https://github.com/misospace/miso-gallery/issues/670)) ([#673](https://github.com/misospace/miso-gallery/issues/673)) ([ba38ea0](https://github.com/misospace/miso-gallery/commit/ba38ea04375b5ff1b8954a7eeb19faa30cd06f41))
+* **auth:** compare API keys as UTF-8 bytes (issue [#653](https://github.com/misospace/miso-gallery/issues/653)) ([#657](https://github.com/misospace/miso-gallery/issues/657)) ([c2de10c](https://github.com/misospace/miso-gallery/commit/c2de10c2fe669cc38bb2971f833fa0ad9ea08098))
+* **auth:** compare plaintext password as UTF-8 bytes (issue [#648](https://github.com/misospace/miso-gallery/issues/648)) ([#652](https://github.com/misospace/miso-gallery/issues/652)) ([6c259c9](https://github.com/misospace/miso-gallery/commit/6c259c9c66ec57aca159ea5a3208ec6851cb6cdd))
+* **deps:** update dependency click (8.5.0 → 8.5.1) ([#646](https://github.com/misospace/miso-gallery/issues/646)) ([c683c15](https://github.com/misospace/miso-gallery/commit/c683c151e2f17857d49a902cd4eb084fe83accf3))
+* **deps:** update dependency gunicorn (27.0.0 → 27.0.1) ([#678](https://github.com/misospace/miso-gallery/issues/678)) ([eb69e26](https://github.com/misospace/miso-gallery/commit/eb69e26bc8816f852423b8b11cb5ef530598ac9b))
+* **deps:** update python dependencies ([#676](https://github.com/misospace/miso-gallery/issues/676)) ([e48959a](https://github.com/misospace/miso-gallery/commit/e48959a68f04a8544d06eca6fed8060e149e28dd))
+* **health:** clean up write-probe tempfile in finally block (issue [#651](https://github.com/misospace/miso-gallery/issues/651)) ([#659](https://github.com/misospace/miso-gallery/issues/659)) ([f0c58fe](https://github.com/misospace/miso-gallery/commit/f0c58fea9b4809a54e74271f3677fe00ec8f8e66))
+* **media:** guard post-existence stat() races on index, /thumb, dedup, and trash paths (issue [#668](https://github.com/misospace/miso-gallery/issues/668)) ([#672](https://github.com/misospace/miso-gallery/issues/672)) ([533ba4c](https://github.com/misospace/miso-gallery/commit/533ba4cc82d4c55b9cef0674a3d26d5f547a80bb))
+* **metadata:** cap miso:category and miso:rolls entry lengths (issue [#650](https://github.com/misospace/miso-gallery/issues/650)) ([#658](https://github.com/misospace/miso-gallery/issues/658)) ([425e26f](https://github.com/misospace/miso-gallery/commit/425e26fce90b4533345b37adaa9ca35c2836f1fc))
+* **security:** backslash-normalize before normpath; guard /tag writes like /api/llm/tags (issue [#649](https://github.com/misospace/miso-gallery/issues/649)) ([#655](https://github.com/misospace/miso-gallery/issues/655)) ([f604c81](https://github.com/misospace/miso-gallery/commit/f604c81275300055a9db4ecee949c0212da5fb4a))
+* **security:** cap tag length and tags-per-request in /tag and /api/llm/tags (issue [#669](https://github.com/misospace/miso-gallery/issues/669)) ([#674](https://github.com/misospace/miso-gallery/issues/674)) ([9d2cc4b](https://github.com/misospace/miso-gallery/commit/9d2cc4ba2314a06576704d00031ef3258e76b4c0))
+* **security:** refuse to move the data folder into its own trash (issue [#664](https://github.com/misospace/miso-gallery/issues/664)) ([#665](https://github.com/misospace/miso-gallery/issues/665)) ([ebddb2d](https://github.com/misospace/miso-gallery/commit/ebddb2d65587e21564bd6cece2eb9ff62992d0b0))
+* **security:** reject gallery-root folder entries in /bulk-delete (issue [#662](https://github.com/misospace/miso-gallery/issues/662)) ([#663](https://github.com/misospace/miso-gallery/issues/663)) ([5ea0982](https://github.com/misospace/miso-gallery/commit/5ea098251b2c835d7209c9b96ac87a2a8217981a))
+* **security:** reject null-byte paths in sanitize_path; guard /tag rel_path (issue [#654](https://github.com/misospace/miso-gallery/issues/654)) ([#661](https://github.com/misospace/miso-gallery/issues/661)) ([4e55c54](https://github.com/misospace/miso-gallery/commit/4e55c542a6540c63a0b254c6d0c0a335308d1962))
+* **webhook:** compare webhook secret as UTF-8 bytes (issue [#656](https://github.com/misospace/miso-gallery/issues/656)) ([#660](https://github.com/misospace/miso-gallery/issues/660)) ([6b67e8e](https://github.com/misospace/miso-gallery/commit/6b67e8e0976ff9b808ed7b7ebfc01ff421322b89))
+
+
+### Performance Improvements
+
+* **trash:** reuse recorded meta size in list_trash instead of walking each tree (issue [#671](https://github.com/misospace/miso-gallery/issues/671)) ([#675](https://github.com/misospace/miso-gallery/issues/675)) ([8168a46](https://github.com/misospace/miso-gallery/commit/8168a46ab90c9e227c3fad3215a784e8eacb7acc))
+
 ## [0.4.0](https://github.com/misospace/miso-gallery/compare/0.3.0...0.4.0) (2026-11-06)
 
 
