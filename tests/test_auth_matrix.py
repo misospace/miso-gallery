@@ -2,6 +2,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 from conftest import build_client
 from thumbnails import _thumbnail_path_identity
 
@@ -435,34 +437,41 @@ def test_oidc_auth_combined_domain_and_group_fail_on_group(monkeypatch, tmp_path
     assert "no matching group" in reason
 
 
-def test_oidc_auth_malformed_json_warns(monkeypatch, tmp_path, caplog):
-    """Malformed OIDC_REQUIRED_CLAIMS JSON logs a warning instead of crashing."""
-    _reload_auth(monkeypatch, extra_env={
-        "OIDC_ALLOWED_DOMAINS": "",
-        "OIDC_ALLOWED_GROUPS": "",
-        "OIDC_REQUIRED_CLAIMS": "{not valid json!!!",
-    })
-    # Re-import auth to trigger the parsing path
+def test_oidc_auth_malformed_json_refuses_startup(monkeypatch, tmp_path):
+    """Malformed OIDC_REQUIRED_CLAIMS JSON raises at import instead of warning (issue #680).
+
+    _reload_auth is not used here: it imports auth itself, which would raise
+    outside pytest.raises.
+    """
+    for value in ("{not valid json!!!", "{{{{"):
+        monkeypatch.setenv("OIDC_ALLOWED_DOMAINS", "")
+        monkeypatch.setenv("OIDC_ALLOWED_GROUPS", "")
+        monkeypatch.setenv("OIDC_REQUIRED_CLAIMS", value)
+        sys.modules.pop("auth", None)
+        with pytest.raises(ValueError, match="OIDC_REQUIRED_CLAIMS is not valid JSON"):
+            import auth  # noqa: F401
+
+
+def test_oidc_auth_non_object_json_refuses_startup(monkeypatch, tmp_path):
+    """Valid JSON with a non-object top-level shape is rejected at import (issue #680)."""
+    for value in ("null", "[]", '[{"role": "admin"}]', '"admin"', "42", "true"):
+        monkeypatch.setenv("OIDC_ALLOWED_DOMAINS", "")
+        monkeypatch.setenv("OIDC_ALLOWED_GROUPS", "")
+        monkeypatch.setenv("OIDC_REQUIRED_CLAIMS", value)
+        sys.modules.pop("auth", None)
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            import auth  # noqa: F401
+
+
+def test_oidc_auth_malformed_json_leaves_no_loaded_module(monkeypatch, tmp_path):
+    """A rejected import leaves no half-configured auth module behind (issue #680)."""
+    monkeypatch.setenv("OIDC_ALLOWED_DOMAINS", "")
+    monkeypatch.setenv("OIDC_ALLOWED_GROUPS", "")
+    monkeypatch.setenv("OIDC_REQUIRED_CLAIMS", "{{{{")
     sys.modules.pop("auth", None)
-    import auth  # noqa: F401
-
-    assert auth.OIDC_REQUIRED_CLAIMS == {}
-    assert any("OIDC_REQUIRED_CLAIMS has invalid JSON" in r.message for r in caplog.records)
-
-
-def test_oidc_auth_malformed_json_allows_all(monkeypatch, tmp_path):
-    """When OIDC_REQUIRED_CLAIMS is malformed, it defaults to {} and all users pass."""
-    _reload_auth(monkeypatch, extra_env={
-        "OIDC_ALLOWED_DOMAINS": "",
-        "OIDC_ALLOWED_GROUPS": "",
-        "OIDC_REQUIRED_CLAIMS": "{{{{",
-    })
-    sys.modules.pop("auth", None)
-    import auth  # noqa: F401
-
-    allowed, reason = auth.verify_oidc_authorization(_user_info())
-    assert allowed is True
-    assert reason is None
+    with pytest.raises(ValueError, match="not valid JSON"):
+        import auth  # noqa: F401
+    assert "auth" not in sys.modules
 
 
 # ---------------------------------------------------------------------------
