@@ -33,17 +33,39 @@ OIDC_ALLOWED_DOMAINS = [
 OIDC_ALLOWED_GROUPS = [
     g.strip().lower() for g in os.environ.get("OIDC_ALLOWED_GROUPS", "").split(",") if g.strip()
 ]
-OIDC_REQUIRED_CLAIMS: dict[str, str] = {}
-_oidc_required_claims_raw = os.environ.get("OIDC_REQUIRED_CLAIMS", "").strip()
-if _oidc_required_claims_raw:
+def _load_oidc_required_claims(raw: str) -> dict:
+    """Parse OIDC_REQUIRED_CLAIMS, refusing to start on a malformed policy.
+
+    A nonempty value that is not valid JSON, or is valid JSON but not an
+    object (null, array, string, number, boolean), must not silently
+    disable the required-claim authorization policy. An operator who
+    intends an admin-only gallery would otherwise get an allow-all policy
+    from one bad quote, and those sessions carry destructive gallery
+    permissions. Empty/unset stays explicitly optional (issue #680).
+    """
+    if not raw:
+        return {}
     try:
-        OIDC_REQUIRED_CLAIMS = json.loads(_oidc_required_claims_raw)
+        parsed = json.loads(raw)
     except (json.JSONDecodeError, ValueError) as exc:
-        logger.warning(
-            "OIDC_REQUIRED_CLAIMS has invalid JSON (%s); authorization claim checks will be disabled",
-            exc,
+        raise ValueError(
+            f"OIDC_REQUIRED_CLAIMS is not valid JSON ({exc}). Refusing to start: "
+            "a malformed required-claims policy must not disable the "
+            "authorization check (issue #680)."
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            "OIDC_REQUIRED_CLAIMS must be a JSON object of claim=value pairs, "
+            f"got {type(parsed).__name__}. Refusing to start: a required-claims "
+            "policy with a non-object shape must not disable the "
+            "authorization check (issue #680)."
         )
-        OIDC_REQUIRED_CLAIMS = {}
+    return parsed
+
+
+OIDC_REQUIRED_CLAIMS: dict[str, str] = _load_oidc_required_claims(
+    os.environ.get("OIDC_REQUIRED_CLAIMS", "").strip()
+)
 
 # OIDC Configuration
 OIDC_ENABLED = os.environ.get("OIDC_ENABLED", "").strip().lower() == "true"

@@ -4,6 +4,8 @@ import logging
 import sys
 from pathlib import Path
 
+import pytest
+
 from conftest import build_client
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -561,3 +563,71 @@ def test_oidc_refresh_authorization_revoked(monkeypatch, tmp_path):
             assert not sess
     finally:
         oidc_module.verify_oidc_authorization = original_verify
+
+
+# ---------------------------------------------------------------------------
+# OIDC_REQUIRED_CLAIMS fail-closed configuration policy (issue #680)
+# ---------------------------------------------------------------------------
+
+
+def _auth_reloaded_with_claims(monkeypatch, claims_value: str):
+    """Re-import auth with an explicit OIDC_REQUIRED_CLAIMS value."""
+    monkeypatch.setenv("OIDC_ALLOWED_DOMAINS", "")
+    monkeypatch.setenv("OIDC_ALLOWED_GROUPS", "")
+    monkeypatch.setenv("OIDC_REQUIRED_CLAIMS", claims_value)
+    sys.modules.pop("auth", None)
+    import auth
+    return auth
+
+
+def test_viewer_not_authorized_when_admin_policy_is_malformed(monkeypatch, tmp_path):
+    """A malformed intended admin policy must refuse startup, not allow every user.
+
+    Reproduces the issue #680 policy-level bypass at the app-boot level: with
+    OIDC_REQUIRED_CLAIMS='{"role":"admin"' (missing brace), importing the app
+    raises instead of booting a gallery where verify_oidc_authorization would
+    return (True, None) for an ordinary viewer.
+    """
+    with pytest.raises(ValueError, match="OIDC_REQUIRED_CLAIMS is not valid JSON"):
+        build_client(monkeypatch, tmp_path, auth_type="oidc", extra_env={
+            "OIDC_ENABLED": "true",
+            "OIDC_ISSUER": "https://issuer.example",
+            "OIDC_CLIENT_ID": "client",
+            "OIDC_CLIENT_SECRET": "secret",
+            "OIDC_REQUIRED_CLAIMS": '{"role":"admin"',
+        })
+    # No half-configured modules survive the rejected boot.
+    assert "auth" not in sys.modules
+    assert "app" not in sys.modules
+
+
+def test_non_object_claims_json_refuses_import(monkeypatch):
+    """Valid JSON that is not an object cannot turn the policy into allow-all (issue #680)."""
+    for value in ("null", "[]", '[{"role": "admin"}]', '"admin"', "42", "true"):
+        monkeypatch.setenv("OIDC_REQUIRED_CLAIMS", value)
+        sys.modules.pop("auth", None)
+        with pytest.raises(ValueError, match="must be a JSON object"):
+            import auth  # noqa: F401
+
+
+def test_empty_required_claims_keeps_optional_policy(monkeypatch):
+    """Empty/unset configuration keeps the explicitly optional-policy behavior."""
+    auth = _auth_reloaded_with_claims(monkeypatch, "")
+    assert auth.OIDC_REQUIRED_CLAIMS == {}
+    allowed, reason = auth.verify_oidc_authorization({"sub": "ordinary-user"})
+    assert allowed is True
+    assert reason is None
+
+
+def test_valid_object_policy_denies_viewer_allows_admin(monkeypatch):
+    """A valid object preserves claim matching: viewer denied, admin allowed."""
+    auth = _auth_reloaded_with_claims(monkeypatch, '{"role": "admin"}')
+    viewer = {"sub": "ordinary-user", "email": "viewer@example.com", "role": "viewer"}
+    allowed, reason = auth.verify_oidc_authorization(viewer)
+    assert allowed is False
+    assert "claim 'role' mismatch" in reason
+
+    admin = {"sub": "boss", "email": "admin@example.com", "role": "admin"}
+    allowed, reason = auth.verify_oidc_authorization(admin)
+    assert allowed is True
+    assert reason is None
