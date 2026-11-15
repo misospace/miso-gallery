@@ -611,12 +611,18 @@ def test_non_object_claims_json_refuses_import(monkeypatch):
 
 
 def test_empty_required_claims_keeps_optional_policy(monkeypatch):
-    """Empty/unset configuration keeps the explicitly optional-policy behavior."""
-    auth = _auth_reloaded_with_claims(monkeypatch, "")
-    assert auth.OIDC_REQUIRED_CLAIMS == {}
-    allowed, reason = auth.verify_oidc_authorization({"sub": "ordinary-user"})
-    assert allowed is True
-    assert reason is None
+    """Empty/unset configuration keeps the explicitly optional-policy behavior.
+
+    Pins the boundary with the refuse-to-start side: "" (unset), a
+    whitespace-only value (stripped to empty, like every other auth.py env
+    parse), and "{}" (a valid empty object) all mean "no required claims".
+    """
+    for value in ("", "   ", "{}"):
+        auth = _auth_reloaded_with_claims(monkeypatch, value)
+        assert auth.OIDC_REQUIRED_CLAIMS == {}
+        allowed, reason = auth.verify_oidc_authorization({"sub": "ordinary-user"})
+        assert allowed is True
+        assert reason is None
 
 
 def test_valid_object_policy_denies_viewer_allows_admin(monkeypatch):
