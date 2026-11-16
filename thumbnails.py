@@ -54,6 +54,13 @@ def load_env_config() -> None:
 load_env_config()
 
 
+def _remember_folder_cover(folder_rel_path: str, now: float, cover_rel: str | None) -> None:
+    """Store a folder-cover cache entry, keeping the cache within its LRU cap."""
+    _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
+    while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
+        _FOLDER_COVER_CACHE.popitem(last=False)
+
+
 def _app():
     """Return the live ``app`` module.
 
@@ -217,7 +224,7 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
             cached_path.relative_to(app.DATA_FOLDER.resolve())
         except ValueError:
             # Resolved path escapes DATA_FOLDER (e.g. symlink) — treat as missing.
-            _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
+            _remember_folder_cover(folder_rel_path, now, None)
             return None
         if cached_path.exists() and cached_path.is_file() and cached_path.suffix.lower() in app.IMAGE_EXTENSIONS:
             return cached_rel
@@ -225,18 +232,14 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
 
     folder_path = app.DATA_FOLDER / app.sanitize_rel_path(folder_rel_path) if folder_rel_path else app.DATA_FOLDER
     if not folder_path.exists() or not folder_path.is_dir():
-        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
-        while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
-            _FOLDER_COVER_CACHE.popitem(last=False)
+        _remember_folder_cover(folder_rel_path, now, None)
         return None
 
     # Delegate to iter_gallery_items for bounded, exclusion-aware scanning.
     items = app.iter_gallery_items(kind="media", limit=1, root=folder_path)
 
     if not items:
-        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
-        while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
-            _FOLDER_COVER_CACHE.popitem(last=False)
+        _remember_folder_cover(folder_rel_path, now, None)
         return None
 
     # Validate the discovered cover resolves within DATA_FOLDER.
@@ -245,13 +248,9 @@ def folder_cover_rel_path(folder_rel_path: str) -> str | None:
         resolved.relative_to(app.DATA_FOLDER.resolve())
     except ValueError:
         # Symlink or other escape — treat as no cover.
-        _FOLDER_COVER_CACHE[folder_rel_path] = (now, None)
-        while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
-            _FOLDER_COVER_CACHE.popitem(last=False)
+        _remember_folder_cover(folder_rel_path, now, None)
         return None
 
     cover_rel = items[0].relative_to(app.DATA_FOLDER).as_posix()
-    _FOLDER_COVER_CACHE[folder_rel_path] = (now, cover_rel)
-    while len(_FOLDER_COVER_CACHE) > _FOLDER_COVER_MAX_SIZE:
-        _FOLDER_COVER_CACHE.popitem(last=False)
+    _remember_folder_cover(folder_rel_path, now, cover_rel)
     return cover_rel

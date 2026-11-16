@@ -193,10 +193,7 @@ def _api_key_matches(token: str, configured: str) -> bool:
 
 def verify_api_key_scope(token: str, scope: Literal["read", "write"]) -> bool:
     """Verify a bearer token has the required scope."""
-    keys = _keys_for_scope(scope)
-    if not token or not keys:
-        return False
-    return any(_api_key_matches(token, configured) for configured in keys)
+    return _find_matching_key(token, scope)[0]
 
 
 # API key identification helpers for audit logging.
