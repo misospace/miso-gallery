@@ -273,6 +273,31 @@ def _invalidate_gallery_scan_cache() -> None:
     _gallery_scan_cache.clear()
 
 
+def _cached_scan_result(cache_key: tuple, now: float) -> object | None:
+    """Return the cached payload for *cache_key* while it is fresh, else ``None``.
+
+    Single source for the shared scan-cache read policy: a hit refreshes the
+    key's LRU position so hot keys survive eviction, and an expired entry is
+    dropped instead of lingering.
+    """
+    cached = _gallery_scan_cache.get(cache_key)
+    if cached is None:
+        return None
+    ts, payload = cached
+    if now - ts < _app().GALLERY_SCAN_CACHE_TTL:
+        _gallery_scan_cache.move_to_end(cache_key)
+        return payload
+    del _gallery_scan_cache[cache_key]
+    return None
+
+
+def _store_scan_result(cache_key: tuple, now: float, payload: object) -> None:
+    """Cache *payload*, evicting the oldest keys past the LRU cap (issue #420)."""
+    _gallery_scan_cache[cache_key] = (now, payload)
+    while len(_gallery_scan_cache) > _app().GALLERY_SCAN_CACHE_MAX_ENTRIES:
+        _gallery_scan_cache.popitem(last=False)
+
+
 # The HTML /recent page has the same bounded-enumeration problem as the LLM
 # endpoints (issue #436): it must show the globally newest media even when
 # the newest file lives beyond the first GALLERY_SCAN_LIMIT items in the
@@ -315,15 +340,9 @@ def iter_gallery_items(
     # Check cache (skip for small limits to maintain immediate consistency)
     now = time.time()
     if effective_limit > 1:
-        cached = _gallery_scan_cache.get(cache_key)
-        if cached is not None:
-            ts, cached_results = cached
-            if now - ts < app.GALLERY_SCAN_CACHE_TTL:
-                # Refresh LRU position so hot keys survive eviction.
-                _gallery_scan_cache.move_to_end(cache_key)
-                return cached_results
-            # Expired: drop the stale entry rather than letting it linger.
-            del _gallery_scan_cache[cache_key]
+        cached_results = _cached_scan_result(cache_key, now)
+        if cached_results is not None:
+            return cached_results
 
     results: list[Path] = []
     # Collect first, sort second, then truncate. Collecting before truncating is
@@ -381,9 +400,7 @@ def iter_gallery_items(
     # Store in cache (only for larger queries), evicting the oldest entry
     # once the cap is exceeded so the cache stays bounded (issue #420).
     if effective_limit > 1:
-        _gallery_scan_cache[cache_key] = (now, sorted_results)
-        while len(_gallery_scan_cache) > app.GALLERY_SCAN_CACHE_MAX_ENTRIES:
-            _gallery_scan_cache.popitem(last=False)
+        _store_scan_result(cache_key, now, sorted_results)
     return sorted_results
 
 
@@ -418,13 +435,9 @@ def recent_gallery_entries(
     max_items = max(1, max_items)
     cache_key = ("recent", max_items, str(scan_root))
     now = time.time()
-    cached = _gallery_scan_cache.get(cache_key)
-    if cached is not None:
-        ts, payload = cached
-        if now - ts < app.GALLERY_SCAN_CACHE_TTL:
-            _gallery_scan_cache.move_to_end(cache_key)
-            return payload
-        del _gallery_scan_cache[cache_key]
+    payload = _cached_scan_result(cache_key, now)
+    if payload is not None:
+        return payload
 
     # Media suffix lookup; IMAGE_EXTENSIONS and VIDEO_EXTENSIONS are already
     # lowercase. Built once per (uncached) walk from the live app attributes.
@@ -484,9 +497,7 @@ def recent_gallery_entries(
         for mtime, _order, rel, size in sorted(heap, key=lambda item: (-item[0], item[1]))
     ]
     payload = (entries, scan_truncated)
-    _gallery_scan_cache[cache_key] = (now, payload)
-    while len(_gallery_scan_cache) > app.GALLERY_SCAN_CACHE_MAX_ENTRIES:
-        _gallery_scan_cache.popitem(last=False)
+    _store_scan_result(cache_key, now, payload)
     return payload
 
 
