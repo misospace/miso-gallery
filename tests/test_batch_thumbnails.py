@@ -121,3 +121,107 @@ def test_batch_remove_thumbnails_isolates_colliding_path_names(monkeypatch, tmp_
 
     assert not flat.exists()
     assert not nested.exists()
+
+
+def test_batch_remove_thumbnails_deletes_every_version_of_each_identity(monkeypatch, tmp_path):
+    """Issue #688: every cached version (distinct stat values) of each requested
+    identity is removed by the same single walk, while other identities keep
+    all of their versions."""
+    import app as app_module
+
+    cache = tmp_path / "thumbs"
+    cache.mkdir()
+    monkeypatch.setattr(app_module, "THUMBNAIL_CACHE_DIR", cache)
+    monkeypatch.setattr(thumbnails, "ensure_thumbnail_cache_dir", lambda: None)
+
+    targets = [
+        _make_cached_file(cache, rel, stat_value)
+        for rel, stat_values in (("cats/cat", ("111", "222")), ("dogs/dog", ("333", "444")))
+        for stat_value in stat_values
+    ]
+    survivors = [
+        _make_cached_file(cache, "unrelated/a", stat_value) for stat_value in ("555", "666")
+    ]
+    for f in targets + survivors:
+        f.write_bytes(b"x")
+
+    app_module.batch_remove_thumbnails(["cats/cat", "dogs/dog"])
+
+    assert not any(f.exists() for f in targets), (
+        "every version of a requested identity must be deleted"
+    )
+    assert all(f.exists() for f in survivors), (
+        "no version of an unrequested identity may be deleted"
+    )
+
+
+def test_batch_remove_thumbnails_requires_exact_first_segment_match(monkeypatch, tmp_path):
+    """Issue #688: only the exact first dot-delimited segment of a cache filename
+    identifies a path. A name sharing the leading characters of an identity
+    without the segment boundary — or truncating it — must survive, as must
+    unrelated files in the cache dir."""
+    import app as app_module
+
+    cache = tmp_path / "thumbs"
+    cache.mkdir()
+    monkeypatch.setattr(app_module, "THUMBNAIL_CACHE_DIR", cache)
+    monkeypatch.setattr(thumbnails, "ensure_thumbnail_cache_dir", lambda: None)
+
+    identity = _thumbnail_path_identity("cats/cat")
+    exact = cache / f"{identity}.111.1.jpg"
+    longer = cache / f"{identity}extra.111.1.jpg"
+    truncated = cache / f"{identity[:-1]}.111.1.jpg"
+    junk = cache / "not-a-cache-entry.txt"
+    for f in (exact, longer, truncated, junk):
+        f.write_bytes(b"x")
+
+    app_module.batch_remove_thumbnails(["cats/cat", "other/img"])
+
+    assert not exact.exists(), "the exact identity segment must be deleted"
+    assert longer.exists(), "a name extending the identity without a dot must survive"
+    assert truncated.exists(), "a name truncating the identity must survive"
+    assert junk.exists(), "an unrelated file must survive"
+
+
+def test_batch_remove_thumbnails_walks_the_cache_dir_exactly_once(monkeypatch, tmp_path):
+    """Issue #688: one cleanup call performs a single directory walk and at most
+    one identity membership test per entry — never a per-prefix rescan."""
+    import app as app_module
+
+    cache = tmp_path / "thumbs"
+    cache.mkdir()
+    monkeypatch.setattr(thumbnails, "ensure_thumbnail_cache_dir", lambda: None)
+
+    class CountingCacheDir(type(cache)):
+        calls = 0
+
+        def iterdir(self):
+            CountingCacheDir.calls += 1
+            return super().iterdir()
+
+    monkeypatch.setattr(app_module, "THUMBNAIL_CACHE_DIR", CountingCacheDir(cache))
+
+    identity_checks = []
+    original = thumbnails._cache_entry_identity
+
+    def counting(name):
+        identity_checks.append(name)
+        return original(name)
+
+    monkeypatch.setattr(thumbnails, "_cache_entry_identity", counting)
+
+    requested = [f"path/{i}" for i in range(5)]
+    for i, rel in enumerate(requested):
+        _make_cached_file(cache, rel, str(100 + i)).write_bytes(b"x")
+    survivor = _make_cached_file(cache, "unrelated", "999")
+    survivor.write_bytes(b"x")
+
+    app_module.batch_remove_thumbnails(requested)
+
+    assert CountingCacheDir.calls == 1, "cleanup must walk the cache dir exactly once"
+    assert len(identity_checks) == 6, (
+        "each of the 6 cache entries must cost exactly one identity check, "
+        f"got {identity_checks!r}"
+    )
+    remaining = {p.name for p in cache.iterdir()}
+    assert remaining == {survivor.name}, "only the unrequested cache entry may remain"

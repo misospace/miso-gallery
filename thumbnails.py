@@ -105,22 +105,35 @@ def generate_thumbnail(source_path: Path, output_path: Path) -> None:
         img.save(output_path, format="JPEG", quality=85, optimize=True)
 
 
+def _cache_entry_identity(name: str) -> str:
+    """Return the path-identity segment of a thumbnail cache filename.
+
+    ``thumbnail_filename`` writes the identity digest as the first
+    dot-delimited segment; this is the read side of that contract (issue #688),
+    so cleanup matches by exact segment equality with one lookup per entry.
+    """
+    return name.split(".", 1)[0]
+
+
 def batch_remove_thumbnails(rel_paths: list[str]) -> None:
     """Remove all cached thumbnails matching any of the given rel_paths in a single dir walk.
 
     Replaces per-path loops (issue #249). One call == one `iterdir()` regardless
-    of how many paths are passed.
+    of how many paths are passed, and each entry costs at most one set
+    membership test (issue #688) instead of a scan over every requested prefix.
 
-    Match is by the path-identity digest prefix written by ``thumbnail_filename``
-    (issue #515), so unrelated paths cannot share a cache file with any
-    requested path even when their mtime+size happen to match.
+    Match is by the exact path-identity digest written by ``thumbnail_filename``
+    as the first dot-delimited segment of the cache filename (issue #515), so
+    unrelated paths cannot share a cache file with any requested path even when
+    their mtime+size happen to match, and a name that only shares the leading
+    characters of an identity (without the exact segment boundary) never matches.
     """
     if not rel_paths:
         return
     app = _app()
     ensure_thumbnail_cache_dir()
-    prefixes = {
-        _thumbnail_path_identity(app.sanitize_rel_path(rel_path)) + "."
+    identities = {
+        _thumbnail_path_identity(app.sanitize_rel_path(rel_path))
         for rel_path in rel_paths
     }
     for cached_file in app.THUMBNAIL_CACHE_DIR.iterdir():
@@ -128,8 +141,10 @@ def batch_remove_thumbnails(rel_paths: list[str]) -> None:
             # #445: never unlink through a symlink (a stale bind-mount / NFS
             # target would be deleted as the app user).
             continue
-        name = cached_file.name
-        if any(name.startswith(prefix) for prefix in prefixes):
+        # The cache format puts the identity digest before the first dot, so
+        # this first-segment lookup equals an identity exactly when the old
+        # ``startswith(identity + ".")`` scan would have matched (issue #688).
+        if _cache_entry_identity(cached_file.name) in identities:
             with contextlib.suppress(OSError):
                 cached_file.unlink()
 
