@@ -191,3 +191,85 @@ def test_recent_banner_shown_when_enumeration_bound_hit(monkeypatch, tmp_path):
     html = client.get("/recent").get_data(as_text=True)
     assert "Gallery scan limit reached" in html
     assert "first 3 items" in html
+
+
+def test_recent_no_truncation_when_only_ineligible_entries_follow_limit(monkeypatch, tmp_path):
+    """Regression (issue #689): exactly RECENT_ENUMERATION_LIMIT eligible
+    media files plus trailing ineligible entries (README, hidden file,
+    symlink) must NOT report scan_truncated — the old code flagged any
+    filename encountered after the count reached the limit."""
+    import os as os_module
+    _build_client(monkeypatch, tmp_path)
+    data_dir = tmp_path / "data"
+    import app as app_module  # after _build_client: conftest re-imports the module
+
+    # Eligible media: the 3 conftest/_build_client fixtures (copy.png,
+    # sample.png, cats/cat.jpg) plus photo.png = exactly the limit.
+    monkeypatch.setattr(app_module, "RECENT_ENUMERATION_LIMIT", 4)
+    Image.new("RGB", (8, 8), color="blue").save(data_dir / "photo.png")
+    (data_dir / "notes.txt").write_text("not media")
+    (data_dir / ".dotfile.png").write_bytes(b"hidden")
+    outside = tmp_path / "outside.png"
+    Image.new("RGB", (8, 8), color="red").save(outside)
+    os_module.symlink(outside, data_dir / "link.png")
+    # docs/ sorts after cats/, so README.md is walked after the last
+    # eligible file: the old code's per-filename limit check tripped here.
+    (data_dir / "docs").mkdir()
+    (data_dir / "docs" / "README.md").write_text("not media")
+
+    # Deterministic walk order regardless of filesystem readdir order.
+    real_walk = app_module.os.walk
+
+    def ordered_walk(top, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, **kwargs):
+            # Sort dirnames in place: os.walk's topdown pruning relies on
+            # mutating the yielded list, so a copy must not be passed up.
+            dirnames.sort()
+            yield dirpath, dirnames, sorted(filenames)
+
+    monkeypatch.setattr(app_module.os, "walk", ordered_walk)
+
+    entries, truncated = app_module.recent_gallery_entries(50)
+    assert truncated is False
+    assert sorted(rel for rel, _, _ in entries) == [
+        "cats/cat.jpg",
+        "copy.png",
+        "photo.png",
+        "sample.png",
+    ]
+
+
+def test_recent_truncation_and_results_with_one_eligible_beyond_limit(monkeypatch, tmp_path):
+    """Issue #689 acceptance: adding one eligible image beyond the limit
+    reports truncation, and the extra image does not join the results."""
+    _build_client(monkeypatch, tmp_path)
+    data_dir = tmp_path / "data"
+    import app as app_module  # after _build_client: conftest re-imports the module
+
+    # Eligible media: fixtures copy.png + sample.png + cats/cat.jpg plus
+    # img_0..img_2 = 6 > limit 3.
+    monkeypatch.setattr(app_module, "RECENT_ENUMERATION_LIMIT", 3)
+    base = 2_000_000_000
+    for i in range(3):
+        target = data_dir / f"img_{i}.png"
+        Image.new("RGB", (8, 8), color="blue").save(target)
+        import os
+        os.utime(target, (base + i, base + i))
+
+    real_walk = app_module.os.walk
+
+    def ordered_walk(top, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, **kwargs):
+            # Sort dirnames in place: os.walk's topdown pruning relies on
+            # mutating the yielded list, so a copy must not be passed up.
+            dirnames.sort()
+            yield dirpath, dirnames, sorted(filenames)
+
+    monkeypatch.setattr(app_module.os, "walk", ordered_walk)
+
+    entries, truncated = app_module.recent_gallery_entries(50)
+    assert truncated is True
+    # Sorted walk counted copy.png, img_0.png, img_1.png; img_2.png is the
+    # first eligible file beyond the bound, so the walk stops there and it
+    # never reaches the results.
+    assert sorted(rel for rel, _, _ in entries) == ["copy.png", "img_0.png", "img_1.png"]
