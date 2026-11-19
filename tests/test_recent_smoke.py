@@ -212,8 +212,8 @@ def test_recent_banner_shown_when_enumeration_bound_hit(monkeypatch, tmp_path):
 
 def test_recent_no_truncation_when_only_ineligible_entries_follow_limit(monkeypatch, tmp_path):
     """Regression (issue #689): exactly RECENT_ENUMERATION_LIMIT eligible
-    media files plus trailing ineligible entries (README, hidden file,
-    symlink) must NOT report scan_truncated — the old code flagged any
+    media files plus trailing ineligible entries (non-media names, hidden
+    file, symlink) must NOT report scan_truncated — the old code flagged any
     filename encountered after the count reached the limit."""
     import os as os_module
     _build_client(monkeypatch, tmp_path)
@@ -221,18 +221,20 @@ def test_recent_no_truncation_when_only_ineligible_entries_follow_limit(monkeypa
     import app as app_module  # after _build_client: conftest re-imports the module
 
     # Eligible media: the 3 conftest/_build_client fixtures (copy.png,
-    # sample.png, cats/cat.jpg) plus photo.png = exactly the limit.
+    # sample.png, cats/cat.jpg) plus photo.png = exactly the limit. docs/
+    # sorts after cats/, so *every* ineligible entry below is walked only
+    # after the count reached the bound — each trailing filter path
+    # (suffix miss, hidden name, non-regular file) is exercised beyond it,
+    # where the old code's per-filename limit check tripped.
     monkeypatch.setattr(app_module, "RECENT_ENUMERATION_LIMIT", 4)
     Image.new("RGB", (8, 8), color="blue").save(data_dir / "photo.png")
-    (data_dir / "notes.txt").write_text("not media")
-    (data_dir / ".dotfile.png").write_bytes(b"hidden")
     outside = tmp_path / "outside.png"
     Image.new("RGB", (8, 8), color="red").save(outside)
-    os_module.symlink(outside, data_dir / "link.png")
-    # docs/ sorts after cats/, so README.md is walked after the last
-    # eligible file: the old code's per-filename limit check tripped here.
     (data_dir / "docs").mkdir()
     (data_dir / "docs" / "README.md").write_text("not media")
+    (data_dir / "docs" / "notes.txt").write_text("not media")
+    (data_dir / "docs" / ".dotfile.png").write_bytes(b"hidden")
+    os_module.symlink(outside, data_dir / "docs" / "link.png")
 
     # os.walk is a process-wide attribute; scope the patch to the scan call.
     with monkeypatch.context() as m:
