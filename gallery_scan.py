@@ -19,6 +19,7 @@ rebuilt per test bootstrap, as they were when all of this lived in ``app.py``.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import heapq
 import os
@@ -348,7 +349,13 @@ def iter_gallery_items(
     # ``followlinks=False`` never descends into symlinked directories,
     # matching the no-follow behavior of the symlink skip below.
     for dirpath, dirnames, filenames in os.walk(scan_root):
-        dirnames[:] = [d for d in dirnames if not is_excluded_gallery_path(Path(dirpath) / d)]
+        with contextlib.suppress(OSError):
+            # Same error containment as the per-entry checks below. The
+            # predicate is purely lexical today, but if it ever gains a
+            # filesystem call and raises here, keep the unpruned listing:
+            # the per-entry check still decides every item, so excluded
+            # paths cannot enter ``results`` either way.
+            dirnames[:] = [d for d in dirnames if not is_excluded_gallery_path(Path(dirpath) / d)]
         for name in [*dirnames, *filenames]:
             item = Path(dirpath) / name
             try:

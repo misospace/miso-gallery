@@ -309,6 +309,32 @@ class TestIterGalleryItemsPrunesExcludedTrees:
         folders = self._rel(data_dir, app_module.iter_gallery_items(kind="folders"))
         assert folders == ["sub"]
 
+    def test_predicate_error_during_pruning_is_contained(self, monkeypatch, tmp_path):
+        """An OSError from the exclusion predicate during directory pruning is
+        swallowed like the per-entry ones, not propagated out of the scan.
+        The failed prune fails open: the tree is still descended, and the
+        per-entry check keeps excluded content out of the results."""
+        app_module, data_dir, opened = self._bootstrap(monkeypatch, tmp_path)
+        # Import after the bootstrap: it pops and re-imports gallery_scan,
+        # so importing earlier would capture a stale module instance.
+        import gallery_scan
+
+        real_predicate = gallery_scan.is_excluded_gallery_path
+
+        def flaky_predicate(path):
+            if path.name == ".hidden":
+                raise OSError("simulated filesystem error")
+            return real_predicate(path)
+
+        monkeypatch.setattr(gallery_scan, "is_excluded_gallery_path", flaky_predicate)
+
+        media = self._rel(data_dir, app_module.iter_gallery_items(kind="media"))
+
+        assert media == ["apple.webp", "mango.jpg", "sub/inner.png", "zebra.png"]
+        # The unpruned tree is opened but every file below it is filtered
+        # per entry, exactly as before the pruning change.
+        assert str(data_dir / ".hidden") in opened
+
 
 class TestLlmImagesHasMore:
     """llm_images should return has_more=True when scan is limited."""
