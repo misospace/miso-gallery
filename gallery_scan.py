@@ -51,7 +51,7 @@ GALLERY_PAGE_DEFAULT = 50
 GALLERY_PAGE_MAX = 500
 GALLERY_SCAN_LIMIT = int(os.environ.get("GALLERY_SCAN_LIMIT", "5000"))
 
-# Shared filesystem scan cache (TTL-based) to avoid redundant rglob passes
+# Shared filesystem scan cache (TTL-based) to avoid redundant scan passes
 GALLERY_SCAN_CACHE_TTL = max(int(os.environ.get("GALLERY_SCAN_CACHE_TTL", "10") or 10), 1)
 # LRU cap on distinct (kind, limit, root) keys so repeated scans of many
 # subfolders/limits cannot retain memory indefinitely (issue #420).
@@ -335,23 +335,40 @@ def iter_gallery_items(
     # (e.g. the LLM enumeration endpoints, issue #423) are not silently
     # truncated to the safety bound.
     collection_cap = max(effective_limit, app.GALLERY_SCAN_LIMIT)
-    for item in scan_root.rglob("*"):
+    # Prune excluded directories before descending into them (issue #687):
+    # ``rglob("*")`` opened ``.trash``, the thumbnail cache, and every dot
+    # directory on each cold scan and filtered only per entry, so large
+    # excluded trees dominated scan latency on network storage even though
+    # nothing below them can ever be returned. ``os.walk`` with in-place
+    # ``dirnames`` pruning skips those subtrees wholesale, the way
+    # ``recent_gallery_entries`` already does. ``is_excluded_gallery_path``
+    # stays the single exclusion rule at both levels: pruning applies it to
+    # directories, the per-entry check below still decides every file, so the
+    # result set is identical to the filtered rglob. The default
+    # ``followlinks=False`` never descends into symlinked directories,
+    # matching the no-follow behavior of the symlink skip below.
+    for dirpath, dirnames, filenames in os.walk(scan_root):
+        dirnames[:] = [d for d in dirnames if not is_excluded_gallery_path(Path(dirpath) / d)]
+        for name in [*dirnames, *filenames]:
+            item = Path(dirpath) / name
+            try:
+                # Skip symlinks to prevent filesystem traversal outside the data root.
+                if item.is_symlink():
+                    continue
+                if kind == "media" and not (item.is_file() and is_media_file(item)):
+                    continue
+                if kind == "folders" and not item.is_dir():
+                    continue
+                # "all" accepts everything
+                if is_excluded_gallery_path(item):
+                    continue
+                results.append(item)
+            except (OSError, PermissionError):
+                continue
+            if len(results) >= collection_cap:
+                break
         if len(results) >= collection_cap:
             break
-        try:
-            # Skip symlinks to prevent filesystem traversal outside the data root.
-            if item.is_symlink():
-                continue
-            if kind == "media" and not (item.is_file() and is_media_file(item)):
-                continue
-            if kind == "folders" and not item.is_dir():
-                continue
-            # "all" accepts everything
-            if is_excluded_gallery_path(item):
-                continue
-            results.append(item)
-        except (OSError, PermissionError):
-            continue
     sorted_results = sorted(results, key=lambda p: p.relative_to(app.DATA_FOLDER).as_posix().lower())[:effective_limit]
 
     # Store in cache (only for larger queries), evicting the oldest entry

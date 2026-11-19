@@ -147,6 +147,169 @@ class TestIterGalleryItemsSortsBeforeTruncating:
         assert len(items) <= 2
 
 
+class TestIterGalleryItemsPrunesExcludedTrees:
+    """iter_gallery_items must never open excluded directories (issue #687).
+
+    The pre-fix ``rglob("*")`` walk entered ``.trash``, the configured
+    thumbnail-cache directory, and dot-directories and filtered only per
+    entry, so large excluded trees dominated cold-scan latency on network
+    storage. These tests instrument ``os.scandir`` to prove no excluded
+    directory is opened, while visible media/folder results, the
+    case-insensitive sort, limits, root scoping, and the no-follow symlink
+    skip stay unchanged.
+    """
+
+    @staticmethod
+    def _bootstrap(monkeypatch, tmp_path, cache_dir_name=".thumb_cache"):
+        import os
+
+        data_dir = tmp_path / "data"
+        data_dir.mkdir(parents=True, exist_ok=True)
+        (data_dir / cache_dir_name).mkdir(exist_ok=True)
+
+        # Visible media in reverse-sorted readdir order, plus a visible
+        # subfolder with its own media for folder results and root scoping.
+        for name in ("zebra.png", "mango.jpg", "apple.webp"):
+            (data_dir / name).write_bytes(b"\x00")
+        (data_dir / "sub").mkdir()
+        (data_dir / "sub" / "inner.png").write_bytes(b"\x00")
+
+        # Deep excluded trees: an unpruned walk descends four levels and
+        # opens every directory below them.
+        for excluded in (cache_dir_name, ".trash", ".hidden"):
+            deep = data_dir / excluded / "a" / "b" / "c"
+            deep.mkdir(parents=True)
+            for n in range(3):
+                (deep / f"ghost_{n}.png").write_bytes(b"\x00")
+                (deep / f"sub{n}").mkdir()
+
+        monkeypatch.setenv("DATA_FOLDER", str(data_dir))
+        monkeypatch.setenv("AUTH_TYPE", "none")
+        monkeypatch.setenv("OIDC_ENABLED", "false")
+        monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
+
+        for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
+            sys.modules.pop(mod, None)
+
+        import app as app_module
+
+        app_module.DATA_FOLDER = data_dir
+        app_module.THUMBNAIL_CACHE_DIR = data_dir / cache_dir_name
+        app_module.app.config["TESTING"] = True
+
+        opened: list[str] = []
+        real_scandir = os.scandir
+
+        def tracking_scandir(path, *args, **kwargs):
+            opened.append(os.fspath(path))
+            return real_scandir(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "scandir", tracking_scandir)
+        return app_module, data_dir, opened
+
+    @staticmethod
+    def _rel(data_dir, paths):
+        return [p.relative_to(data_dir).as_posix() for p in paths]
+
+    @staticmethod
+    def _assert_never_opened(opened, data_dir, name):
+        import os
+
+        excluded_root = str(data_dir / name)
+        offenders = [
+            p for p in opened if p == excluded_root or p.startswith(excluded_root + os.sep)
+        ]
+        assert offenders == [], f"excluded tree {name!r} was opened: {offenders}"
+
+    def test_media_results_keep_visible_files_without_opening_excluded_trees(
+        self, monkeypatch, tmp_path
+    ):
+        app_module, data_dir, opened = self._bootstrap(monkeypatch, tmp_path)
+
+        media = app_module.iter_gallery_items(kind="media")
+
+        assert self._rel(data_dir, media) == [
+            "apple.webp",
+            "mango.jpg",
+            "sub/inner.png",
+            "zebra.png",
+        ]
+        for name in (".thumb_cache", ".trash", ".hidden"):
+            self._assert_never_opened(opened, data_dir, name)
+
+    def test_folder_results_keep_visible_dirs_without_opening_excluded_trees(
+        self, monkeypatch, tmp_path
+    ):
+        app_module, data_dir, opened = self._bootstrap(monkeypatch, tmp_path)
+
+        folders = app_module.iter_gallery_items(kind="folders")
+
+        assert self._rel(data_dir, folders) == ["sub"]
+        for name in (".thumb_cache", ".trash", ".hidden"):
+            self._assert_never_opened(opened, data_dir, name)
+
+    def test_kind_all_also_prunes_excluded_trees(self, monkeypatch, tmp_path):
+        app_module, data_dir, opened = self._bootstrap(monkeypatch, tmp_path)
+
+        everything = app_module.iter_gallery_items(kind="all")
+
+        assert self._rel(data_dir, everything) == [
+            "apple.webp",
+            "mango.jpg",
+            "sub",
+            "sub/inner.png",
+            "zebra.png",
+        ]
+        for name in (".thumb_cache", ".trash", ".hidden"):
+            self._assert_never_opened(opened, data_dir, name)
+
+    def test_configured_thumbnail_cache_name_is_pruned(self, monkeypatch, tmp_path):
+        """A custom non-dot cache name proves pruning follows the configured
+        THUMBNAIL_CACHE_DIR, not just the dot-prefix rule."""
+        app_module, data_dir, opened = self._bootstrap(
+            monkeypatch, tmp_path, cache_dir_name="covers_store"
+        )
+
+        media = app_module.iter_gallery_items(kind="media")
+
+        assert self._rel(data_dir, media) == [
+            "apple.webp",
+            "mango.jpg",
+            "sub/inner.png",
+            "zebra.png",
+        ]
+        self._assert_never_opened(opened, data_dir, "covers_store")
+
+    def test_limit_and_root_scope_still_apply(self, monkeypatch, tmp_path):
+        app_module, data_dir, _ = self._bootstrap(monkeypatch, tmp_path)
+
+        limited = app_module.iter_gallery_items(kind="media", limit=2)
+        assert [p.name for p in limited] == ["apple.webp", "mango.jpg"]
+
+        scoped = app_module.iter_gallery_items(kind="media", limit=1, root=data_dir / "sub")
+        assert [p.name for p in scoped] == ["inner.png"]
+
+    def test_root_inside_excluded_tree_returns_nothing(self, monkeypatch, tmp_path):
+        """Scanning with a root inside an excluded tree still yields no items:
+        the per-entry exclusion, not pruning, keeps deciding results."""
+        app_module, data_dir, _ = self._bootstrap(monkeypatch, tmp_path)
+
+        assert app_module.iter_gallery_items(kind="media", root=data_dir / ".trash") == []
+        assert app_module.iter_gallery_items(kind="folders", root=data_dir / ".trash") == []
+
+    def test_symlinks_still_skipped(self, monkeypatch, tmp_path):
+        app_module, data_dir, _ = self._bootstrap(monkeypatch, tmp_path)
+        (data_dir / "link.png").symlink_to(data_dir / "apple.webp")
+        (data_dir / "link_dir").symlink_to(data_dir / "sub")
+
+        media = self._rel(data_dir, app_module.iter_gallery_items(kind="media"))
+        assert "link.png" not in media
+        assert not any(p.startswith("link_dir/") for p in media)
+
+        folders = self._rel(data_dir, app_module.iter_gallery_items(kind="folders"))
+        assert folders == ["sub"]
+
+
 class TestLlmImagesHasMore:
     """llm_images should return has_more=True when scan is limited."""
 
