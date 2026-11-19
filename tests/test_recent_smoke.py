@@ -24,6 +24,23 @@ def _build_client(monkeypatch, tmp_path):
     return client
 
 
+def _ordered_walk(real_walk):
+    """Wrap os.walk to yield directories/files in sorted order.
+
+    Deterministic walk order regardless of filesystem readdir order, so
+    tests can assert which files the bounded scan counts before it stops.
+    """
+
+    def walk(top, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, **kwargs):
+            # Sort dirnames in place: os.walk's topdown pruning relies on
+            # mutating the yielded list, so a copy must not be passed up.
+            dirnames.sort()
+            yield dirpath, dirnames, sorted(filenames)
+
+    return walk
+
+
 def test_recent_cards_have_valid_view_and_thumb_links(monkeypatch, tmp_path):
     client = _build_client(monkeypatch, tmp_path)
 
@@ -191,3 +208,72 @@ def test_recent_banner_shown_when_enumeration_bound_hit(monkeypatch, tmp_path):
     html = client.get("/recent").get_data(as_text=True)
     assert "Gallery scan limit reached" in html
     assert "first 3 items" in html
+
+
+def test_recent_no_truncation_when_only_ineligible_entries_follow_limit(monkeypatch, tmp_path):
+    """Regression (issue #689): exactly RECENT_ENUMERATION_LIMIT eligible
+    media files plus trailing ineligible entries (non-media names, hidden
+    file, symlink) must NOT report scan_truncated — the old code flagged any
+    filename encountered after the count reached the limit."""
+    import os as os_module
+    _build_client(monkeypatch, tmp_path)
+    data_dir = tmp_path / "data"
+    import app as app_module  # after _build_client: conftest re-imports the module
+
+    # Eligible media: the 3 conftest/_build_client fixtures (copy.png,
+    # sample.png, cats/cat.jpg) plus photo.png = exactly the limit. docs/
+    # sorts after cats/, so *every* ineligible entry below is walked only
+    # after the count reached the bound — each trailing filter path
+    # (suffix miss, hidden name, non-regular file) is exercised beyond it,
+    # where the old code's per-filename limit check tripped.
+    monkeypatch.setattr(app_module, "RECENT_ENUMERATION_LIMIT", 4)
+    Image.new("RGB", (8, 8), color="blue").save(data_dir / "photo.png")
+    outside = tmp_path / "outside.png"
+    Image.new("RGB", (8, 8), color="red").save(outside)
+    (data_dir / "docs").mkdir()
+    (data_dir / "docs" / "README.md").write_text("not media")
+    (data_dir / "docs" / "notes.txt").write_text("not media")
+    (data_dir / "docs" / ".dotfile.png").write_bytes(b"hidden")
+    os_module.symlink(outside, data_dir / "docs" / "link.png")
+
+    # os.walk is a process-wide attribute; scope the patch to the scan call.
+    with monkeypatch.context() as m:
+        m.setattr(app_module.os, "walk", _ordered_walk(app_module.os.walk))
+        entries, truncated = app_module.recent_gallery_entries(50)
+    assert truncated is False
+    assert sorted(rel for rel, _, _ in entries) == [
+        "cats/cat.jpg",
+        "copy.png",
+        "photo.png",
+        "sample.png",
+    ]
+
+
+def test_recent_truncation_and_results_with_one_eligible_beyond_limit(monkeypatch, tmp_path):
+    """Issue #689 acceptance: one eligible image beyond the limit reports
+    truncation and does not join the results — here it lives in cats/, a
+    directory walked only after the count already reached the bound in the
+    root, proving the walk does not short-circuit the outer directory loop."""
+    _build_client(monkeypatch, tmp_path)
+    data_dir = tmp_path / "data"
+    import app as app_module  # after _build_client: conftest re-imports the module
+
+    # Eligible: copy.png + sample.png (fixtures) + img_0..img_2 = exactly
+    # the bound of 5, all in the root; cats/cat.jpg is then the first
+    # eligible file beyond it.
+    monkeypatch.setattr(app_module, "RECENT_ENUMERATION_LIMIT", 5)
+    for i in range(3):
+        Image.new("RGB", (8, 8), color="blue").save(data_dir / f"img_{i}.png")
+
+    # os.walk is a process-wide attribute; scope the patch to the scan call.
+    with monkeypatch.context() as m:
+        m.setattr(app_module.os, "walk", _ordered_walk(app_module.os.walk))
+        entries, truncated = app_module.recent_gallery_entries(50)
+    assert truncated is True
+    assert sorted(rel for rel, _, _ in entries) == [
+        "copy.png",
+        "img_0.png",
+        "img_1.png",
+        "img_2.png",
+        "sample.png",
+    ]

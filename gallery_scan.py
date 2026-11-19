@@ -383,10 +383,11 @@ def recent_gallery_entries(
 
     Returns:
         (entries, scan_truncated) where scan_truncated is True only when the
-        walk stopped at RECENT_ENUMERATION_LIMIT while more media remained
-        (Issue #349). Results are cached in _gallery_scan_cache, sharing the
-        TTL and the _invalidate_gallery_scan_cache() invalidation with
-        iter_gallery_items.
+        walk found an additional eligible media file beyond
+        RECENT_ENUMERATION_LIMIT (Issue #349); trailing ineligible entries
+        never flag truncation (Issue #689). Results are cached in
+        _gallery_scan_cache, sharing the TTL and the
+        _invalidate_gallery_scan_cache() invalidation with iter_gallery_items.
     """
     app = _app()
     scan_root = root if root is not None else app.DATA_FOLDER
@@ -420,11 +421,6 @@ def recent_gallery_entries(
         # this matches is_excluded_gallery_path while skipping whole subtrees.
         dirnames[:] = [d for d in dirnames if not d.startswith(".") and d not in pruned_dir_names]
         for name in filenames:
-            if scanned >= app.RECENT_ENUMERATION_LIMIT:
-                # A further media file exists beyond the bound: the newest
-                # items may hide past it (Issue #349).
-                scan_truncated = True
-                break
             if name.startswith(".") or name in pruned_dir_names:
                 continue
             if os.path.splitext(name)[1].lower() not in media_suffixes:
@@ -440,6 +436,14 @@ def recent_gallery_entries(
                 continue
             if not stat.S_ISREG(st.st_mode):
                 continue
+            if scanned >= app.RECENT_ENUMERATION_LIMIT:
+                # A further *eligible* media file exists beyond the bound:
+                # the newest items may hide past it (Issue #349). Trailing
+                # ineligible entries (READMEs, hidden files, symlinks) must
+                # not flag truncation (Issue #689), so this check runs only
+                # after every eligibility filter.
+                scan_truncated = True
+                break
             scanned += 1
             rel = os.path.relpath(entry_path, data_root).replace(os.sep, "/")
             key = (st.st_mtime, rel.lower())
