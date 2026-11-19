@@ -383,8 +383,9 @@ def recent_gallery_entries(
 
     Returns:
         (entries, scan_truncated) where scan_truncated is True only when the
-        walk stopped at RECENT_ENUMERATION_LIMIT while more media remained
-        (Issue #349). Results are cached in _gallery_scan_cache, sharing the
+        walk found an additional eligible media file beyond
+        RECENT_ENUMERATION_LIMIT (Issue #349); trailing ineligible entries
+        never flag truncation (Issue #689). Results are cached in _gallery_scan_cache, sharing the
         TTL and the _invalidate_gallery_scan_cache() invalidation with
         iter_gallery_items.
     """

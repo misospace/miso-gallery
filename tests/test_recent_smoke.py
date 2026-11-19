@@ -242,6 +242,7 @@ def test_recent_no_truncation_when_only_ineligible_entries_follow_limit(monkeypa
 def test_recent_truncation_and_results_with_one_eligible_beyond_limit(monkeypatch, tmp_path):
     """Issue #689 acceptance: adding one eligible image beyond the limit
     reports truncation, and the extra image does not join the results."""
+    import os as os_module
     _build_client(monkeypatch, tmp_path)
     data_dir = tmp_path / "data"
     import app as app_module  # after _build_client: conftest re-imports the module
@@ -253,8 +254,7 @@ def test_recent_truncation_and_results_with_one_eligible_beyond_limit(monkeypatc
     for i in range(3):
         target = data_dir / f"img_{i}.png"
         Image.new("RGB", (8, 8), color="blue").save(target)
-        import os
-        os.utime(target, (base + i, base + i))
+        os_module.utime(target, (base + i, base + i))
 
     real_walk = app_module.os.walk
 
