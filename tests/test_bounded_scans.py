@@ -36,6 +36,11 @@ def _build_bounded_client(monkeypatch, tmp_path):
     monkeypatch.setenv("OIDC_ENABLED", "false")
     monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
     monkeypatch.setenv("LLM_API_KEYS", "agent-key")
+    # Same in-memory rate limiter opt-in as conftest.build_client (issue #693):
+    # without it, security.rate_limit fails closed with 503 when this file runs
+    # in isolation and the guard has not been opened by an earlier test.
+    monkeypatch.setenv("ALLOW_INMEMORY_RATE_LIMIT", "1")
+    monkeypatch.setenv("WEB_CONCURRENCY", "1")
 
     # llm_api must be popped with auth for the same reason as in conftest.py:
     # it binds require_api_key_with_scope from auth at import time.
@@ -175,6 +180,10 @@ class TestLlmImagesHasMore:
         monkeypatch.setenv("OIDC_ENABLED", "false")
         monkeypatch.setenv("SECRET_KEY", "test-secret-ci-gateway")
         monkeypatch.setenv("LLM_API_KEYS", "agent-key")
+        # See _build_bounded_client: the in-memory rate limiter opt-in keeps
+        # this request working when the file runs in isolation (issue #693).
+        monkeypatch.setenv("ALLOW_INMEMORY_RATE_LIMIT", "1")
+        monkeypatch.setenv("WEB_CONCURRENCY", "1")
 
         for mod in ("auth", "oidc", "llm_api", "gallery_scan", "app"):
             sys.modules.pop(mod, None)
