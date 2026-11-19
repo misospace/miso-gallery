@@ -183,6 +183,35 @@ def test_batch_remove_thumbnails_requires_exact_first_segment_match(monkeypatch,
     assert junk.exists(), "an unrelated file must survive"
 
 
+def test_batch_remove_thumbnails_deletes_extensionless_identity_file(monkeypatch, tmp_path):
+    """Issue #688 documented delta: a cache file named exactly ``<identity>``,
+    with no dot-delimited stat suffix, is now deleted. ``thumbnail_filename``
+    never writes this shape, so it is unreachable in practice; the old
+    ``startswith(identity + ".")`` scan left such a file in place, and this
+    test pins the new first-segment behavior deliberately."""
+    import app as app_module
+
+    cache = tmp_path / "thumbs"
+    cache.mkdir()
+    monkeypatch.setattr(app_module, "THUMBNAIL_CACHE_DIR", cache)
+    monkeypatch.setattr(thumbnails, "ensure_thumbnail_cache_dir", lambda: None)
+
+    identity = _thumbnail_path_identity("cats/cat")
+    extensionless = cache / identity
+    other_identity_file = cache / _thumbnail_path_identity("other/img")
+    for f in (extensionless, other_identity_file):
+        f.write_bytes(b"x")
+
+    app_module.batch_remove_thumbnails(["cats/cat"])
+
+    assert not extensionless.exists(), (
+        "a file named exactly the requested identity must be deleted"
+    )
+    assert other_identity_file.exists(), (
+        "a file named exactly an unrequested identity must survive"
+    )
+
+
 def test_batch_remove_thumbnails_walks_the_cache_dir_exactly_once(monkeypatch, tmp_path):
     """Issue #688: one cleanup call performs a single directory walk and at most
     one identity membership test per entry — never a per-prefix rescan."""
