@@ -24,6 +24,23 @@ def _build_client(monkeypatch, tmp_path):
     return client
 
 
+def _ordered_walk(real_walk):
+    """Wrap os.walk to yield directories/files in sorted order.
+
+    Deterministic walk order regardless of filesystem readdir order, so
+    tests can assert which files the bounded scan counts before it stops.
+    """
+
+    def walk(top, **kwargs):
+        for dirpath, dirnames, filenames in real_walk(top, **kwargs):
+            # Sort dirnames in place: os.walk's topdown pruning relies on
+            # mutating the yielded list, so a copy must not be passed up.
+            dirnames.sort()
+            yield dirpath, dirnames, sorted(filenames)
+
+    return walk
+
+
 def test_recent_cards_have_valid_view_and_thumb_links(monkeypatch, tmp_path):
     client = _build_client(monkeypatch, tmp_path)
 
@@ -217,19 +234,10 @@ def test_recent_no_truncation_when_only_ineligible_entries_follow_limit(monkeypa
     (data_dir / "docs").mkdir()
     (data_dir / "docs" / "README.md").write_text("not media")
 
-    # Deterministic walk order regardless of filesystem readdir order.
-    real_walk = app_module.os.walk
-
-    def ordered_walk(top, **kwargs):
-        for dirpath, dirnames, filenames in real_walk(top, **kwargs):
-            # Sort dirnames in place: os.walk's topdown pruning relies on
-            # mutating the yielded list, so a copy must not be passed up.
-            dirnames.sort()
-            yield dirpath, dirnames, sorted(filenames)
-
-    monkeypatch.setattr(app_module.os, "walk", ordered_walk)
-
-    entries, truncated = app_module.recent_gallery_entries(50)
+    # os.walk is a process-wide attribute; scope the patch to the scan call.
+    with monkeypatch.context() as m:
+        m.setattr(app_module.os, "walk", _ordered_walk(app_module.os.walk))
+        entries, truncated = app_module.recent_gallery_entries(50)
     assert truncated is False
     assert sorted(rel for rel, _, _ in entries) == [
         "cats/cat.jpg",
@@ -240,36 +248,30 @@ def test_recent_no_truncation_when_only_ineligible_entries_follow_limit(monkeypa
 
 
 def test_recent_truncation_and_results_with_one_eligible_beyond_limit(monkeypatch, tmp_path):
-    """Issue #689 acceptance: adding one eligible image beyond the limit
-    reports truncation, and the extra image does not join the results."""
-    import os as os_module
+    """Issue #689 acceptance: one eligible image beyond the limit reports
+    truncation and does not join the results — here it lives in cats/, a
+    directory walked only after the count already reached the bound in the
+    root, proving the walk does not short-circuit the outer directory loop."""
     _build_client(monkeypatch, tmp_path)
     data_dir = tmp_path / "data"
     import app as app_module  # after _build_client: conftest re-imports the module
 
-    # Eligible media: fixtures copy.png + sample.png + cats/cat.jpg plus
-    # img_0..img_2 = 6 > limit 3.
-    monkeypatch.setattr(app_module, "RECENT_ENUMERATION_LIMIT", 3)
-    base = 2_000_000_000
+    # Eligible: copy.png + sample.png (fixtures) + img_0..img_2 = exactly
+    # the bound of 5, all in the root; cats/cat.jpg is then the first
+    # eligible file beyond it.
+    monkeypatch.setattr(app_module, "RECENT_ENUMERATION_LIMIT", 5)
     for i in range(3):
-        target = data_dir / f"img_{i}.png"
-        Image.new("RGB", (8, 8), color="blue").save(target)
-        os_module.utime(target, (base + i, base + i))
+        Image.new("RGB", (8, 8), color="blue").save(data_dir / f"img_{i}.png")
 
-    real_walk = app_module.os.walk
-
-    def ordered_walk(top, **kwargs):
-        for dirpath, dirnames, filenames in real_walk(top, **kwargs):
-            # Sort dirnames in place: os.walk's topdown pruning relies on
-            # mutating the yielded list, so a copy must not be passed up.
-            dirnames.sort()
-            yield dirpath, dirnames, sorted(filenames)
-
-    monkeypatch.setattr(app_module.os, "walk", ordered_walk)
-
-    entries, truncated = app_module.recent_gallery_entries(50)
+    # os.walk is a process-wide attribute; scope the patch to the scan call.
+    with monkeypatch.context() as m:
+        m.setattr(app_module.os, "walk", _ordered_walk(app_module.os.walk))
+        entries, truncated = app_module.recent_gallery_entries(50)
     assert truncated is True
-    # Sorted walk counted copy.png, img_0.png, img_1.png; img_2.png is the
-    # first eligible file beyond the bound, so the walk stops there and it
-    # never reaches the results.
-    assert sorted(rel for rel, _, _ in entries) == ["copy.png", "img_0.png", "img_1.png"]
+    assert sorted(rel for rel, _, _ in entries) == [
+        "copy.png",
+        "img_0.png",
+        "img_1.png",
+        "img_2.png",
+        "sample.png",
+    ]

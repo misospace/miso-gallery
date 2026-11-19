@@ -385,9 +385,9 @@ def recent_gallery_entries(
         (entries, scan_truncated) where scan_truncated is True only when the
         walk found an additional eligible media file beyond
         RECENT_ENUMERATION_LIMIT (Issue #349); trailing ineligible entries
-        never flag truncation (Issue #689). Results are cached in _gallery_scan_cache, sharing the
-        TTL and the _invalidate_gallery_scan_cache() invalidation with
-        iter_gallery_items.
+        never flag truncation (Issue #689). Results are cached in
+        _gallery_scan_cache, sharing the TTL and the
+        _invalidate_gallery_scan_cache() invalidation with iter_gallery_items.
     """
     app = _app()
     scan_root = root if root is not None else app.DATA_FOLDER
