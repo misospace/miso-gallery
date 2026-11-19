@@ -65,11 +65,11 @@ def _app():
     """Return the live ``app`` module.
 
     The helpers below rely on ``DATA_FOLDER``, ``THUMBNAIL_CACHE_DIR``,
-    ``IMAGE_EXTENSIONS``, ``GALLERY_SCAN_LIMIT``, ``sanitize_rel_path`` and
-    ``iter_gallery_items``. The scan helpers moved to ``gallery_scan.py``
-    (issue #521) and ``app.py`` re-imports them, so resolving everything
-    through ``app`` at call time keeps monkeypatching of ``app`` attributes
-    effective and avoids a circular import.
+    ``IMAGE_EXTENSIONS``, ``GALLERY_SCAN_LIMIT``, ``sanitize_rel_path``,
+    ``is_excluded_gallery_path`` and ``iter_gallery_items``. The scan helpers
+    moved to ``gallery_scan.py`` (issue #521) and ``app.py`` re-imports them,
+    so resolving everything through ``app`` at call time keeps monkeypatching
+    of ``app`` attributes effective and avoids a circular import.
     """
     import app
 
@@ -168,7 +168,6 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
     effective_limit = limit if limit is not None else app.GALLERY_SCAN_LIMIT
 
     ensure_thumbnail_cache_dir()
-    excluded_dirs = {app.THUMBNAIL_CACHE_DIR.name, ".trash"}
     stats = {"checked": 0, "regenerated": 0, "failed": 0}
 
     for item in app.DATA_FOLDER.rglob("*"):
@@ -178,14 +177,12 @@ def run_thumbnail_integrity_check(limit: int | None = None) -> dict[str, int]:
             continue
         if not item.is_file() or item.suffix.lower() not in app.IMAGE_EXTENSIONS:
             continue
-        if item.name.startswith("."):
+        # Same exclusion rule as every other gallery walk: the thumbnail cache,
+        # ``.trash``, and dot-prefixed paths.
+        if app.is_excluded_gallery_path(item):
             continue
 
-        rel_path = item.relative_to(app.DATA_FOLDER)
-        if any(part in excluded_dirs or part.startswith(".") for part in rel_path.parts):
-            continue
-
-        rel_posix = rel_path.as_posix()
+        rel_posix = item.relative_to(app.DATA_FOLDER).as_posix()
         stats["checked"] += 1
         if stats["checked"] > effective_limit:
             break
