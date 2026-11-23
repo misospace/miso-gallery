@@ -6,7 +6,6 @@ import hmac
 import json
 import logging
 import os
-import secrets
 from functools import wraps
 from typing import Literal
 
@@ -181,14 +180,16 @@ def _keys_for_scope(scope: Literal["read", "write"]) -> list[str]:
     return keys
 
 
-def _api_key_matches(token: str, configured: str) -> bool:
-    """Constant-time comparison of two API keys over their UTF-8 byte encoding.
+def _constant_time_eq(a: str, b: str) -> bool:
+    """Constant-time equality of two strings, compared over their UTF-8 bytes.
 
-    secrets.compare_digest() only accepts ASCII ``str`` arguments; comparing
-    raw ``str`` raised TypeError for a non-ASCII bearer token and turned a
-    wrong-token request into an unhandled 500 instead of a 401 (issue #653).
+    ``compare_digest`` accepts ASCII ``str`` arguments only; comparing raw
+    ``str`` raised TypeError for a non-ASCII bearer token or password and
+    turned a wrong-secret attempt into an unhandled 500 instead of a 401 /
+    failed login (issues #653, #648). Comparing the UTF-8 encodings keeps
+    the comparison constant time while accepting any text.
     """
-    return secrets.compare_digest(token.encode("utf-8"), configured.encode("utf-8"))
+    return hmac.compare_digest(a.encode("utf-8"), b.encode("utf-8"))
 
 
 def verify_api_key_scope(token: str, scope: Literal["read", "write"]) -> bool:
@@ -226,7 +227,7 @@ def _find_matching_key(
     if not token or not keys:
         return False, None, None
     for configured in keys:
-        if _api_key_matches(token, configured):
+        if _constant_time_eq(token, configured):
             return True, _api_key_hint(configured), scope
     return False, None, None
 
@@ -263,10 +264,7 @@ print(generate_password_hash('your-password'))"
         "deprecated in a future release. Migrate to a hashed password by "
         "setting ADMIN_PASSWORD to a Werkzeug hash (e.g., pbkdf2:sha256:...)."
     )
-    # Compare UTF-8 bytes: hmac.compare_digest() rejects non-ASCII ``str``
-    # arguments with TypeError, which would turn a wrong-password attempt
-    # into an unhandled 500 instead of a failed login (issue #648).
-    return hmac.compare_digest(password.encode("utf-8"), stored.encode("utf-8"))
+    return _constant_time_eq(password, stored)
 
 
 def require_auth(view_fn):
