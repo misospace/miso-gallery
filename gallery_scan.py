@@ -375,7 +375,12 @@ def iter_gallery_items(
             # the per-entry check still decides every item, so excluded
             # paths cannot enter ``results`` either way.
             dirnames[:] = [d for d in dirnames if not is_excluded_gallery_path(Path(dirpath) / d)]
-        for name in [*dirnames, *filenames]:
+        # A media item is never a directory, so for ``media`` only the file
+        # names are listed. ``is_media_file()`` stays a file-only predicate
+        # (never called on directory entries) and the walk does no per-entry
+        # work on directories it can only discard.
+        names = filenames if kind == "media" else [*dirnames, *filenames]
+        for name in names:
             item = Path(dirpath) / name
             try:
                 # Skip symlinks to prevent filesystem traversal outside the data root.
