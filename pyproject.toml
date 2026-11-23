@@ -16,7 +16,7 @@ dependencies = [
     "Werkzeug>=3.1.9,<4",
     "gunicorn>=27.0.1,<28",
     "Authlib>=1.9.10,<2",
-    "redis>=8.1.0,<9",
+    "redis>=8.2.0,<9",
     "cryptography>=50.0.2",
 ]
 
@@ -24,7 +24,7 @@ dependencies = [
 dev = [
     "pytest>=9.2.0,<10",
     "ruff>=0.17.6,<1",
-    "coverage>=7.17.4,<8",
+    "coverage>=7.17.5,<8",
 ]
 
 # Flat py-modules list is deliberate: runtime modules live at the repo root, and
