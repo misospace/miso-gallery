@@ -381,7 +381,9 @@ def iter_gallery_items(
                 # Skip symlinks to prevent filesystem traversal outside the data root.
                 if item.is_symlink():
                     continue
-                if kind == "media" and not (item.is_file() and is_media_file(item)):
+                # is_media_file() rejects non-files itself, so no separate
+                # is_file() probe (one stat fewer per media item per scan).
+                if kind == "media" and not is_media_file(item):
                     continue
                 if kind == "folders" and not item.is_dir():
                     continue

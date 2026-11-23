@@ -169,7 +169,9 @@ def register_llm_routes(app, log_security_event) -> None:
             rel_path = app_module._gallery_item_rel_path(item)
             if rel_path is None:
                 continue
-            if query and query not in rel_path.lower() and query not in item.name.lower():
+            # rel_path always ends in item.name, so a query matching the name
+            # also matches rel_path; one containment test decides both.
+            if query and query not in rel_path.lower():
                 continue
             filtered.append(item)
         paginated, total, pg, pp, has_more = app_module._paginate(filtered, page=page, per_page=per_page)
