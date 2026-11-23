@@ -3,7 +3,7 @@ gunicorn==27.0.1
 Pillow==13.0.0
 Authlib==1.9.10
 requests==2.34.2
-redis==8.1.0
+redis==8.2.0
 Werkzeug==3.1.9
 cryptography>=50.0.2
 # Pin pip to address PYSEC-2026-196 / CVE-2026-8643
