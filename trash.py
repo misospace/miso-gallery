@@ -349,36 +349,29 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
     rel = file_path.relative_to(data_folder).as_posix()
     ts = int(time.time())
 
-    if file_path.is_file():
-        claim = _claim_trash_dest(td, file_path.name, ts)
-        if claim is None:
-            return False
-        dest, claim_fd = claim
+    is_dir = file_path.is_dir()
+    if not is_dir and not file_path.is_file():
+        return False
+
+    claim = _claim_trash_dest(td, file_path.name, ts)
+    if claim is None:
+        return False
+    dest, claim_fd = claim
+    try:
         try:
-            try:
-                file_path.rename(dest)
-            except OSError:
+            # Prefer atomic rename (same filesystem) for immediate move. Only a
+            # directory has a fallback: copytree+rmtree when the rename fails
+            # (cross-device). A file cannot be staged that way and fails instead.
+            file_path.rename(dest)
+        except OSError:
+            if not is_dir:
                 _release_claim(dest, claim_fd)
                 return False
-            return _finish_trash_move(dest, claim_fd, rel)
-        finally:
-            _close_claim(claim_fd)
-    elif file_path.is_dir():
-        claim = _claim_trash_dest(td, file_path.name, ts)
-        if claim is None:
-            return False
-        dest, claim_fd = claim
-        try:
             try:
-                # Prefer atomic rename (same filesystem) for immediate move.
-                # Fall back to copytree+rmtree only when cross-device rename fails.
-                try:
-                    file_path.rename(dest)
-                except OSError:
-                    # symlinks=True keeps links as links (matching rename) so the
-                    # copy cannot inline symlink-target contents into the trash tree.
-                    shutil.copytree(file_path, dest, symlinks=True)
-                    shutil.rmtree(file_path)
+                # symlinks=True keeps links as links (matching rename) so the
+                # copy cannot inline symlink-target contents into the trash tree.
+                shutil.copytree(file_path, dest, symlinks=True)
+                shutil.rmtree(file_path)
             except OSError:
                 # Clean up the partial copy on failure and release the claim.
                 # The destination can only hold our own (partial) copy while
@@ -389,11 +382,9 @@ def move_to_trash(file_path: Path, data_folder: Path) -> bool:
                     shutil.rmtree(dest, ignore_errors=True)
                 _release_claim(dest, claim_fd)
                 return False
-            return _finish_trash_move(dest, claim_fd, rel)
-        finally:
-            _close_claim(claim_fd)
-    else:
-        return False
+        return _finish_trash_move(dest, claim_fd, rel)
+    finally:
+        _close_claim(claim_fd)
 
 
 def _finish_trash_move(dest: Path, claim_fd: int, rel: str) -> bool:
@@ -1321,85 +1312,67 @@ def restore_from_trash(item_name: str, data_folder: Path) -> bool:
                 # populated dest would rmtree the winner's restored media.
                 if dest_fd is not None:
                     # Contained staging (issue #617): re-verify the pinned
-                    # descriptor, then create AND populate the stage through
-                    # it. Creating or copying through the parent *path*
-                    # would re-resolve it — a parent swapped for a symlink
-                    # after the descriptor was pinned made the copy write
-                    # payload bytes outside DATA_FOLDER. Every stage-side
-                    # operation below is therefore relative to the pinned
-                    # descriptor (mkdir/openat with dir_fd), and the staged
-                    # rename picks the stage up from the pinned directory
-                    # via src_dir_fd instead of through the path.
+                    # descriptor before touching the destination. A parent
+                    # swapped for a symlink after the descriptor was pinned
+                    # must fail here, before any stage path is created
+                    # through it.
                     _require_verified_dest_fd(dest_fd, verified_parent, resolved_data)
-                    stage_name = f"{STAGE_PREFIX}{uuid.uuid4().hex}"
-                    # Path form of the stage, for the bookkeeping that has
-                    # no descriptor variant: the maintenance lock file and
-                    # the best-effort failure cleanup. Under normal
-                    # conditions this is exactly the stage's own path; if
-                    # the parent is swapped mid-restore it lands elsewhere
-                    # and the (empty or attacker-relocated) stage is left
-                    # for the orphan-stage upkeep instead.
-                    stage = dest.parent / stage_name
-                    # Mark the stage as actively owned *before* copying into
-                    # it. Trash maintenance (empty/purge in any worker)
-                    # consults this lock and must skip the stage while a
-                    # live process holds it; see
-                    # _reclaim_orphan_restore_stages.
-                    stage_lock = _acquire_stage_lock(stage)
-                    stage_failed = True
-                    stage_fd: int | None = None
-                    try:
+                stage_name = f"{STAGE_PREFIX}{uuid.uuid4().hex}"
+                # Path form of the stage, for the bookkeeping that has no
+                # descriptor variant: the maintenance lock file and the
+                # best-effort failure cleanup. Under normal conditions this is
+                # exactly the stage's own path; if the parent is swapped
+                # mid-restore it lands elsewhere and the (empty or
+                # attacker-relocated) stage is left for the orphan-stage
+                # upkeep instead.
+                stage = dest.parent / stage_name
+                # Mark the stage as actively owned *before* copying into it.
+                # Trash maintenance (empty/purge in any worker) consults this
+                # lock and must skip the stage while a live process holds it;
+                # see _reclaim_orphan_restore_stages.
+                stage_lock = _acquire_stage_lock(stage)
+                stage_failed = True
+                try:
+                    if dest_fd is not None:
+                        # Creating or copying through the parent *path* would
+                        # re-resolve it — a parent swapped for a symlink after
+                        # the descriptor was pinned made the copy write payload
+                        # bytes outside DATA_FOLDER. Every stage-side operation
+                        # is therefore relative to the pinned descriptor
+                        # (mkdir/openat with dir_fd), and the staged rename
+                        # picks the stage up from the pinned directory via
+                        # src_dir_fd instead of through the path.
                         os.mkdir(stage_name, 0o700, dir_fd=dest_fd)
                         stage_fd = os.open(
                             stage_name,
                             os.O_RDONLY | getattr(os, "O_DIRECTORY", 0),
                             dir_fd=dest_fd,
                         )
-                        _copy_tree_into_dirfd(item, stage_fd)
                         try:
-                            _rename_onto_dest(
-                                stage_name, dest, dest_fd,
-                                verified_parent=verified_parent,
-                                resolved_data=resolved_data,
-                                src_dir_fd=dest_fd,
-                            )
-                        except OSError:
-                            # Another restore populated dest concurrently, or
-                            # rename crossed devices again. Clean up only our
-                            # stage; leave dest alone (it may belong to the
-                            # winner or to a later retry).
-                            shutil.rmtree(stage, ignore_errors=True)
-                            raise
-                        stage_failed = False
-                    finally:
-                        if stage_fd is not None:
+                            _copy_tree_into_dirfd(item, stage_fd)
+                        finally:
                             os.close(stage_fd)
-                        if stage_failed:
-                            shutil.rmtree(stage, ignore_errors=True)
-                        _release_stage_lock(stage, stage_lock)
-                else:
-                    # No descriptor support on this platform: the historical
-                    # path-based staging, with the check-then-copy window the
-                    # descriptor paths above close.
-                    stage = dest.parent / f"{STAGE_PREFIX}{uuid.uuid4().hex}"
-                    stage_lock = _acquire_stage_lock(stage)
-                    stage_failed = True
-                    try:
+                        _rename_onto_dest(
+                            stage_name, dest, dest_fd,
+                            verified_parent=verified_parent,
+                            resolved_data=resolved_data,
+                            src_dir_fd=dest_fd,
+                        )
+                    else:
+                        # No descriptor support on this platform: the
+                        # historical path-based staging, with the
+                        # check-then-copy window the descriptor path closes.
                         shutil.copytree(item, stage, symlinks=True)
-                        try:
-                            _rename_onto_dest(stage, dest, None)
-                        except OSError:
-                            # Another restore populated dest concurrently, or
-                            # rename crossed devices again. Clean up only our
-                            # stage; leave dest alone (it may belong to the
-                            # winner or to a later retry).
-                            shutil.rmtree(stage, ignore_errors=True)
-                            raise
-                        stage_failed = False
-                    finally:
-                        if stage_failed and stage.exists():
-                            shutil.rmtree(stage, ignore_errors=True)
-                        _release_stage_lock(stage, stage_lock)
+                        _rename_onto_dest(stage, dest, None)
+                    stage_failed = False
+                finally:
+                    if stage_failed:
+                        # Another restore populated dest concurrently, or the
+                        # rename crossed devices again. Clean up only our
+                        # stage; leave dest alone (it may belong to the winner
+                        # or to a later retry).
+                        shutil.rmtree(stage, ignore_errors=True)
+                    _release_stage_lock(stage, stage_lock)
                 try:
                     shutil.rmtree(item)
                 except OSError:
