@@ -373,4 +373,4 @@ The **Release** workflow (triggered by a published release) validates that `APP_
 
 ## License
 
-MIT
+[AGPL-3.0-only](LICENSE). Historical license declarations and existing grants are described in [licensing and corresponding source](docs/licensing.md).
