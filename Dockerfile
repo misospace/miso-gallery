@@ -1,6 +1,11 @@
 FROM python:3.15-slim
 
+LABEL org.opencontainers.image.licenses="AGPL-3.0-only" \
+      org.opencontainers.image.source="https://github.com/misospace/miso-gallery"
+
 WORKDIR /app
+COPY LICENSE NOTICE /usr/share/doc/miso-gallery/
+COPY LICENSES/GPL-3.0.txt /usr/share/doc/miso-gallery/LICENSES/GPL-3.0.txt
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
